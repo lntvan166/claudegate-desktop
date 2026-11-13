@@ -17,12 +17,19 @@ DURATION="${ARGS[1]:-60}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 TAB="$(printf '\t')"
 
+case "$DURATION" in
+  ''|*[!0-9]*|0) echo "duration must be a positive integer, got: $DURATION" >&2; exit 2 ;;
+esac
+if [ -n "${READONLY_PROOF_HEADLESS:-}" ] && ! command -v xvfb-run >/dev/null 2>&1; then
+  echo "READONLY_PROOF_HEADLESS is set but xvfb-run is not installed" >&2; exit 2
+fi
 [ -d "$HOME_DIR" ] || { echo "no such directory: $HOME_DIR" >&2; exit 2; }
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 snap() { find "$HOME_DIR" -type f -printf '%p %s %T@\n' | sort > "$1"; }
 
+START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 snap "$TMP/before.txt"
 echo "before: $(wc -l < "$TMP/before.txt") files, sha256 $(sha256sum < "$TMP/before.txt" | cut -c1-16)"
 
@@ -32,19 +39,23 @@ if [ "$NO_APP" = 0 ]; then
   [ -x "$BIN" ] || { echo "no built binary under target/ (run cargo build)" >&2; exit 2; }
   echo "running $BIN for ${DURATION}s against $HOME_DIR"
   if [ -n "${READONLY_PROOF_HEADLESS:-}" ]; then
-    CLAUDEGATE_HOME="$HOME_DIR" env -u WAYLAND_DISPLAY GDK_BACKEND=x11 xvfb-run -a "$BIN" &
+    CLAUDEGATE_HOME="$HOME_DIR" setsid env -u WAYLAND_DISPLAY GDK_BACKEND=x11 xvfb-run -a "$BIN" &
   else
-    CLAUDEGATE_HOME="$HOME_DIR" "$BIN" &
+    CLAUDEGATE_HOME="$HOME_DIR" setsid "$BIN" &
   fi
   PID=$!
-  sleep "$DURATION"
-  # stop the app (and xvfb-run's children)
-  pkill -P "$PID" 2>/dev/null
-  kill "$PID" 2>/dev/null
+  # setsid made PID a process-group leader: kill the whole group on any exit.
+  stop_app() { kill -- "-$PID" 2>/dev/null; pkill -P "$PID" 2>/dev/null; kill "$PID" 2>/dev/null; }
+  trap 'stop_app; rm -rf "$TMP"' EXIT
+  trap 'echo interrupted >&2; exit 130' INT TERM
+  sleep "$DURATION" &
+  wait $!
+  stop_app
   sleep 1
-  kill -9 "$PID" 2>/dev/null
+  kill -9 -- "-$PID" 2>/dev/null
   wait "$PID" 2>/dev/null
 fi
+END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 snap "$TMP/after.txt"
 echo "after:  $(wc -l < "$TMP/after.txt") files, sha256 $(sha256sum < "$TMP/after.txt" | cut -c1-16)"
@@ -65,12 +76,22 @@ cut -f1 "$TMP/b.tsv" > "$TMP/bp"; cut -f1 "$TMP/a.tsv" > "$TMP/ap"
   join -t "$TAB" "$TMP/b.tsv" "$TMP/a.tsv" | awk -F'\t' '$2!=$3{print "modified\t" $1}'
 } | sort -t "$TAB" -k2 > "$TMP/changes.tsv"
 
-LOG="$HOME_DIR/hook.log"
 while IFS="$TAB" read -r kind path; do
   echo "  $kind: $path"
-  if [ -f "$LOG" ]; then
-    last="$(grep -F -- "$path" "$LOG" | tail -n 1)"
-    [ -n "$last" ] && echo "    last hook.log: $last"
-  fi
 done < "$TMP/changes.tsv"
+
+# hook.log lines are "<iso-ts>Z <event> <workspace file>"; they never name the
+# session file, so show what the hook did during the run window instead.
+LOG="$HOME_DIR/hook.log"
+echo "hook.log activity $START .. $END (UTC, last 20):"
+win=""
+[ -f "$LOG" ] && win="$(awk -v s="$START" -v e="$END" '$1>=s && $1<=e' "$LOG" | tail -n 20)"
+if [ -n "$win" ]; then
+  printf '%s\n' "$win" | sed 's/^/  /'
+  echo "  (hook or extension wrote during the window; changes above are likely theirs)"
+elif grep -q '/sessions/' "$TMP/changes.tsv"; then
+  echo "  no hook activity in the window - investigate"
+else
+  echo "  none"
+fi
 exit 1
