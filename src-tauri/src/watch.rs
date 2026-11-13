@@ -1,7 +1,7 @@
 //! Live watcher: notify events on `<home>/sessions` and `<home>` are coalesced for 150 ms and
 //! turned into one `claudegate://changed` event. Read-only: nothing here creates or writes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -118,9 +118,53 @@ pub fn payload_for(batch: &[PathBuf], known: &[(String, PathBuf)]) -> Option<Cha
     Some(ChangedPayload { roots: a.roots })
 }
 
-/// Starts the watcher thread. Missing directories are skipped, never created.
-pub fn start(app: tauri::AppHandle, home: PathBuf, known: KnownMap) {
+/// Directories we want watched right now: `home` and `home/sessions` when they exist, else the
+/// nearest existing ancestor of `home` (so their creation is seen).
+pub fn desired_dirs(home: &Path, exists: &dyn Fn(&Path) -> bool) -> Vec<PathBuf> {
+    if exists(home) {
+        let mut v = vec![home.to_path_buf()];
+        let s = home.join("sessions");
+        if exists(&s) {
+            v.push(s);
+        }
+        return v;
+    }
+    home.ancestors()
+        .skip(1)
+        .find(|a| exists(a))
+        .map(|a| vec![a.to_path_buf()])
+        .unwrap_or_default()
+}
+
+/// Directories to attach now, given the set already watched.
+pub fn dirs_to_add(home: &Path, watched: &[PathBuf], exists: &dyn Fn(&Path) -> bool) -> Vec<PathBuf> {
+    desired_dirs(home, exists).into_iter().filter(|d| !watched.contains(d)).collect()
+}
+
+/// True when attaching `dirs` means the data we show may have appeared (home or sessions).
+pub fn needs_relist(home: &Path, dirs: &[PathBuf]) -> bool {
+    let s = home.join("sessions");
+    dirs.iter().any(|d| d == home || *d == s)
+}
+
+fn attach(w: &mut notify::RecommendedWatcher, home: &Path, watched: &mut Vec<PathBuf>) -> Vec<PathBuf> {
     use notify::{RecursiveMode, Watcher};
+    let mut done = vec![];
+    for d in dirs_to_add(home, watched, &|p: &Path| p.is_dir()) {
+        match w.watch(&d, RecursiveMode::NonRecursive) {
+            Ok(()) => {
+                watched.push(d.clone());
+                done.push(d);
+            }
+            Err(e) => eprintln!("claudegate: cannot watch {}: {e}", d.display()),
+        }
+    }
+    done
+}
+
+/// Starts the watcher thread. Missing directories are watched via an ancestor and attached when
+/// created; nothing here creates or writes.
+pub fn start(app: tauri::AppHandle, home: PathBuf, known: KnownMap) {
     use tauri::Emitter;
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
@@ -135,20 +179,22 @@ pub fn start(app: tauri::AppHandle, home: PathBuf, known: KnownMap) {
             return;
         }
     };
-    for dir in [home.join("sessions"), home.clone()] {
-        if dir.is_dir() {
-            if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
-                eprintln!("claudegate: cannot watch {}: {e}", dir.display());
-            }
-        }
-    }
+    let mut watched: Vec<PathBuf> = vec![];
+    attach(&mut watcher, &home, &mut watched);
+    let home2 = home.clone();
     std::thread::spawn(move || {
-        let _keep_alive = watcher;
         let mut co = Coalescer::new(Duration::from_millis(COALESCE_MS));
         loop {
             let wait = co.remaining(Instant::now()).unwrap_or(Duration::from_secs(3600));
             match rx.recv_timeout(wait) {
-                Ok(paths) => co.push(Instant::now(), paths),
+                Ok(paths) => {
+                    let added = attach(&mut watcher, &home2, &mut watched);
+                    if needs_relist(&home2, &added) {
+                        // a pseudo-change on a relist-trigger file: one empty-roots event
+                        co.push(Instant::now(), [home2.join("workspace-roots.json")]);
+                    }
+                    co.push(Instant::now(), paths);
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             }
@@ -161,7 +207,6 @@ pub fn start(app: tauri::AppHandle, home: PathBuf, known: KnownMap) {
         }
     });
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -241,5 +286,45 @@ mod tests {
             payload_for(&[PathBuf::from("/h/sessions/bbb.json")], &k),
             Some(ChangedPayload { roots: vec!["/ws/b".into()] })
         );
+    }
+
+    fn ex(set: &'static [&'static str]) -> impl Fn(&Path) -> bool {
+        move |p: &Path| set.iter().any(|s| Path::new(s) == p)
+    }
+
+    #[test]
+    fn fresh_machine_watches_nearest_ancestor() {
+        let home = Path::new("/u/.claudegate");
+        assert_eq!(desired_dirs(home, &ex(&["/", "/u"])), vec![PathBuf::from("/u")]);
+        assert_eq!(dirs_to_add(home, &[], &ex(&["/", "/u"])), vec![PathBuf::from("/u")]);
+    }
+
+    #[test]
+    fn home_created_attaches_home_and_requests_relist() {
+        let home = Path::new("/u/.claudegate");
+        let watched = vec![PathBuf::from("/u")];
+        let add = dirs_to_add(home, &watched, &ex(&["/", "/u", "/u/.claudegate"]));
+        assert_eq!(add, vec![home.to_path_buf()]);
+        assert!(needs_relist(home, &add));
+    }
+
+    #[test]
+    fn sessions_created_later_is_attached_once() {
+        let home = Path::new("/u/.claudegate");
+        let e = ex(&["/u", "/u/.claudegate", "/u/.claudegate/sessions"]);
+        let watched = vec![home.to_path_buf()];
+        let add = dirs_to_add(home, &watched, &e);
+        assert_eq!(add, vec![home.join("sessions")]);
+        assert!(needs_relist(home, &add));
+        let watched = vec![home.to_path_buf(), home.join("sessions")];
+        assert!(dirs_to_add(home, &watched, &e).is_empty());
+        assert!(!needs_relist(home, &[PathBuf::from("/u")]));
+    }
+
+    #[test]
+    fn deep_missing_home_steps_through_intermediates() {
+        let home = Path::new("/a/b/c");
+        assert_eq!(desired_dirs(home, &ex(&["/a"])), vec![PathBuf::from("/a")]);
+        assert_eq!(desired_dirs(home, &ex(&["/a", "/a/b"])), vec![PathBuf::from("/a/b")]);
     }
 }
