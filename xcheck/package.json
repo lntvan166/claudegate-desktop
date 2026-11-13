@@ -1,0 +1,12 @@
+{
+  "name": "claudegate-desktop-xcheck",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Feeds the shared fixtures through the extension's own TypeScript",
+  "scripts": {
+    "check": "tsx run.ts"
+  },
+  "devDependencies": {
+    "tsx": "4.23.15"
+  }
+}
