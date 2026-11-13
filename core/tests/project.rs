@@ -133,3 +133,18 @@ fn read_text_kinds() {
     fs::write(t.path().join("t"), "hé").unwrap();
     assert_eq!(read_text(&t.path().join("t")), TextFile::Text("hé".into()));
 }
+
+#[test]
+fn non_utf8_new_file_is_not_pending() {
+    // Parity with the extension's readFileOrNull (TextDecoder fatal): bytes that are not UTF-8
+    // read as "no content", so a created binary file is not a real change.
+    let h = tempfile::tempdir().unwrap();
+    let w = tempfile::tempdir().unwrap();
+    let root = w.path();
+    let bin = root.join("blob.bin");
+    fs::write(&bin, [0xffu8, 0xfe, 0x00, 0x80]).unwrap();
+    let mut files = serde_json::Map::new();
+    files.insert(bin.to_string_lossy().into(), entry(None));
+    write_session(h.path(), root, &session(files.into(), serde_json::json!([]), serde_json::json!({})));
+    assert!(load_project(h.path(), root).pending.is_empty());
+}

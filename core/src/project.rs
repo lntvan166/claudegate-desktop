@@ -98,10 +98,10 @@ fn record_item(primary: &str, scope: &str, r: &ReviewRecord) -> RecordItem {
     }
 }
 
+/// The file as the extension's `readFileOrNull` sees it: `None` when it is missing, unreadable
+/// or not valid UTF-8 (it decodes with `TextDecoder("utf-8", { fatal: true })`).
 fn read_disk(path: &str) -> Option<String> {
-    std::fs::read(path)
-        .ok()
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
+    std::fs::read(path).ok().and_then(|b| String::from_utf8(b).ok())
 }
 
 fn load_scope(
