@@ -3,3 +3,5 @@ node_modules/
 dist/
 .xcheck-cache/
 .superpowers/
+ui/public/icons/
+.taste-skill/

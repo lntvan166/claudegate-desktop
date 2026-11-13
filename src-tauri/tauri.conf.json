@@ -10,7 +10,7 @@
     "frontendDist": "../ui/dist"
   },
   "app": {
-    "windows": [{ "title": "ClaudeGate", "width": 1200, "height": 800 }],
+    "windows": [{ "title": "ClaudeGate", "width": 1200, "height": 800, "minWidth": 900, "minHeight": 560 }],
     "security": { "csp": null }
   },
   "bundle": {

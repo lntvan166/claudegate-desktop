@@ -1,0 +1,169 @@
+/* ClaudeGate Desktop theme. Every colour lives here as a custom property; components only
+   reference tokens.
+
+   Style: the taste-skill "framed sheet" app style (seed 1746260420). One tinted L-frame holds the
+   toolbar and the project list with no rule between them; the work sits on a sheet inset 8px from
+   the window's right and bottom edges, 1px edge, 16px corners, no shadow. Colour goes on data
+   only: pending files in the git "modified" amber, new files in the git "untracked" green, line
+   counts in green and red. The chrome is grey; selection is a neutral tone step. Dark mode keeps
+   the same structure on true neutral darks. Fonts are bundled (no network). */
+
+@import "@fontsource/ibm-plex-sans/latin-400.css";
+@import "@fontsource/ibm-plex-sans/latin-500.css";
+@import "@fontsource/ibm-plex-sans/latin-600.css";
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";
+
+:root {
+  color-scheme: light dark;
+
+  --font: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* One job: file paths and the figures in rows. */
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", "DejaVu Sans Mono", monospace;
+  --fs-title: 20px;
+  --fs-section: 15px;
+  --fs-body: 13px;
+  --fs-small: 12px;
+  --fs-meta: 11px;
+
+  --toolbar-h: 48px;
+  --sidebar-w: 228px;
+  --tree-w: 372px;
+  --sheet-inset: 8px;
+  --radius-sheet: 16px;
+  --radius-control: 6px;
+  --radius-chip: 4px;
+  --row-h: 26px;
+  --indent: 14px;
+  --pad: 20px;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+
+  /* light */
+  --frame: #f6f7f8;
+  --surface: #ffffff;
+  --raised: #f4f6f8;
+  --hover: #f2f3f5;
+  --active: #e9ebed;
+  --border: #e6e8ea;
+  --rule: #eff0f2;
+  --guide: #e9eaec;
+  --text: #131416;
+  --muted: #5d5f63;
+  --faint: #626468;
+  --mark: #1b6c80;
+  --pending: #9c5700;
+  --untracked: #1e7b4f;
+  --positive: #1e7b4f;
+  --negative: #c4242a;
+  --warning-bg: #fffbeb;
+  --warning-ink: #92400e;
+  --error-bg: #ffedea;
+  --error-ink: #831c1e;
+  --focus-ring: #1b6c80;
+  --scrollbar: rgba(19, 20, 22, 0.16);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --frame: #0c0c0d;
+    --surface: #151516;
+    --raised: #1c1c1e;
+    --hover: #1d1d1f;
+    --active: #2a2a2d;
+    --border: #252527;
+    --rule: #1f1f21;
+    --guide: #262628;
+    --text: #f4f4f5;
+    --muted: #b4b4b8;
+    --faint: #949498;
+    --mark: #5fb3c6;
+    --pending: #f2a65a;
+    --untracked: #4fc985;
+    --positive: #4fc985;
+    --negative: #f0646e;
+    --warning-bg: #2a2412;
+    --warning-ink: #f0c867;
+    --error-bg: #2c1a1d;
+    --error-ink: #f0868c;
+    --focus-ring: #5fb3c6;
+    --scrollbar: rgba(255, 255, 255, 0.14);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--frame);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--fs-body);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* A desktop tool, not a document: chrome is not selectable text. */
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+  overflow: hidden;
+}
+
+h1,
+p {
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  cursor: default;
+  text-align: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border-radius: 10px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
