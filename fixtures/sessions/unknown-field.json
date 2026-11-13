@@ -1,0 +1,32 @@
+{
+ "input": {
+  "sessionId": "s1",
+  "status": "active",
+  "agent": "x",
+  "files": {
+   "/ws/proj/a.ts": {
+    "originalContent": "x",
+    "reviewStatus": "pending",
+    "hunks": []
+   }
+  },
+  "accepted": [],
+  "rejected": {}
+ },
+ "expected": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/a.ts": {
+    "originalContent": "x",
+    "reviewStatus": "pending"
+   }
+  },
+  "accepted": [],
+  "rejected": {}
+ },
+ "shape": [
+  "agent",
+  "files./ws/proj/a.ts.hunks"
+ ]
+}

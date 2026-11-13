@@ -1,0 +1,26 @@
+{
+ "input": {
+  "sessionId": "s1",
+  "files": {
+   "/ws/proj/a.ts": {
+    "originalContent": "x",
+    "reviewStatus": "pending",
+    "capturedAt": "2026-05-31T09:02:00.000Z"
+   }
+  }
+ },
+ "expected": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/a.ts": {
+    "originalContent": "x",
+    "reviewStatus": "pending",
+    "capturedAt": "2026-05-31T09:02:00.000Z"
+   }
+  },
+  "accepted": [],
+  "rejected": {}
+ },
+ "shape": "known"
+}

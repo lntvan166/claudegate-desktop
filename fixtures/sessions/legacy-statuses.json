@@ -1,0 +1,82 @@
+{
+ "input": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/acc.ts": {
+    "originalContent": "o1",
+    "reviewStatus": "accepted",
+    "claudeContent": "c1",
+    "sessionId": "s1",
+    "capturedAt": "2026-05-31T09:00:00.000Z"
+   },
+   "/ws/proj/rej.ts": {
+    "originalContent": "o2",
+    "reviewStatus": "rejected",
+    "claudeContent": "c2",
+    "sessionId": "s1",
+    "capturedAt": "2026-05-31T09:01:00.000Z"
+   },
+   "/ws/proj/acc2.ts": {
+    "originalContent": "o3",
+    "reviewStatus": "accepted"
+   },
+   "/ws/proj/pend.ts": {
+    "originalContent": null,
+    "reviewStatus": "pending",
+    "newFile": true,
+    "capturedAt": "2026-05-31T09:02:00.000Z"
+   },
+   "/ws/proj/weird.ts": {
+    "originalContent": "w",
+    "reviewStatus": "bogus"
+   }
+  },
+  "accepted": [],
+  "rejected": {}
+ },
+ "expected": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/pend.ts": {
+    "originalContent": null,
+    "reviewStatus": "pending",
+    "newFile": true,
+    "capturedAt": "2026-05-31T09:02:00.000Z"
+   },
+   "/ws/proj/weird.ts": {
+    "originalContent": "w",
+    "reviewStatus": "pending"
+   }
+  },
+  "accepted": [
+   {
+    "id": "2026-05-31T09:00:00.000Z::/ws/proj/acc.ts",
+    "path": "/ws/proj/acc.ts",
+    "before": "o1",
+    "after": "c1",
+    "decidedAt": "2026-05-31T09:00:00.000Z",
+    "sessionId": "s1"
+   },
+   {
+    "id": "s1::/ws/proj/acc2.ts",
+    "path": "/ws/proj/acc2.ts",
+    "before": "o3",
+    "after": "o3",
+    "decidedAt": "s1"
+   }
+  ],
+  "rejected": {
+   "/ws/proj/rej.ts": {
+    "id": "2026-05-31T09:01:00.000Z::/ws/proj/rej.ts",
+    "path": "/ws/proj/rej.ts",
+    "before": "o2",
+    "after": "c2",
+    "decidedAt": "2026-05-31T09:01:00.000Z",
+    "sessionId": "s1"
+   }
+  }
+ },
+ "shape": "known"
+}

@@ -1,0 +1,75 @@
+{
+ "input": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/a.ts": {
+    "originalContent": "old",
+    "reviewStatus": "pending",
+    "newFile": false,
+    "sessionId": "s1",
+    "capturedAt": "2026-05-31T10:00:00.000Z"
+   }
+  },
+  "accepted": [
+   {
+    "id": "2026-05-31T10:00:01.000Z::/ws/proj/f1.ts",
+    "path": "/ws/proj/f1.ts",
+    "before": "a",
+    "after": "b",
+    "decidedAt": "2026-05-31T10:00:01.000Z",
+    "sessionId": "s1",
+    "newFile": true
+   }
+  ],
+  "rejected": {
+   "/ws/proj/r.ts": {
+    "id": "x::/ws/proj/r.ts",
+    "path": "/ws/proj/r.ts",
+    "before": null,
+    "after": "z",
+    "decidedAt": "2026-05-31T10:05:00.000Z",
+    "sessionId": "s1",
+    "reason": "nope"
+   }
+  },
+  "excludeCleanupDone": true
+ },
+ "expected": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/a.ts": {
+    "originalContent": "old",
+    "reviewStatus": "pending",
+    "newFile": false,
+    "sessionId": "s1",
+    "capturedAt": "2026-05-31T10:00:00.000Z"
+   }
+  },
+  "accepted": [
+   {
+    "id": "2026-05-31T10:00:01.000Z::/ws/proj/f1.ts",
+    "path": "/ws/proj/f1.ts",
+    "before": "a",
+    "after": "b",
+    "decidedAt": "2026-05-31T10:00:01.000Z",
+    "sessionId": "s1",
+    "newFile": true
+   }
+  ],
+  "rejected": {
+   "/ws/proj/r.ts": {
+    "id": "x::/ws/proj/r.ts",
+    "path": "/ws/proj/r.ts",
+    "before": null,
+    "after": "z",
+    "decidedAt": "2026-05-31T10:05:00.000Z",
+    "sessionId": "s1",
+    "reason": "nope"
+   }
+  },
+  "excludeCleanupDone": true
+ },
+ "shape": "known"
+}
