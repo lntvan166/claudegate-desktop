@@ -1,0 +1,22 @@
+[package]
+name = "claudegate-desktop"
+version = "0.1.0"
+description = "ClaudeGate Desktop, a read-only viewer for ClaudeGate sessions"
+edition = "2021"
+
+[lib]
+name = "claudegate_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.4", features = [] }
+
+[dependencies]
+claudegate-core = { path = "../core" }
+tauri = { version = "=2.12.5", features = [] }
+notify = "=8.2.0"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.145"
+
+[dev-dependencies]
+tempfile = "=3.14.0"
