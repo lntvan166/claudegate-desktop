@@ -172,7 +172,8 @@ const ENTRY_TYPES: &[(&str, Ty)] = &[
     ("originalContent", Ty::StrOrNull),
     ("reviewStatus", Ty::Str),
     ("newFile", Ty::Bool),
-    ("sessionId", Ty::Str),
+    // hook.py writes `"sessionId": null` when the hook payload has no session_id.
+    ("sessionId", Ty::StrOrNull),
     ("capturedAt", Ty::Str),
     ("claudeContent", Ty::StrOrNull),
 ];
@@ -183,7 +184,8 @@ const RECORD_TYPES: &[(&str, Ty)] = &[
     ("before", Ty::StrOrNull),
     ("after", Ty::StrOrNull),
     ("decidedAt", Ty::Str),
-    ("sessionId", Ty::Str),
+    // Copied from the entry, so it can be null too.
+    ("sessionId", Ty::StrOrNull),
     ("newFile", Ty::Bool),
     ("reason", Ty::Str),
 ];

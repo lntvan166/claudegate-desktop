@@ -102,3 +102,11 @@ fn wrong_container_types_are_reported() {
     let j = r#"{"sessionId":1,"files":[],"accepted":{},"rejected":null}"#;
     assert_eq!(shape_of(j), unknown(&["sessionId", "files", "accepted", "rejected"]));
 }
+
+#[test]
+fn hook_shaped_entry_is_known() {
+    let j = r#"{"sessionId":"s","status":"active","files":{"/a":{"originalContent":null,"reviewStatus":"pending","newFile":true,"sessionId":null,"capturedAt":"2026-05-31T10:00:00+00:00"}},"accepted":[{"id":"i","path":"/a","before":null,"after":"x","decidedAt":"d","sessionId":null,"newFile":true}],"rejected":{}}"#;
+    let (s, shape) = parse_session(j).unwrap();
+    assert_eq!(shape, Shape::Known);
+    assert_eq!(s.files["/a"].session_id, None);
+}
