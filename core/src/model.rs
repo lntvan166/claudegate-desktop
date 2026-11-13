@@ -137,28 +137,109 @@ fn unknown_keys(obj: &Map<String, Value>, known: &[&str], prefix: &str, out: &mu
     }
 }
 
+#[derive(Clone, Copy)]
+enum Ty {
+    Str,
+    /// A string or `null`.
+    StrOrNull,
+    Bool,
+    Object,
+    Array,
+}
+
+impl Ty {
+    fn matches(self, v: &Value) -> bool {
+        match self {
+            Ty::Str => v.is_string(),
+            Ty::StrOrNull => v.is_string() || v.is_null(),
+            Ty::Bool => v.is_boolean(),
+            Ty::Object => v.is_object(),
+            Ty::Array => v.is_array(),
+        }
+    }
+}
+
+/// Report each present field of the wrong type. A missing field is not wrong-typed.
+fn check_types(obj: &Map<String, Value>, fields: &[(&str, Ty)], prefix: &str, out: &mut Vec<String>) {
+    for (key, ty) in fields {
+        if obj.get(*key).is_some_and(|v| !ty.matches(v)) {
+            out.push(format!("{prefix}{key}"));
+        }
+    }
+}
+
+const ENTRY_TYPES: &[(&str, Ty)] = &[
+    ("originalContent", Ty::StrOrNull),
+    ("reviewStatus", Ty::Str),
+    ("newFile", Ty::Bool),
+    ("sessionId", Ty::Str),
+    ("capturedAt", Ty::Str),
+    ("claudeContent", Ty::StrOrNull),
+];
+
+const RECORD_TYPES: &[(&str, Ty)] = &[
+    ("id", Ty::Str),
+    ("path", Ty::Str),
+    ("before", Ty::StrOrNull),
+    ("after", Ty::StrOrNull),
+    ("decidedAt", Ty::Str),
+    ("sessionId", Ty::Str),
+    ("newFile", Ty::Bool),
+    ("reason", Ty::Str),
+];
+
+fn check_record(r: &Value, prefix: &str, out: &mut Vec<String>) {
+    let Some(r) = r.as_object() else {
+        out.push(prefix.to_owned());
+        return;
+    };
+    let p = format!("{prefix}.");
+    unknown_keys(r, RECORD_FIELDS, &p, out);
+    check_types(r, RECORD_TYPES, &p, out);
+    // id, path and decidedAt are required; a record without them is not loadable.
+    for key in ["id", "path", "decidedAt"] {
+        if !r.contains_key(key) {
+            out.push(format!("{p}{key}"));
+        }
+    }
+}
+
 fn check_shape(top: &Map<String, Value>) -> Shape {
     let mut bad = Vec::new();
     unknown_keys(top, TOP_FIELDS, "", &mut bad);
+    check_types(
+        top,
+        &[
+            ("sessionId", Ty::Str),
+            ("status", Ty::Str),
+            ("files", Ty::Object),
+            ("accepted", Ty::Array),
+            ("rejected", Ty::Object),
+            ("excludeCleanupDone", Ty::Bool),
+        ],
+        "",
+        &mut bad,
+    );
     if let Some(files) = top.get("files").and_then(Value::as_object) {
         for (path, e) in files {
-            if let Some(e) = e.as_object() {
-                unknown_keys(e, ENTRY_FIELDS, &format!("files.{path}."), &mut bad);
-            }
+            let prefix = format!("files.{path}");
+            let Some(e) = e.as_object() else {
+                bad.push(prefix);
+                continue;
+            };
+            let p = format!("{prefix}.");
+            unknown_keys(e, ENTRY_FIELDS, &p, &mut bad);
+            check_types(e, ENTRY_TYPES, &p, &mut bad);
         }
     }
     if let Some(list) = top.get("accepted").and_then(Value::as_array) {
         for (i, r) in list.iter().enumerate() {
-            if let Some(r) = r.as_object() {
-                unknown_keys(r, RECORD_FIELDS, &format!("accepted.{i}."), &mut bad);
-            }
+            check_record(r, &format!("accepted.{i}"), &mut bad);
         }
     }
     if let Some(map) = top.get("rejected").and_then(Value::as_object) {
         for (path, r) in map {
-            if let Some(r) = r.as_object() {
-                unknown_keys(r, RECORD_FIELDS, &format!("rejected.{path}."), &mut bad);
-            }
+            check_record(r, &format!("rejected.{path}"), &mut bad);
         }
     }
     if bad.is_empty() {

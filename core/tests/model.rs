@@ -64,3 +64,41 @@ fn bad_json_is_error() {
     assert!(parse_session("").is_err());
     assert!(parse_session("{").is_err());
 }
+
+fn shape_of(json: &str) -> Shape {
+    parse_session(json).unwrap().1
+}
+
+fn unknown(paths: &[&str]) -> Shape {
+    Shape::Unknown(paths.iter().map(|s| s.to_string()).collect())
+}
+
+#[test]
+fn bad_accepted_record_is_reported() {
+    let j = r#"{"sessionId":"s","accepted":[3,{"path":"/a","before":5,"decidedAt":"d"}]}"#;
+    assert_eq!(shape_of(j), unknown(&["accepted.0", "accepted.1.before", "accepted.1.id"]));
+}
+
+#[test]
+fn bad_rejected_record_is_reported() {
+    let j = r#"{"sessionId":"s","rejected":{"/a":"x","/b":{"id":"i","path":"/b","decidedAt":7}}}"#;
+    assert_eq!(shape_of(j), unknown(&["rejected./a", "rejected./b.decidedAt"]));
+}
+
+#[test]
+fn non_string_original_content_is_reported() {
+    let j = r#"{"sessionId":"s","files":{"/a":{"originalContent":42,"reviewStatus":"pending"}}}"#;
+    assert_eq!(shape_of(j), unknown(&["files./a.originalContent"]));
+}
+
+#[test]
+fn non_object_file_entry_is_reported() {
+    let j = r#"{"sessionId":"s","files":{"/a":"oops","/b":{"originalContent":null}}}"#;
+    assert_eq!(shape_of(j), unknown(&["files./a"]));
+}
+
+#[test]
+fn wrong_container_types_are_reported() {
+    let j = r#"{"sessionId":1,"files":[],"accepted":{},"rejected":null}"#;
+    assert_eq!(shape_of(j), unknown(&["sessionId", "files", "accepted", "rejected"]));
+}
