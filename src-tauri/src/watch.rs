@@ -23,6 +23,19 @@ pub struct ChangedPayload {
     pub roots: Vec<String>,
 }
 
+/// True for the event kinds that can change what a session file says: creation, a data or name
+/// change, removal. Opening, reading, closing and metadata-only changes are not: the app reads
+/// these files itself, and inotify reports every one of those opens.
+pub fn is_content_change(kind: &notify::EventKind) -> bool {
+    use notify::event::ModifyKind;
+    use notify::EventKind;
+    match kind {
+        EventKind::Create(_) | EventKind::Remove(_) => true,
+        EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Name(_) | ModifyKind::Any) => true,
+        _ => false,
+    }
+}
+
 fn is_noise(name: &str) -> bool {
     name.ends_with(".lock") || name.ends_with(".tmp") || name.contains(".tmp.")
 }
@@ -166,11 +179,20 @@ fn attach(w: &mut notify::RecommendedWatcher, home: &Path, watched: &mut Vec<Pat
 /// created; nothing here creates or writes.
 pub fn start(app: tauri::AppHandle, home: PathBuf, known: KnownMap) {
     use tauri::Emitter;
+    run(home, known, move |p| {
+        let _ = app.emit(CHANGED_EVENT, p);
+    });
+}
 
+/// The watcher loop behind `start`, with the emitter injected so it can be driven by a test.
+/// The thread lives as long as the process.
+pub fn run(home: PathBuf, known: KnownMap, emit: impl Fn(ChangedPayload) + Send + 'static) {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res {
-            let _ = tx.send(ev.paths);
+            if is_content_change(&ev.kind) {
+                let _ = tx.send(ev.paths);
+            }
         }
     }) {
         Ok(w) => w,
@@ -201,7 +223,7 @@ pub fn start(app: tauri::AppHandle, home: PathBuf, known: KnownMap) {
             if let Some(batch) = co.take_if_due(Instant::now()) {
                 let snapshot = known.lock().map(|k| k.clone()).unwrap_or_default();
                 if let Some(p) = payload_for(&batch, &snapshot) {
-                    let _ = app.emit(CHANGED_EVENT, p);
+                    emit(p);
                 }
             }
         }
@@ -218,6 +240,39 @@ mod tests {
             ("/ws/a".into(), PathBuf::from("/h/sessions/a-wt.json")),
             ("/ws/b".into(), PathBuf::from("/h/sessions/bbb.json")),
         ]
+    }
+
+    #[test]
+    fn only_content_changes_count() {
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
+            RenameMode,
+        };
+        use notify::EventKind as K;
+        for k in [
+            K::Create(CreateKind::File),
+            K::Create(CreateKind::Any),
+            K::Modify(ModifyKind::Data(DataChange::Any)),
+            K::Modify(ModifyKind::Data(DataChange::Content)),
+            K::Modify(ModifyKind::Name(RenameMode::To)),
+            K::Modify(ModifyKind::Name(RenameMode::Both)),
+            K::Modify(ModifyKind::Any),
+            K::Remove(RemoveKind::File),
+        ] {
+            assert!(is_content_change(&k), "{k:?} should count");
+        }
+        for k in [
+            K::Access(AccessKind::Open(AccessMode::Any)),
+            K::Access(AccessKind::Read),
+            K::Access(AccessKind::Close(AccessMode::Read)),
+            K::Access(AccessKind::Close(AccessMode::Write)),
+            K::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+            K::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)),
+            K::Any,
+            K::Other,
+        ] {
+            assert!(!is_content_change(&k), "{k:?} should not count");
+        }
     }
 
     #[test]
