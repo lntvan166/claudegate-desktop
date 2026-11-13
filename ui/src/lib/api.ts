@@ -15,6 +15,8 @@ export type ProjectSummary = {
   name: string;
   missing: boolean;
   pending: number;
+  /** See `ProjectView.nextRecheckAt`. */
+  nextRecheckAt: number | null;
 };
 
 export type PendingItem = {
@@ -25,6 +27,8 @@ export type PendingItem = {
   capturedAt: string | null;
   added: number;
   removed: number;
+  /** No change on disk yet, inside the settle window: Claude's write may still be on its way. */
+  waiting: boolean;
 };
 
 export type RecordItem = {
@@ -51,6 +55,8 @@ export type ProjectView = {
   pending: PendingItem[];
   accepted: RecordItem[];
   rejected: RecordItem[];
+  /** Epoch ms when a waiting row may settle; re-fetch the project then. Null when none waits. */
+  nextRecheckAt: number | null;
 };
 
 export type DiffKind = "pending" | "accepted" | "rejected";

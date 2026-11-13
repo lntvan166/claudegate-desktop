@@ -11,7 +11,7 @@ const view: ProjectView = {
     { root: "/ws/shop/.worktrees/feat", isWorktree: true, shapeUnknown: [], error: null },
   ],
   pending: [
-    { path: "/ws/shop/src/a.ts", rel: "src/a.ts", scope: "/ws/shop", newFile: false, capturedAt: null, added: 3, removed: 1 },
+    { path: "/ws/shop/src/a.ts", rel: "src/a.ts", scope: "/ws/shop", newFile: false, capturedAt: null, added: 3, removed: 1, waiting: false },
     {
       path: "/ws/shop/.worktrees/feat/src/b.ts",
       rel: ".worktrees/feat/src/b.ts",
@@ -20,6 +20,7 @@ const view: ProjectView = {
       capturedAt: null,
       added: 9,
       removed: 0,
+      waiting: true,
     },
   ],
   accepted: [
@@ -28,6 +29,7 @@ const view: ProjectView = {
   rejected: [
     { id: "t2::/ws/shop/y.md", path: "/ws/shop/y.md", rel: "y.md", scope: "/ws/shop", decidedAt: "t2", added: 0, removed: 2 },
   ],
+  nextRecheckAt: null,
 };
 
 describe("groupsFor", () => {
@@ -37,6 +39,13 @@ describe("groupsFor", () => {
     expect(groups[1].rows[0].rel).toBe("src/b.ts");
     expect(groups[1].rows[0].newFile).toBe(true);
     expect(groups[0].rows[0].key).toBe("/ws/shop/src/a.ts");
+  });
+
+  it("carries a pending row's waiting flag; records never wait", () => {
+    const [main, wt] = groupsFor(view, "pending");
+    expect(main.rows[0].waiting).toBe(false);
+    expect(wt.rows[0].waiting).toBe(true);
+    expect(groupsFor(view, "accepted")[0].rows[0].waiting).toBe(false);
   });
 
   it("drops scopes with nothing on the tab", () => {
@@ -51,7 +60,7 @@ describe("groupsFor", () => {
 
 describe("sortProjects", () => {
   it("keeps the roots order but sends missing folders last", () => {
-    const p = (name: string, missing = false): ProjectSummary => ({ root: `/${name}`, name, missing, pending: 0 });
+    const p = (name: string, missing = false): ProjectSummary => ({ root: `/${name}`, name, missing, pending: 0, nextRecheckAt: null });
     const sorted = sortProjects([p("b"), p("gone", true), p("a")]);
     expect(sorted.map((x) => x.name)).toEqual(["b", "a", "gone"]);
   });
@@ -80,7 +89,7 @@ describe("duplicate accepted records", () => {
 });
 
 describe("selectionAfterList", () => {
-  const p = (root: string, pending = 0, missing = false): ProjectSummary => ({ root, name: root, missing, pending });
+  const p = (root: string, pending = 0, missing = false): ProjectSummary => ({ root, name: root, missing, pending, nextRecheckAt: null });
   const list = [p("/a"), p("/b", 2), p("/c")];
 
   it("keeps a current selection that is still listed", () => {

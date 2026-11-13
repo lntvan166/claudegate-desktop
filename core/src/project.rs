@@ -2,6 +2,7 @@ use crate::excludes::{read_excludes, ExcludeMatcher};
 use crate::model::{has_real_change, parse_session, ReviewRecord, Session, Shape};
 use crate::paths::{resolve_root, session_file_for};
 use crate::roots::read_roots;
+use crate::time::{now_ms, parse_iso_ms};
 use crate::worktrees::nested_worktrees_under;
 use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
@@ -14,6 +15,8 @@ pub struct ProjectSummary {
     pub name: String,
     pub missing: bool,
     pub pending: usize,
+    /// See `ProjectView::next_recheck_at`.
+    pub next_recheck_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -26,6 +29,8 @@ pub struct PendingItem {
     pub captured_at: Option<String>,
     pub added: usize,
     pub removed: usize,
+    /// No change on disk yet, inside the settle window: the write may still be on its way.
+    pub waiting: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,6 +63,9 @@ pub struct ProjectView {
     pub pending: Vec<PendingItem>,
     pub accepted: Vec<RecordItem>,
     pub rejected: Vec<RecordItem>,
+    /// Epoch ms of the earliest moment a `waiting` row may settle and disappear; the UI re-fetches
+    /// then. `None` when nothing is waiting.
+    pub next_recheck_at: Option<i64>,
 }
 
 fn line_counts(before: &str, after: &str) -> (usize, usize) {
@@ -110,6 +118,7 @@ fn load_scope(
     primary: &str,
     matcher: &ExcludeMatcher,
     is_worktree: bool,
+    now_ms: i64,
     view: &mut ProjectView,
 ) {
     let scope_str = scope_root.to_string_lossy().into_owned();
@@ -145,9 +154,20 @@ fn load_scope(
                 continue;
             }
             let disk = read_disk(path);
-            if !has_real_change(e.original_content.as_deref(), disk.as_deref()) {
-                continue;
-            }
+            let waiting = match pending_state(
+                e.original_content.as_deref(),
+                disk.as_deref(),
+                e.captured_at.as_deref(),
+                now_ms,
+            ) {
+                PendingState::Real => false,
+                PendingState::Hidden => continue,
+                PendingState::Waiting { recheck_at } => {
+                    view.next_recheck_at =
+                        Some(view.next_recheck_at.map_or(recheck_at, |n| n.min(recheck_at)));
+                    true
+                }
+            };
             let (added, removed) = line_counts(
                 e.original_content.as_deref().unwrap_or(""),
                 disk.as_deref().unwrap_or(""),
@@ -160,6 +180,7 @@ fn load_scope(
                 captured_at: e.captured_at.clone(),
                 added,
                 removed,
+                waiting,
             });
         }
         for r in &s.accepted {
@@ -176,7 +197,46 @@ fn load_scope(
     view.scopes.push(sv);
 }
 
+/// Extension v1.16.1 `reviewModel.ts`: how long a no-op entry may wait for its write to land.
+pub const NOOP_SETTLE_MS: i64 = 15_000;
+/// The longer window for a promised new file (`originalContent: null`) that is not on disk yet.
+pub const NEW_FILE_ABSENT_MS: i64 = 45_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingState {
+    /// The file differs from its baseline.
+    Real,
+    /// No change yet, but the hook records before Claude writes: keep showing it until
+    /// `recheck_at` (epoch ms), the first moment the extension would prune it.
+    Waiting { recheck_at: i64 },
+    /// A settled no-op: the extension prunes it, so it is not shown.
+    Hidden,
+}
+
+/// Mirrors the extension's `shouldPruneNoOp`: a no-op is hidden only once it is older than its
+/// window, measured from `capturedAt`; a missing or unparsable `capturedAt` is infinitely old.
+pub fn pending_state(
+    original: Option<&str>,
+    disk: Option<&str>,
+    captured_at: Option<&str>,
+    now_ms: i64,
+) -> PendingState {
+    if has_real_change(original, disk) {
+        return PendingState::Real;
+    }
+    let settle = if original.is_none() { NEW_FILE_ABSENT_MS } else { NOOP_SETTLE_MS };
+    match captured_at.and_then(parse_iso_ms) {
+        Some(t) if now_ms - t <= settle => PendingState::Waiting { recheck_at: t + settle + 1 },
+        _ => PendingState::Hidden,
+    }
+}
+
 pub fn load_project(home: &Path, root: &Path) -> ProjectView {
+    load_project_at(home, root, now_ms())
+}
+
+/// `load_project` with the clock injected.
+pub fn load_project_at(home: &Path, root: &Path, now_ms: i64) -> ProjectView {
     let primary_path = resolve_root(root);
     let primary = primary_path.to_string_lossy().into_owned();
     let mut view = ProjectView {
@@ -186,15 +246,16 @@ pub fn load_project(home: &Path, root: &Path) -> ProjectView {
         pending: vec![],
         accepted: vec![],
         rejected: vec![],
+        next_recheck_at: None,
     };
     if view.missing {
         return view;
     }
     let globs = read_excludes(home).get(&primary).cloned().unwrap_or_default();
     let matcher = ExcludeMatcher::new(&primary_path, &globs);
-    load_scope(home, &primary_path, &primary, &matcher, false, &mut view);
+    load_scope(home, &primary_path, &primary, &matcher, false, now_ms, &mut view);
     for wt in nested_worktrees_under(&primary_path) {
-        load_scope(home, &wt, &primary, &matcher, true, &mut view);
+        load_scope(home, &wt, &primary, &matcher, true, now_ms, &mut view);
     }
     view.pending.sort_by(|a, b| a.path.cmp(&b.path));
     view.accepted.sort_by(|a, b| b.decided_at.cmp(&a.decided_at));
@@ -216,6 +277,7 @@ pub fn list_projects(home: &Path) -> Vec<ProjectSummary> {
                 name,
                 missing: v.missing,
                 pending: v.pending.len(),
+                next_recheck_at: v.next_recheck_at,
             }
         })
         .collect()

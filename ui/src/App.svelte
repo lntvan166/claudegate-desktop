@@ -23,6 +23,7 @@
   import type { IconTheme } from "./lib/icons";
   import { actionFor, isTypingTarget, nextIndex } from "./lib/keys";
   import { basename, groupsFor, scopeLabel, selectionAfterList, sortProjects, type Row } from "./lib/rows";
+  import { Rechecks } from "./lib/recheck";
   import { relTime } from "./lib/time";
   import { collapseKeysToReveal, fileOrder, visibleItems } from "./lib/visible";
 
@@ -66,12 +67,22 @@
       .sort()[0];
     const where = parts.length > 1 ? ` · ${parts.join(", ")}` : "";
     const age = oldest ? ` · oldest ${relTime(oldest)}` : "";
-    return `${n} waiting${where}${age}`;
+    const w = view.pending.filter((p) => p.waiting).length;
+    const unwritten = w > 0 ? ` · ${w} not written yet` : "";
+    return `${n} waiting${where}${age}${unwritten}`;
   });
   const troubled = $derived(view ? view.scopes.filter((s) => s.error || s.shapeUnknown.length > 0) : []);
 
   // Responses can arrive out of order when events land in quick succession.
   let viewSeq = 0;
+
+  /** Re-fetches a project when one of its "waiting for write" rows may have settled. */
+  const rechecks = new Rechecks((root) => refresh(root));
+
+  function refresh(root: string) {
+    if (root === selected) void loadView(root);
+    else void getProject(root).then(patchSummary, () => {});
+  }
 
   async function loadView(root: string) {
     const seq = ++viewSeq;
@@ -94,14 +105,21 @@
 
   function patchSummary(v: ProjectView) {
     projects = sortProjects(
-      projects.map((p) => (p.root === v.root ? { ...p, missing: v.missing, pending: v.pending.length } : p)),
+      projects.map((p) =>
+        p.root === v.root
+          ? { ...p, missing: v.missing, pending: v.pending.length, nextRecheckAt: v.nextRecheckAt }
+          : p,
+      ),
     );
+    rechecks.schedule(v.root, v.nextRecheckAt);
   }
 
   async function loadProjects() {
     try {
       projects = sortProjects(await listProjects());
       listError = null;
+      rechecks.clear();
+      for (const p of projects) rechecks.schedule(p.root, p.nextRecheckAt);
     } catch (e) {
       listError = String(e);
     } finally {
@@ -236,15 +254,13 @@
         void loadProjects();
         return;
       }
-      for (const root of roots) {
-        if (root === selected) void loadView(root);
-        else void getProject(root).then(patchSummary, () => {});
-      }
+      for (const root of roots) refresh(root);
     });
 
     return () => {
       mq.removeEventListener("change", sync);
       window.removeEventListener("keydown", onKey);
+      rechecks.clear();
       void off.then((f) => f());
     };
   });

@@ -13,6 +13,7 @@ const row = (scopeRoot: string, rel: string): Row => ({
   removed: 0,
   newFile: false,
   decidedAt: null,
+  waiting: false,
 });
 
 const A = "/ws/a";

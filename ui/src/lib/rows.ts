@@ -13,6 +13,8 @@ export type Row = {
   removed: number;
   newFile: boolean;
   decidedAt: string | null;
+  /** A pending capture whose write has not landed yet. */
+  waiting: boolean;
 };
 
 export type Group = { scope: ScopeView; label: string; rows: Row[] };
@@ -44,6 +46,7 @@ function rowsOf(view: ProjectView, kind: DiffKind): Row[] {
       removed: p.removed,
       newFile: p.newFile,
       decidedAt: null,
+      waiting: p.waiting,
     }));
   }
   return view[kind].map((r) => ({
@@ -55,6 +58,7 @@ function rowsOf(view: ProjectView, kind: DiffKind): Row[] {
     removed: r.removed,
     newFile: false,
     decidedAt: r.decidedAt,
+    waiting: false,
   }));
 }
 

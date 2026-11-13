@@ -216,6 +216,7 @@
         {#if mode === "list" && dirOf(n.rel)}<span class="dir">{dirOf(n.rel)}</span>{/if}
         <span class="spacer"></span>
         {#if row.decidedAt}<span class="meta">{relTime(row.decidedAt)}</span>{/if}
+        {#if row.waiting}<span class="meta waiting" title="Captured before Claude wrote it; the write hasn't landed yet">waiting for write…</span>{/if}
         {@render stats(row)}
       </button>
       <!-- Mouse shortcut; the keyboard equivalent is O on the selected row. -->
@@ -396,6 +397,9 @@
     flex: none;
     font-size: var(--fs-meta);
     color: var(--faint);
+  }
+  .meta.waiting {
+    font-style: italic;
   }
 
   .stats {

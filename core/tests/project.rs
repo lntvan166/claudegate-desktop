@@ -148,3 +148,107 @@ fn non_utf8_new_file_is_not_pending() {
     write_session(h.path(), root, &session(files.into(), serde_json::json!([]), serde_json::json!({})));
     assert!(load_project(h.path(), root).pending.is_empty());
 }
+
+// ---- settle window (extension v1.16.1 shouldPruneNoOp) ----
+
+use claudegate_core::project::{load_project_at, NEW_FILE_ABSENT_MS, NOOP_SETTLE_MS};
+use claudegate_core::time::parse_iso_ms;
+
+const CAP: &str = "2026-11-13T10:00:00.000000+00:00";
+
+fn captured(orig: Option<&str>, at: Option<&str>) -> serde_json::Value {
+    let mut v = serde_json::json!({"originalContent": orig, "reviewStatus":"pending","sessionId":"s"});
+    if let Some(at) = at {
+        v["capturedAt"] = at.into();
+    }
+    v
+}
+
+/// One file with one entry; returns (home, workspace, file path).
+fn one(name: &str, disk: Option<&str>, e: serde_json::Value) -> (tempfile::TempDir, tempfile::TempDir, String) {
+    let h = tempfile::tempdir().unwrap();
+    let w = tempfile::tempdir().unwrap();
+    let f = w.path().join(name);
+    if let Some(d) = disk {
+        fs::write(&f, d).unwrap();
+    }
+    let p = f.to_string_lossy().into_owned();
+    let mut files = serde_json::Map::new();
+    files.insert(p.clone(), e);
+    write_session(h.path(), w.path(), &session(files.into(), serde_json::json!([]), serde_json::json!({})));
+    (h, w, p)
+}
+
+#[test]
+fn young_noop_is_shown_waiting_with_a_recheck() {
+    let t = parse_iso_ms(CAP).unwrap();
+    let (h, w, p) = one("a.txt", Some("same\n"), captured(Some("same\n"), Some(CAP)));
+    let v = load_project_at(h.path(), w.path(), t + 3_000);
+    assert_eq!(v.pending.len(), 1);
+    assert_eq!(v.pending[0].path, p);
+    assert!(v.pending[0].waiting);
+    assert_eq!(v.next_recheck_at, Some(t + NOOP_SETTLE_MS + 1));
+    // exactly at the window edge it is still young (the extension prunes only when age > window)
+    assert_eq!(load_project_at(h.path(), w.path(), t + NOOP_SETTLE_MS).pending.len(), 1);
+}
+
+#[test]
+fn settled_noop_is_hidden() {
+    let t = parse_iso_ms(CAP).unwrap();
+    let (h, w, _) = one("a.txt", Some("same\n"), captured(Some("same\n"), Some(CAP)));
+    let v = load_project_at(h.path(), w.path(), t + NOOP_SETTLE_MS + 1);
+    assert!(v.pending.is_empty());
+    assert_eq!(v.next_recheck_at, None);
+}
+
+#[test]
+fn absent_new_file_uses_the_longer_window() {
+    let t = parse_iso_ms(CAP).unwrap();
+    let (h, w, _) = one("new.txt", None, captured(None, Some(CAP)));
+    let v = load_project_at(h.path(), w.path(), t + 30_000);
+    assert_eq!(v.pending.len(), 1);
+    assert!(v.pending[0].waiting && v.pending[0].new_file);
+    assert_eq!(v.next_recheck_at, Some(t + NEW_FILE_ABSENT_MS + 1));
+    assert!(load_project_at(h.path(), w.path(), t + NEW_FILE_ABSENT_MS + 1).pending.is_empty());
+}
+
+#[test]
+fn missing_or_bad_captured_at_counts_as_settled() {
+    let (h, w, _) = one("a.txt", Some("same\n"), captured(Some("same\n"), None));
+    assert!(load_project_at(h.path(), w.path(), 0).pending.is_empty());
+    let (h, w, _) = one("a.txt", Some("same\n"), captured(Some("same\n"), Some("yesterday")));
+    assert!(load_project_at(h.path(), w.path(), 0).pending.is_empty());
+}
+
+#[test]
+fn real_change_is_not_waiting_and_needs_no_recheck() {
+    let t = parse_iso_ms(CAP).unwrap();
+    let (h, w, _) = one("a.txt", Some("new\n"), captured(Some("old\n"), Some(CAP)));
+    let v = load_project_at(h.path(), w.path(), t + 1_000);
+    assert_eq!(v.pending.len(), 1);
+    assert!(!v.pending[0].waiting);
+    assert_eq!(v.next_recheck_at, None);
+}
+
+#[test]
+fn recheck_is_the_earliest_deadline_and_the_write_landing_makes_it_real() {
+    let t = parse_iso_ms(CAP).unwrap();
+    let h = tempfile::tempdir().unwrap();
+    let w = tempfile::tempdir().unwrap();
+    let a = w.path().join("a.txt");
+    fs::write(&a, "same\n").unwrap();
+    let b = w.path().join("b.txt");
+    let mut files = serde_json::Map::new();
+    files.insert(a.to_string_lossy().into(), captured(Some("same\n"), Some(CAP)));
+    files.insert(b.to_string_lossy().into(), captured(None, Some("2026-11-13T09:59:50Z")));
+    write_session(h.path(), w.path(), &session(files.into(), serde_json::json!([]), serde_json::json!({})));
+    let v = load_project_at(h.path(), w.path(), t + 1_000);
+    assert_eq!(v.pending.len(), 2);
+    assert_eq!(v.next_recheck_at, Some(t + NOOP_SETTLE_MS + 1));
+    // Claude's write lands late: the same entry is now a real change.
+    fs::write(&a, "changed\n").unwrap();
+    let v = load_project_at(h.path(), w.path(), t + 60_000);
+    assert_eq!(v.pending.len(), 1);
+    assert!(!v.pending[0].waiting);
+    assert_eq!(v.next_recheck_at, None);
+}

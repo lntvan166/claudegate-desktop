@@ -111,7 +111,13 @@ pub fn list_projects_with(home: &Path, known: &KnownMap) -> Vec<ProjectSummary> 
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| v.root.clone());
-            ProjectSummary { root: v.root.clone(), name, missing: v.missing, pending: v.pending.len() }
+            ProjectSummary {
+                root: v.root.clone(),
+                name,
+                missing: v.missing,
+                pending: v.pending.len(),
+                next_recheck_at: v.next_recheck_at,
+            }
         })
         .collect()
 }

@@ -20,7 +20,7 @@ const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
 
 function pending(scope: string, rel: string, added: number, removed: number, newFile = false): PendingItem {
   const path = `${scope}/${rel}`;
-  return { path, rel: path.slice(SHOP.length + 1), scope, newFile, capturedAt: ago(added), added, removed };
+  return { path, rel: path.slice(SHOP.length + 1), scope, newFile, capturedAt: ago(added), added, removed, waiting: false };
 }
 
 function record(root: string, rel: string, min: number, added: number, removed: number): RecordItem {
@@ -52,6 +52,7 @@ const views: Record<string, ProjectView> = {
     // src/index.ts accepted twice: the log is append-only, so one path can repeat.
     accepted: [record(SHOP, "src/index.ts", 95, 6, 2), record(SHOP, "tsconfig.json", 240, 1, 1), record(SHOP, "src/index.ts", 300, 3, 1)],
     rejected: [record(SHOP, "src/legacy/session.js", 180, 0, 112)],
+    nextRecheckAt: null,
   },
   [HERDR]: {
     root: HERDR,
@@ -65,8 +66,9 @@ const views: Record<string, ProjectView> = {
       record(HERDR, "assets/sprites/pikachu.png", 1440, 0, 0),
     ],
     rejected: [record(HERDR, "crates/dex/src/lib.rs", 50, 140, 2), record(HERDR, "Makefile", 2900, 3, 3)],
+    nextRecheckAt: null,
   },
-  [BILLING]: { root: BILLING, missing: true, scopes: [], pending: [], accepted: [], rejected: [] },
+  [BILLING]: { root: BILLING, missing: true, scopes: [], pending: [], accepted: [], rejected: [], nextRecheckAt: null },
 };
 
 // Per-file before/after text, so the diff preview shows real-looking changes in several languages.
@@ -194,10 +196,11 @@ export const mockApi: Api = {
         name: root.split("/").pop()!,
         missing: views[root].missing,
         pending: views[root].pending.length,
+        nextRecheckAt: null,
       })),
     ),
   getProject: (root) =>
-    delay(views[root] ?? { root, missing: true, scopes: [], pending: [], accepted: [], rejected: [] }),
+    delay(views[root] ?? { root, missing: true, scopes: [], pending: [], accepted: [], rejected: [], nextRecheckAt: null }),
   getDiff: (_root, _scope, kind: DiffKind, key) => {
     const path = key.includes("::") ? key.split("::")[1] : key;
     if (path.endsWith(".png")) return delay<DiffPayload>({ path, before: { kind: "binary" }, after: { kind: "binary" } });
