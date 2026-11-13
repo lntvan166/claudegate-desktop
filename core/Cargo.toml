@@ -1,0 +1,11 @@
+[package]
+name = "claudegate-core"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "claudegate_core"
+
+[dependencies]
+md-5 = "=0.10.6"
+dirs = "=5.0.1"
