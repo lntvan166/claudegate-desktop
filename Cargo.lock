@@ -361,6 +361,7 @@ name = "claudegate-desktop"
 version = "0.1.0"
 dependencies = [
  "claudegate-core",
+ "dirs 5.0.1",
  "notify",
  "serde",
  "serde_json",

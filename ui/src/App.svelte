@@ -1,20 +1,30 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { SvelteSet } from "svelte/reactivity";
+  import DiffView from "./components/DiffView.svelte";
   import FileTree from "./components/FileTree.svelte";
   import ProjectList from "./components/ProjectList.svelte";
   import ReviewTabs from "./components/ReviewTabs.svelte";
   import {
+    getConfig,
     getProject,
     listProjects,
     onChanged,
+    openInEditor,
+    setEditor,
+    setPendingCount,
     usingMock,
     type DiffKind,
+    type EditorConfig,
     type ProjectSummary,
     type ProjectView,
   } from "./lib/api";
-  import { iconFor, type IconTheme } from "./lib/icons";
+  import { editorLabel, ZED } from "./lib/editors";
+  import type { IconTheme } from "./lib/icons";
+  import { actionFor, isTypingTarget, nextIndex } from "./lib/keys";
   import { basename, groupsFor, scopeLabel, sortProjects, type Row } from "./lib/rows";
   import { relTime } from "./lib/time";
+  import { collapseKeysToReveal, fileOrder, visibleItems } from "./lib/visible";
 
   const STORE_KEY = "claudegate.selectedProject";
 
@@ -28,6 +38,13 @@
   let mode = $state<"tree" | "list">("tree");
   let selectedRow = $state<Row | null>(null);
   let theme = $state<IconTheme>("dark");
+  /** Collapsed folders and groups, keyed per tab; shared with FileTree so j/k see the same rows. */
+  const collapsed = new SvelteSet<string>();
+  let config = $state<EditorConfig>({ editor: ZED });
+  let firstLine = $state(1);
+  let openError = $state<string | null>(null);
+  /** Bumped on every reload of the selected project so the open diff refreshes. */
+  let viewVersion = $state(0);
 
   const current = $derived(projects.find((p) => p.root === selected) ?? null);
   const totalPending = $derived(projects.reduce((s, p) => s + p.pending, 0));
@@ -63,9 +80,12 @@
       if (seq !== viewSeq || root !== selected) return;
       view = v;
       viewError = null;
+      viewVersion++;
       patchSummary(v);
-      if (selectedRow && !groupsFor(v, tab).some((g) => g.rows.some((r) => r.key === selectedRow!.key))) {
-        selectedRow = null;
+      if (selectedRow) {
+        // Keep the selection on the fresh row object so its counts update; drop it if it is gone.
+        const key = selectedRow.key;
+        selectedRow = groupsFor(v, tab).flatMap((g) => g.rows).find((r) => r.key === key) ?? null;
       }
     } catch (e) {
       if (seq === viewSeq) viewError = String(e);
@@ -95,6 +115,7 @@
       const pick =
         projects.find((p) => p.root === remembered) ?? projects.find((p) => p.pending > 0) ?? projects[0];
       if (pick) select(pick.root);
+      if (usingMock) previewRow();
       else {
         selected = null;
         view = null;
@@ -105,6 +126,7 @@
   }
 
   function select(root: string) {
+    viewError = null;
     if (root !== selected) {
       selected = root;
       view = null;
@@ -116,10 +138,84 @@
     void loadView(root);
   }
 
+  /** Dev preview only: `#row=<path suffix>` selects that pending row, for screenshots. */
+  async function previewRow() {
+    const want = new URLSearchParams(location.hash.slice(1)).get("row");
+    if (!want || !selected) return;
+    await loadView(selected);
+    const row = view ? groupsFor(view, "pending").flatMap((g) => g.rows).find((r) => r.path.endsWith(want)) : undefined;
+    if (row) selectedRow = row;
+  }
+
   function setTab(t: DiffKind) {
+    if (t === tab) return;
     tab = t;
     selectedRow = null;
   }
+
+  async function open(row: Row, line: number, template: string | null = null) {
+    openError = null;
+    try {
+      await openInEditor(row.path, line, template);
+    } catch (e) {
+      openError = String(e);
+    }
+  }
+
+  async function pickEditor(template: string) {
+    if (selectedRow) void open(selectedRow, firstLine, template);
+    try {
+      config = await setEditor(template);
+    } catch (e) {
+      openError = `Opened, but couldn't remember the choice: ${e}`;
+    }
+  }
+
+  const lineFor = (row: Row) => (row.key === selectedRow?.key ? firstLine : 1);
+
+  function onKey(e: KeyboardEvent) {
+    if (e.defaultPrevented || e.repeat && e.key === "o") return;
+    if (isTypingTarget(e.target as HTMLElement | null)) return;
+    const a = actionFor(e);
+    if (!a || !view || view.missing) return;
+    switch (a.type) {
+      case "row": {
+        const files = visibleItems(groups, { mode, showGroups: view.scopes.length > 1, tab, collapsed }).filter(
+          (i) => i.kind === "file",
+        );
+        const i = nextIndex(
+          files.findIndex((f) => f.row!.key === selectedRow?.key),
+          files.length,
+          a.dir,
+        );
+        if (i >= 0) selectedRow = files[i].row!;
+        break;
+      }
+      case "pending": {
+        const order = fileOrder(groupsFor(view, "pending"), mode);
+        const cur = tab === "pending" ? order.findIndex((r) => r.key === selectedRow?.key) : -1;
+        const i = nextIndex(cur, order.length, a.dir);
+        if (i < 0) break;
+        const row = order[i];
+        for (const k of collapseKeysToReveal(row, "pending", collapsed)) collapsed.delete(k);
+        tab = "pending";
+        selectedRow = row;
+        break;
+      }
+      case "open":
+        if (selectedRow) void open(selectedRow, firstLine);
+        break;
+      case "tab":
+        setTab(a.tab);
+        break;
+    }
+    e.preventDefault();
+  }
+
+  // The tray tooltip shows the same total as the toolbar.
+  $effect(() => {
+    void setPendingCount(totalPending).catch(() => {});
+  });
 
   onMount(() => {
     const mq = matchMedia("(prefers-color-scheme: light)");
@@ -128,6 +224,11 @@
     mq.addEventListener("change", sync);
 
     void loadProjects();
+    getConfig().then(
+      (c) => (config = c),
+      () => {},
+    );
+    window.addEventListener("keydown", onKey);
     const off = onChanged(({ roots }) => {
       if (roots.length === 0) {
         void loadProjects();
@@ -141,13 +242,10 @@
 
     return () => {
       mq.removeEventListener("change", sync);
+      window.removeEventListener("keydown", onKey);
       void off.then((f) => f());
     };
   });
-
-  function fileName(rel: string) {
-    return rel.split("/").pop() ?? rel;
-  }
 </script>
 
 <div class="app">
@@ -248,32 +346,30 @@
               {tab}
               {mode}
               {theme}
+              {collapsed}
+              editorName={editorLabel(config.editor)}
               selectedKey={selectedRow?.key ?? null}
               onselect={(r) => (selectedRow = r)}
+              onopen={(r) => void open(r, lineFor(r))}
             />
           {/if}
         </div>
       {/if}
     </section>
 
-    <main class="diff" aria-label="Diff">
-      {#if selectedRow}
-        <div class="diff-head">
-          <img src={iconFor(fileName(selectedRow.rel), "file", false, theme)} alt="" width="16" height="16" draggable="false" />
-          <span class="diff-path">
-            {#if selectedRow.rel.includes("/")}<span class="diff-dir">{selectedRow.rel.slice(0, selectedRow.rel.lastIndexOf("/") + 1)}</span>{/if}<span class="diff-file">{fileName(selectedRow.rel)}</span>
-          </span>
-          {#if selectedRow.newFile}<span class="tag new">New file</span>{/if}
-          <span class="diff-stats num">
-            <span class="add">+{selectedRow.added}</span>
-            <span class="del">−{selectedRow.removed}</span>
-          </span>
-        </div>
-      {/if}
-      <div class="placeholder">
-        <p>{selectedRow ? "The side-by-side diff will appear here." : "Select a file to see its changes."}</p>
-      </div>
-    </main>
+    <DiffView
+      row={selectedRow}
+      kind={tab}
+      root={selected ?? ""}
+      version={viewVersion}
+      {theme}
+      {config}
+      bind:firstLine
+      {openError}
+      onopen={() => selectedRow && void open(selectedRow, firstLine)}
+      onpick={(t) => void pickEditor(t)}
+      ondismiss={() => (openError = null)}
+    />
   </div>
 </div>
 
@@ -446,56 +542,6 @@
     }
   }
 
-  .diff {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    min-height: 0;
-  }
-  .diff-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    height: 40px;
-    padding: 0 var(--pad);
-    border-bottom: 1px solid var(--rule);
-    flex: none;
-  }
-  .diff-path {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-family: var(--font-mono);
-    font-size: var(--fs-small);
-    user-select: text;
-  }
-  .diff-dir {
-    color: var(--muted);
-  }
-  .diff-file {
-    font-weight: 500;
-  }
-  .tag.new {
-    padding: 0 6px;
-    border-radius: var(--radius-chip);
-    font-size: var(--fs-meta);
-    line-height: 18px;
-    color: var(--untracked);
-    background: var(--raised);
-  }
-  .diff-stats {
-    margin-left: auto;
-    display: inline-flex;
-    gap: 8px;
-    font-size: var(--fs-small);
-  }
-  .add {
-    color: var(--positive);
-  }
-  .del {
-    color: var(--negative);
-  }
 
   @media (max-width: 1000px) {
     .app {
@@ -526,17 +572,9 @@
     .review {
       border-right: 0;
     }
-    .diff {
+    .sheet > :global(.diff) {
       display: none;
     }
   }
 
-  .placeholder {
-    flex: 1;
-    display: grid;
-    place-items: center;
-    padding: 24px;
-    text-align: center;
-    color: var(--muted);
-  }
 </style>

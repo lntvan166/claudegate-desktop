@@ -1,0 +1,139 @@
+//! Config and editor tests. Every file touched lives in a temp dir; the real
+//! ~/.claudegate and ~/.claudegate-desktop are never read or written.
+use claudegate_desktop_lib::config::{
+    config_path_in, load_or_create, save_editor, Config, DEFAULT_EDITOR, VSCODE,
+};
+use claudegate_desktop_lib::editor::{render_editor_command, resolve_program, resolve_with_bundles};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+#[test]
+fn render_splits_template_before_substituting() {
+    assert_eq!(
+        render_editor_command("zed {path}:{line}", "/a b/c.ts", 12),
+        vec!["zed".to_string(), "/a b/c.ts:12".to_string()]
+    );
+    assert_eq!(
+        render_editor_command("code -g {path}:{line}", "/a b/c.ts", 12),
+        vec!["code".to_string(), "-g".to_string(), "/a b/c.ts:12".to_string()]
+    );
+}
+
+#[test]
+fn render_appends_path_when_template_has_no_placeholder() {
+    assert_eq!(
+        render_editor_command("subl", "/x y.rs", 3),
+        vec!["subl".to_string(), "/x y.rs".to_string()]
+    );
+}
+
+#[test]
+fn render_does_not_reexpand_placeholders_inside_the_path() {
+    assert_eq!(
+        render_editor_command("zed {path}:{line}", "/w/{line}.ts", 7),
+        vec!["zed".to_string(), "/w/{line}.ts:7".to_string()]
+    );
+}
+
+#[test]
+fn missing_config_gives_default_and_creates_it() {
+    let home = tempfile::tempdir().unwrap();
+    let p = config_path_in(home.path());
+    assert_eq!(p, home.path().join(".claudegate-desktop").join("config.json"));
+    let c = load_or_create(&p);
+    assert_eq!(c, Config { editor: DEFAULT_EDITOR.into(), custom_editor: None });
+    assert_eq!(DEFAULT_EDITOR, "zed {path}:{line}");
+    assert!(p.is_file(), "defaults written to the app's own dir");
+    assert_eq!(load_or_create(&p), c);
+}
+
+#[test]
+fn malformed_config_reads_as_default_and_is_not_overwritten_on_load() {
+    let home = tempfile::tempdir().unwrap();
+    let p = config_path_in(home.path());
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(&p, "{ nope").unwrap();
+    assert_eq!(load_or_create(&p).editor, DEFAULT_EDITOR);
+    assert_eq!(fs::read_to_string(&p).unwrap(), "{ nope");
+    assert!(save_editor(&p, VSCODE, None).is_err(), "never clobber a file we cannot parse");
+}
+
+#[test]
+fn custom_editor_is_read_and_preserved_by_set_editor() {
+    let home = tempfile::tempdir().unwrap();
+    let p = config_path_in(home.path());
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(&p, r#"{"editor":"zed {path}:{line}","customEditor":"nvim +{line} {path}","other":1}"#).unwrap();
+    let c = load_or_create(&p);
+    assert_eq!(c.custom_editor.as_deref(), Some("nvim +{line} {path}"));
+    let saved = save_editor(&p, VSCODE, None).unwrap();
+    assert_eq!(saved.editor, VSCODE);
+    assert_eq!(saved.custom_editor.as_deref(), Some("nvim +{line} {path}"));
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+    assert_eq!(v["other"], 1, "unknown keys survive");
+    assert_eq!(load_or_create(&p).editor, VSCODE);
+}
+
+#[test]
+fn set_editor_creates_dir_and_file_and_rejects_empty() {
+    let home = tempfile::tempdir().unwrap();
+    let p = config_path_in(home.path());
+    assert!(save_editor(&p, "   ", None).is_err());
+    let c = save_editor(&p, VSCODE, None).unwrap();
+    assert_eq!(c.editor, VSCODE);
+    assert!(p.is_file());
+}
+
+#[test]
+fn set_editor_refuses_paths_under_the_claudegate_home() {
+    let home = tempfile::tempdir().unwrap();
+    let cg = home.path().join(".claudegate");
+    let p = cg.join("config.json");
+    assert!(save_editor(&p, VSCODE, Some(&cg)).is_err());
+    assert!(!cg.exists());
+}
+
+fn fake(set: Vec<PathBuf>) -> impl Fn(&Path) -> bool {
+    move |p: &Path| set.iter().any(|s| s == p)
+}
+
+#[test]
+fn resolver_prefers_path_then_extra_dirs() {
+    let path_var = std::env::join_paths(["/p1", "/p2"]).unwrap();
+    let extra = vec![PathBuf::from("/home/u/.local/bin"), PathBuf::from("/usr/local/bin")];
+    let exists = fake(vec![PathBuf::from("/p2/zed"), PathBuf::from("/home/u/.local/bin/zed")]);
+    assert_eq!(
+        resolve_program("zed", Some(&path_var), &extra, &exists),
+        Some(PathBuf::from("/p2/zed"))
+    );
+    // A desktop launch often has a bare PATH: fall back to the install dirs.
+    assert_eq!(
+        resolve_program("zed", None, &extra, &exists),
+        Some(PathBuf::from("/home/u/.local/bin/zed"))
+    );
+    assert_eq!(resolve_program("code", Some(&path_var), &extra, &exists), None);
+}
+
+#[test]
+fn resolver_takes_explicit_paths_as_given() {
+    let exists = fake(vec![PathBuf::from("/opt/ed/bin/ed")]);
+    assert_eq!(
+        resolve_program("/opt/ed/bin/ed", None, &[], &exists),
+        Some(PathBuf::from("/opt/ed/bin/ed"))
+    );
+    assert_eq!(resolve_program("/nope/ed", None, &[], &exists), None);
+    assert_eq!(resolve_program("", None, &[], &exists), None);
+}
+
+#[test]
+fn resolver_falls_back_to_an_app_bundled_cli() {
+    let cli = PathBuf::from("/Applications/Zed.app/Contents/MacOS/cli");
+    let exists = fake(vec![cli.clone()]);
+    let extra = vec![PathBuf::from("/usr/local/bin")];
+    assert_eq!(resolve_with_bundles("zed", None, &extra, &[cli.clone()], &exists), Some(cli.clone()));
+    let on_path = fake(vec![PathBuf::from("/usr/local/bin/zed"), cli.clone()]);
+    assert_eq!(
+        resolve_with_bundles("zed", None, &extra, &[cli], &on_path),
+        Some(PathBuf::from("/usr/local/bin/zed"))
+    );
+}

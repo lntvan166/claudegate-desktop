@@ -1,10 +1,20 @@
 <script lang="ts">
-  import { SvelteSet } from "svelte/reactivity";
+  import { tick } from "svelte";
+  import type { SvelteSet } from "svelte/reactivity";
   import type { DiffKind } from "../lib/api";
   import { iconFor, type IconTheme } from "../lib/icons";
   import { nodeKey, type Group, type Row } from "../lib/rows";
   import { relTime } from "../lib/time";
-  import { buildTree, type TreeNode } from "../lib/tree";
+  import type { TreeNode } from "../lib/tree";
+  import {
+    fileId,
+    folderCollapseKey,
+    folderId,
+    groupCollapseKey,
+    groupId,
+    nodesFor,
+    visibleItems,
+  } from "../lib/visible";
 
   let {
     groups,
@@ -13,7 +23,10 @@
     mode,
     selectedKey,
     theme,
+    collapsed,
+    editorName,
     onselect,
+    onopen,
   }: {
     groups: Group[];
     showGroups: boolean;
@@ -21,24 +34,25 @@
     mode: "tree" | "list";
     selectedKey: string | null;
     theme: IconTheme;
+    /** Collapsed folders and groups, keyed per tab. Owned by App so keyboard order can see it. */
+    collapsed: SvelteSet<string>;
+    editorName: string;
     onselect: (row: Row) => void;
+    onopen: (row: Row) => void;
   } = $props();
 
-  /** Collapsed folders and groups, keyed per tab so each tab keeps its own shape. */
-  const collapsed = new SvelteSet<string>();
+  let treeEl: HTMLDivElement | undefined = $state();
 
-  const trees = $derived(
-    groups.map((g) => ({
-      group: g,
-      nodes: mode === "tree" ? buildTree(g.rows) : flat(g.rows),
-    })),
-  );
+  const trees = $derived(groups.map((g) => ({ group: g, nodes: nodesFor(g.rows, mode) })));
+  const items = $derived(visibleItems(groups, { mode, showGroups, tab, collapsed }));
 
-  function flat(rows: Row[]): TreeNode<Row>[] {
-    return [...rows]
-      .sort((a, b) => a.rel.toLowerCase().localeCompare(b.rel.toLowerCase()))
-      .map((r) => ({ name: r.rel.split("/").pop() ?? r.rel, rel: r.rel, kind: "file", item: r }));
-  }
+  /** The row that was last focused inside the tree; the tree's single tab stop follows it. */
+  let focusId = $state<string | null>(null);
+  const tabId = $derived.by(() => {
+    if (focusId && items.some((i) => i.id === focusId)) return focusId;
+    const sel = selectedKey ? items.find((i) => i.row?.key === selectedKey) : undefined;
+    return sel?.id ?? items[0]?.id ?? null;
+  });
 
   function toggle(key: string) {
     if (collapsed.has(key)) collapsed.delete(key);
@@ -55,6 +69,78 @@
   }
 
   const pad = (depth: number) => 10 + depth * 14;
+
+  function rowEl(id: string): HTMLElement | null {
+    return treeEl?.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`) ?? null;
+  }
+
+  async function focusItem(id: string) {
+    focusId = id;
+    await tick();
+    rowEl(id)?.focus();
+  }
+
+  /** Arrow keys (and j/k) move through visible rows; selection follows focus onto files. */
+  function onkeydown(e: KeyboardEvent) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const id = (e.target as HTMLElement).closest<HTMLElement>("[data-id]")?.dataset.id;
+    const i = items.findIndex((x) => x.id === id);
+    if (i === -1) return;
+    const cur = items[i];
+    let to: number | null = null;
+    switch (e.key) {
+      case "ArrowDown":
+      case "j":
+        to = Math.min(items.length - 1, i + 1);
+        break;
+      case "ArrowUp":
+      case "k":
+        to = Math.max(0, i - 1);
+        break;
+      case "Home":
+        to = 0;
+        break;
+      case "End":
+        to = items.length - 1;
+        break;
+      case "ArrowRight":
+        if (cur.collapseKey && !cur.open) collapsed.delete(cur.collapseKey);
+        else if (cur.collapseKey && items[i + 1]?.parent === cur.id) to = i + 1;
+        break;
+      case "ArrowLeft":
+        if (cur.collapseKey && cur.open) collapsed.add(cur.collapseKey);
+        else if (cur.parent) to = items.findIndex((x) => x.id === cur.parent);
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    if (to === null || to < 0) return;
+    const target = items[to];
+    void focusItem(target.id);
+    if (target.row && target.row.key !== selectedKey) onselect(target.row);
+  }
+
+  function onfocusin(e: FocusEvent) {
+    const id = (e.target as HTMLElement).closest<HTMLElement>("[data-id]")?.dataset.id;
+    if (id) focusId = id;
+  }
+
+  // Keep the selected row in view, and carry focus with it when the tree has focus.
+  $effect(() => {
+    const key = selectedKey;
+    if (!key) return;
+    void tick().then(() => {
+      const el = rowEl(`f:${key}`);
+      if (!el) return;
+      el.scrollIntoView({ block: "nearest" });
+      if (treeEl?.contains(document.activeElement) && document.activeElement !== el) {
+        focusId = `f:${key}`;
+        el.focus();
+      }
+    });
+  });
 </script>
 
 {#snippet guides(depth: number)}
@@ -80,13 +166,16 @@
 
 {#snippet node(n: TreeNode<Row>, depth: number, scope: string)}
   {#if n.kind === "folder"}
-    {@const key = `${tab}|${scope}|${n.rel}`}
+    {@const key = folderCollapseKey(tab, scope, n.rel)}
     {@const open = !collapsed.has(key)}
+    {@const id = folderId(scope, n.rel)}
     <button
       class="row folder"
       role="treeitem"
       aria-expanded={open}
       aria-selected="false"
+      data-id={id}
+      tabindex={tabId === id ? 0 : -1}
       style:padding-left="{pad(depth)}px"
       title={n.rel}
       onclick={() => toggle(key)}
@@ -98,40 +187,70 @@
       {#if !open}<span class="meta num">{countFiles(n)}</span>{/if}
     </button>
     {#if open}
-      {#each n.children ?? [] as child (nodeKey(child))}
-        {@render node(child, depth + 1, scope)}
-      {/each}
+      <div role="group">
+        {#each n.children ?? [] as child (nodeKey(child))}
+          {@render node(child, depth + 1, scope)}
+        {/each}
+      </div>
     {/if}
   {:else if n.item}
     {@const row = n.item}
-    <button
-      class="row file"
-      class:selected={row.key === selectedKey}
-      class:modified={tab === "pending" && !row.newFile}
-      class:untracked={tab === "pending" && row.newFile}
-      role="treeitem"
-      aria-selected={row.key === selectedKey}
-      style:padding-left="{pad(depth) + 16}px"
-      title={row.path}
-      onclick={() => onselect(row)}
-    >
-      {@render guides(depth)}
-      <img class="icon" src={iconFor(n.name, "file", false, theme)} alt="" draggable="false" />
-      <span class="name">{n.name}</span>
-      {#if mode === "list" && dirOf(n.rel)}<span class="dir">{dirOf(n.rel)}</span>{/if}
-      <span class="spacer"></span>
-      {#if row.decidedAt}<span class="meta">{relTime(row.decidedAt)}</span>{/if}
-      {@render stats(row)}
-    </button>
+    {@const id = fileId(row)}
+    <div class="item" role="none">
+      <button
+        class="row file"
+        class:selected={row.key === selectedKey}
+        class:modified={tab === "pending" && !row.newFile}
+        class:untracked={tab === "pending" && row.newFile}
+        role="treeitem"
+        aria-selected={row.key === selectedKey}
+        data-id={id}
+        tabindex={tabId === id ? 0 : -1}
+        style:padding-left="{pad(depth) + 16}px"
+        title={row.path}
+        onclick={() => onselect(row)}
+      >
+        {@render guides(depth)}
+        <img class="icon" src={iconFor(n.name, "file", false, theme)} alt="" draggable="false" />
+        <span class="name">{n.name}</span>
+        {#if mode === "list" && dirOf(n.rel)}<span class="dir">{dirOf(n.rel)}</span>{/if}
+        <span class="spacer"></span>
+        {#if row.decidedAt}<span class="meta">{relTime(row.decidedAt)}</span>{/if}
+        {@render stats(row)}
+      </button>
+      <!-- Mouse shortcut; the keyboard equivalent is O on the selected row. -->
+      <button class="open" tabindex="-1" aria-label="Open {n.name} in {editorName}" title="Open in {editorName}" onclick={() => onopen(row)}>
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path
+            d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M12 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.3"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
+    </div>
   {/if}
 {/snippet}
 
-<div class="tree" role="tree" aria-label="{tab} files">
+<div class="tree" role="tree" aria-label="{tab} files" tabindex="-1" bind:this={treeEl} {onkeydown} {onfocusin}>
   {#each trees as { group, nodes } (group.scope.root)}
     {#if showGroups}
-      {@const key = `${tab}|group|${group.scope.root}`}
+      {@const key = groupCollapseKey(tab, group.scope.root)}
       {@const open = !collapsed.has(key)}
-      <button class="row group" role="treeitem" aria-expanded={open} aria-selected="false" title={group.scope.root} onclick={() => toggle(key)}>
+      {@const id = groupId(group.scope.root)}
+      <button
+        class="row group"
+        role="treeitem"
+        aria-expanded={open}
+        aria-selected="false"
+        data-id={id}
+        tabindex={tabId === id ? 0 : -1}
+        title={group.scope.root}
+        onclick={() => toggle(key)}
+      >
         {@render chevron(open)}
         {#if group.scope.isWorktree}
           <svg class="glyph" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
@@ -151,9 +270,11 @@
         <span class="meta num">{group.rows.length}</span>
       </button>
       {#if open}
-        {#each nodes as n (nodeKey(n))}
-          {@render node(n, 1, group.scope.root)}
-        {/each}
+        <div role="group">
+          {#each nodes as n (nodeKey(n))}
+            {@render node(n, 1, group.scope.root)}
+          {/each}
+        </div>
       {/if}
     {:else}
       {#each nodes as n (nodeKey(n))}
@@ -167,6 +288,40 @@
   .tree {
     padding: 6px 0 16px;
   }
+  .tree:focus {
+    outline: none;
+  }
+
+  .item {
+    position: relative;
+  }
+  .open {
+    position: absolute;
+    top: 50%;
+    right: 8px;
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    margin-top: -11px;
+    border-radius: var(--radius-chip);
+    color: var(--muted);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms var(--ease);
+  }
+  .item:hover .open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .open:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--text) 9%, transparent);
+  }
+  .item:hover .stats,
+  .item:hover .meta {
+    visibility: hidden;
+  }
 
   .row {
     position: relative;
@@ -179,7 +334,8 @@
     white-space: nowrap;
     color: var(--text);
   }
-  .row:hover {
+  .row:hover,
+  .item:hover > .row {
     background: var(--hover);
   }
   .row.selected {

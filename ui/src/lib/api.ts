@@ -6,6 +6,9 @@
 // builds drop the branch and never emit the mock chunk.
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { EditorConfig } from "./editors";
+
+export type { EditorConfig };
 
 export type ProjectSummary = {
   root: string;
@@ -66,6 +69,13 @@ export interface Api {
   getProject(root: string): Promise<ProjectView>;
   getDiff(root: string, scope: string, kind: DiffKind, key: string): Promise<DiffPayload>;
   onChanged(handler: (p: ChangedPayload) => void): Promise<() => void>;
+  getConfig(): Promise<EditorConfig>;
+  /** Remembers `template` as the editor in ~/.claudegate-desktop/config.json. */
+  setEditor(template: string): Promise<EditorConfig>;
+  /** Opens `path` at `line`; `template` null means the remembered editor. */
+  openInEditor(path: string, line: number, template: string | null): Promise<void>;
+  /** The tray tooltip's total. */
+  setPendingCount(count: number): Promise<void>;
 }
 
 const tauriApi: Api = {
@@ -73,6 +83,10 @@ const tauriApi: Api = {
   getProject: (root) => invoke<ProjectView>("get_project", { root }),
   getDiff: (root, scope, kind, key) => invoke<DiffPayload>("get_diff", { root, scope, kind, key }),
   onChanged: (handler) => listen<ChangedPayload>(CHANGED_EVENT, (e) => handler(e.payload)),
+  getConfig: () => invoke<EditorConfig>("get_config"),
+  setEditor: (template) => invoke<EditorConfig>("set_editor", { template }),
+  openInEditor: (path, line, template) => invoke<void>("open_in_editor", { path, line, template }),
+  setPendingCount: (count) => invoke<void>("set_pending_count", { count }),
 };
 
 let chosen: Promise<Api> | undefined;
@@ -97,3 +111,8 @@ export const getDiff = async (root: string, scope: string, kind: DiffKind, key: 
   (await api()).getDiff(root, scope, kind, key);
 export const onChanged = async (handler: (p: ChangedPayload) => void) =>
   (await api()).onChanged(handler);
+export const getConfig = async () => (await api()).getConfig();
+export const setEditor = async (template: string) => (await api()).setEditor(template);
+export const openInEditor = async (path: string, line: number, template: string | null = null) =>
+  (await api()).openInEditor(path, line, template);
+export const setPendingCount = async (count: number) => (await api()).setPendingCount(count);
