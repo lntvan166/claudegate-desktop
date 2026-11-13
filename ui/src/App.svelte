@@ -22,7 +22,7 @@
   import { editorLabel, ZED } from "./lib/editors";
   import type { IconTheme } from "./lib/icons";
   import { actionFor, isTypingTarget, nextIndex } from "./lib/keys";
-  import { basename, groupsFor, scopeLabel, sortProjects, type Row } from "./lib/rows";
+  import { basename, groupsFor, scopeLabel, selectionAfterList, sortProjects, type Row } from "./lib/rows";
   import { relTime } from "./lib/time";
   import { collapseKeysToReveal, fileOrder, visibleItems } from "./lib/visible";
 
@@ -107,21 +107,23 @@
     } finally {
       loadingList = false;
     }
-    if (!selected || !projects.some((p) => p.root === selected)) {
-      let remembered: string | null = null;
-      try {
-        remembered = localStorage.getItem(STORE_KEY);
-      } catch {}
-      const pick =
-        projects.find((p) => p.root === remembered) ?? projects.find((p) => p.pending > 0) ?? projects[0];
-      if (pick) select(pick.root);
-      if (usingMock) previewRow();
-      else {
+    let remembered: string | null = null;
+    try {
+      remembered = localStorage.getItem(STORE_KEY);
+    } catch {}
+    const next = selectionAfterList(projects, selected, remembered);
+    switch (next.kind) {
+      case "keep":
+        await loadView(next.root);
+        break;
+      case "select":
+        select(next.root);
+        if (usingMock) void previewRow();
+        break;
+      case "clear":
         selected = null;
         view = null;
-      }
-    } else {
-      await loadView(selected);
+        break;
     }
   }
 

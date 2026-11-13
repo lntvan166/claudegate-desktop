@@ -82,3 +82,20 @@ export function sortProjects(list: ProjectSummary[]): ProjectSummary[] {
 export function nodeKey(n: TreeNode<Row>): string {
   return n.kind === "file" && n.item ? `f:${n.item.key}` : `d:${n.rel}`;
 }
+
+export type ListSelection = { kind: "keep"; root: string } | { kind: "select"; root: string } | { kind: "clear" };
+
+/**
+ * What to select after the project list loads: keep a selection still listed, else the remembered
+ * project, the first with pending changes, or the first; clear only when the list is empty.
+ */
+export function selectionAfterList(
+  projects: ProjectSummary[],
+  selected: string | null,
+  remembered: string | null,
+): ListSelection {
+  if (selected && projects.some((p) => p.root === selected)) return { kind: "keep", root: selected };
+  const pick =
+    projects.find((p) => p.root === remembered) ?? projects.find((p) => p.pending > 0) ?? projects[0];
+  return pick ? { kind: "select", root: pick.root } : { kind: "clear" };
+}

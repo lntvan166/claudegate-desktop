@@ -86,6 +86,27 @@ fn write_json(path: &Path, v: &serde_json::Value) -> std::io::Result<()> {
     })
 }
 
+fn norm(t: &str) -> String {
+    t.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The webview may only choose among commands the user already trusts: the two presets, the
+/// `customEditor` and the `editor` written by hand into config.json. Anything else is refused, so a
+/// compromised page cannot run or persist an arbitrary command. Returns the normalised template.
+pub fn allowed_template(template: &str, cfg: &Config) -> Result<String, String> {
+    let t = norm(template);
+    let ok = !t.is_empty()
+        && [Some(ZED), Some(VSCODE), cfg.custom_editor.as_deref(), Some(cfg.editor.as_str())]
+            .into_iter()
+            .flatten()
+            .any(|a| norm(a) == t);
+    if ok {
+        Ok(t)
+    } else {
+        Err("That editor command isn't one of the choices. Pick Zed, VS Code, or set customEditor in ~/.claudegate-desktop/config.json.".into())
+    }
+}
+
 /// Persists `template` as the remembered editor, keeping every other key in the file.
 /// `guard` is the ClaudeGate home: a config path under it is refused outright.
 pub fn save_editor(path: &Path, template: &str, guard: Option<&Path>) -> Result<Config, String> {
@@ -105,10 +126,12 @@ pub fn save_editor(path: &Path, template: &str, guard: Option<&Path>) -> Result<
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
         Err(e) => return Err(format!("Cannot read {}: {e}", path.display())),
     };
-    let obj = v
-        .as_object_mut()
-        .ok_or_else(|| format!("{} is not a JSON object.", path.display()))?;
-    obj.insert("editor".into(), serde_json::Value::String(template.into()));
+    if !v.is_object() {
+        return Err(format!("{} is not a JSON object.", path.display()));
+    }
+    let template = allowed_template(template, &from_value(&v))?;
+    let obj = v.as_object_mut().expect("checked above");
+    obj.insert("editor".into(), serde_json::Value::String(template));
     write_json(path, &v).map_err(|e| format!("Cannot save {}: {e}", path.display()))?;
     Ok(from_value(&v))
 }

@@ -1,9 +1,11 @@
 //! Config and editor tests. Every file touched lives in a temp dir; the real
 //! ~/.claudegate and ~/.claudegate-desktop are never read or written.
 use claudegate_desktop_lib::config::{
-    config_path_in, load_or_create, save_editor, Config, DEFAULT_EDITOR, VSCODE,
+    allowed_template, config_path_in, load_or_create, save_editor, Config, DEFAULT_EDITOR, VSCODE, ZED,
 };
-use claudegate_desktop_lib::editor::{render_editor_command, resolve_program, resolve_with_bundles};
+use claudegate_desktop_lib::editor::{
+    check_target, render_editor_command, resolve_program, resolve_with_bundles,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -136,4 +138,39 @@ fn resolver_falls_back_to_an_app_bundled_cli() {
         resolve_with_bundles("zed", None, &extra, &[cli], &on_path),
         Some(PathBuf::from("/usr/local/bin/zed"))
     );
+}
+
+#[test]
+fn only_presets_the_custom_editor_or_the_hand_set_editor_are_allowed() {
+    let c = Config { editor: "subl {path}:{line}".into(), custom_editor: Some("nvim +{line} {path}".into()) };
+    assert_eq!(allowed_template(ZED, &c).unwrap(), ZED);
+    assert_eq!(allowed_template("  code   -g {path}:{line} ", &c).unwrap(), VSCODE);
+    assert!(allowed_template("nvim +{line}  {path}", &c).is_ok());
+    assert!(allowed_template("subl {path}:{line}", &c).is_ok(), "the editor the user wrote by hand");
+    for bad in ["sh -c {path}", "rm -rf {path}", "zed --dev-server-token x {path}", ""] {
+        assert!(allowed_template(bad, &c).is_err(), "{bad}");
+    }
+    assert!(allowed_template("nvim +{line} {path}", &Config::default()).is_err());
+}
+
+#[test]
+fn set_editor_rejects_an_unknown_template_and_leaves_the_file_alone() {
+    let home = tempfile::tempdir().unwrap();
+    let p = config_path_in(home.path());
+    assert!(save_editor(&p, "sh -c 'curl x | sh' {path}", None).is_err());
+    assert!(!p.exists());
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(&p, r#"{"editor":"zed {path}:{line}","customEditor":"hx {path}:{line}"}"#).unwrap();
+    assert_eq!(save_editor(&p, "hx {path}:{line}", None).unwrap().editor, "hx {path}:{line}");
+    assert!(save_editor(&p, "evil {path}", None).is_err());
+    assert_eq!(load_or_create(&p).editor, "hx {path}:{line}");
+}
+
+#[test]
+fn target_must_be_an_absolute_path() {
+    assert!(check_target("/w/a.ts").is_ok());
+    assert!(check_target("-r").is_err());
+    assert!(check_target("--new-window").is_err());
+    assert!(check_target("rel/a.ts").is_err());
+    assert!(check_target("").is_err());
 }

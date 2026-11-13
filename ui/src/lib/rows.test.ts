@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProjectSummary, ProjectView } from "./api";
-import { groupsFor, nodeKey, sortProjects } from "./rows";
+import { groupsFor, nodeKey, selectionAfterList, sortProjects } from "./rows";
 import { buildTree } from "./tree";
 
 const view: ProjectView = {
@@ -76,5 +76,24 @@ describe("duplicate accepted records", () => {
 
   it("keys folders apart from files of the same rel", () => {
     expect(nodeKey({ name: "a", rel: "a", kind: "folder", children: [] })).toBe("d:a");
+  });
+});
+
+describe("selectionAfterList", () => {
+  const p = (root: string, pending = 0, missing = false): ProjectSummary => ({ root, name: root, missing, pending });
+  const list = [p("/a"), p("/b", 2), p("/c")];
+
+  it("keeps a current selection that is still listed", () => {
+    expect(selectionAfterList(list, "/c", "/a")).toEqual({ kind: "keep", root: "/c" });
+  });
+
+  it("selects the remembered project, else the first with pending, else the first", () => {
+    expect(selectionAfterList(list, null, "/c")).toEqual({ kind: "select", root: "/c" });
+    expect(selectionAfterList(list, null, "/gone")).toEqual({ kind: "select", root: "/b" });
+    expect(selectionAfterList([p("/a"), p("/c")], "/gone", null)).toEqual({ kind: "select", root: "/a" });
+  });
+
+  it("clears only when there is nothing to select", () => {
+    expect(selectionAfterList([], "/a", "/a")).toEqual({ kind: "clear" });
   });
 });

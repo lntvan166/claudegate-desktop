@@ -150,8 +150,18 @@ fn label(program: &str) -> &str {
     }
 }
 
+/// The file to open must be an absolute path, so it can never be read as an editor option (`-r`).
+pub fn check_target(path: &str) -> Result<(), String> {
+    if Path::new(path).is_absolute() {
+        Ok(())
+    } else {
+        Err(format!("Not an absolute file path: {path}"))
+    }
+}
+
 /// Resolves and spawns the editor for `template`. Returns once the process has started.
 pub fn launch(template: &str, path: &str, line: u32) -> Result<(), String> {
+    check_target(path)?;
     let mut argv = render_editor_command(template, path, line);
     if argv.is_empty() {
         return Err("The editor command is empty. Choose an editor from the Open with menu.".into());
@@ -190,9 +200,11 @@ pub fn launch(template: &str, path: &str, line: u32) -> Result<(), String> {
 #[tauri::command]
 pub async fn open_in_editor(path: String, line: u32, template: Option<String>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let t = match template.filter(|t| !t.trim().is_empty()) {
-            Some(t) => t,
-            None => crate::config::load_or_create(&crate::config::config_path()).editor,
+        check_target(&path)?;
+        let cfg = crate::config::load_or_create(&crate::config::config_path());
+        let t = match template {
+            Some(t) => crate::config::allowed_template(&t, &cfg)?,
+            None => cfg.editor,
         };
         launch(&t, &path, line)
     })
