@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProjectSummary, ProjectView } from "./api";
-import { groupsFor, sortProjects } from "./rows";
+import { groupsFor, nodeKey, sortProjects } from "./rows";
+import { buildTree } from "./tree";
 
 const view: ProjectView = {
   root: "/ws/shop",
@@ -53,5 +54,27 @@ describe("sortProjects", () => {
     const p = (name: string, missing = false): ProjectSummary => ({ root: `/${name}`, name, missing, pending: 0 });
     const sorted = sortProjects([p("b"), p("gone", true), p("a")]);
     expect(sorted.map((x) => x.name)).toEqual(["b", "a", "gone"]);
+  });
+});
+
+describe("duplicate accepted records", () => {
+  it("keeps both rows for one path, with distinct node keys", () => {
+    const twice: ProjectView = {
+      ...view,
+      accepted: [
+        { id: "t3::/ws/shop/x.md", path: "/ws/shop/x.md", rel: "x.md", scope: "/ws/shop", decidedAt: "t3", added: 2, removed: 0 },
+        { id: "t1::/ws/shop/x.md", path: "/ws/shop/x.md", rel: "x.md", scope: "/ws/shop", decidedAt: "t1", added: 1, removed: 0 },
+      ],
+    };
+    const rows = groupsFor(twice, "accepted")[0].rows;
+    const leaves = buildTree(rows);
+    expect(leaves).toHaveLength(2);
+    const keys = leaves.map(nodeKey);
+    expect(new Set(keys).size).toBe(2);
+    expect(keys).toEqual(expect.arrayContaining(["f:t3::/ws/shop/x.md", "f:t1::/ws/shop/x.md"]));
+  });
+
+  it("keys folders apart from files of the same rel", () => {
+    expect(nodeKey({ name: "a", rel: "a", kind: "folder", children: [] })).toBe("d:a");
   });
 });

@@ -2,7 +2,7 @@
   import { SvelteSet } from "svelte/reactivity";
   import type { DiffKind } from "../lib/api";
   import { iconFor, type IconTheme } from "../lib/icons";
-  import type { Group, Row } from "../lib/rows";
+  import { nodeKey, type Group, type Row } from "../lib/rows";
   import { relTime } from "../lib/time";
   import { buildTree, type TreeNode } from "../lib/tree";
 
@@ -98,7 +98,7 @@
       {#if !open}<span class="meta num">{countFiles(n)}</span>{/if}
     </button>
     {#if open}
-      {#each n.children ?? [] as child (child.rel)}
+      {#each n.children ?? [] as child (nodeKey(child))}
         {@render node(child, depth + 1, scope)}
       {/each}
     {/if}
@@ -151,12 +151,12 @@
         <span class="meta num">{group.rows.length}</span>
       </button>
       {#if open}
-        {#each nodes as n (n.rel)}
+        {#each nodes as n (nodeKey(n))}
           {@render node(n, 1, group.scope.root)}
         {/each}
       {/if}
     {:else}
-      {#each nodes as n (n.rel)}
+      {#each nodes as n (nodeKey(n))}
         {@render node(n, 0, group.scope.root)}
       {/each}
     {/if}

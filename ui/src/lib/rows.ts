@@ -1,4 +1,5 @@
 import type { DiffKind, ProjectSummary, ProjectView, ScopeView } from "./api";
+import type { TreeNode } from "./tree";
 
 /** One file row on a review tab, whatever tab it came from. */
 export type Row = {
@@ -72,4 +73,12 @@ export function groupsFor(view: ProjectView, kind: DiffKind): Group[] {
 /** Projects in roots order, with folders that no longer exist moved to the end. */
 export function sortProjects(list: ProjectSummary[]): ProjectSummary[] {
   return [...list.filter((p) => !p.missing), ...list.filter((p) => p.missing)];
+}
+
+/**
+ * A unique `{#each}` key for a tree node. Files key by their row (the accepted log is append-only,
+ * so one path can appear twice with different record ids); folders by their rel.
+ */
+export function nodeKey(n: TreeNode<Row>): string {
+  return n.kind === "file" && n.item ? `f:${n.item.key}` : `d:${n.rel}`;
 }

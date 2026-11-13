@@ -40,7 +40,8 @@ const views: Record<string, ProjectView> = {
       pending(WT, "src/checkout/stripe.test.ts", 54, 0, true),
       pending(WT, ".github/workflows/ci.yml", 7, 3),
     ],
-    accepted: [record(SHOP, "src/index.ts", 95, 6, 2), record(SHOP, "tsconfig.json", 240, 1, 1)],
+    // src/index.ts accepted twice: the log is append-only, so one path can repeat.
+    accepted: [record(SHOP, "src/index.ts", 95, 6, 2), record(SHOP, "tsconfig.json", 240, 1, 1), record(SHOP, "src/index.ts", 300, 3, 1)],
     rejected: [record(SHOP, "src/legacy/session.js", 180, 0, 112)],
   },
   [HERDR]: {
