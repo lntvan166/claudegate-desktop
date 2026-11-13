@@ -1,21 +1,69 @@
 #!/usr/bin/env bash
 # Prove the viewer never writes under the ClaudeGate home.
-# Usage: readonly-proof.sh [--no-app] [HOME_DIR] [SECONDS]
-#   HOME_DIR  default $HOME/.claudegate
-#   SECONDS   default 60 (how long the app runs)
-#   --no-app  skip launching the app (dry run of the snapshot/diff logic)
+# Usage: readonly-proof.sh [--no-app] [--bin PATH] [--print-bin] [HOME_DIR] [SECONDS]
+#   HOME_DIR     default $HOME/.claudegate
+#   SECONDS      default 60 (how long the app runs)
+#   --no-app     skip launching the app (dry run of the snapshot/diff logic)
+#   --bin PATH   the binary to run; default is the newer of target/release and target/debug
+#   --print-bin  report which binary would run (path, build time, HEAD, staleness) and exit
 # Exit 0 = UNCHANGED, 1 = changed. Never writes inside HOME_DIR.
 set -u
 
 NO_APP=0
+PRINT_BIN=0
+BIN=""
 ARGS=()
-for a in "$@"; do
-  if [ "$a" = "--no-app" ]; then NO_APP=1; else ARGS+=("$a"); fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-app) NO_APP=1 ;;
+    --print-bin) PRINT_BIN=1 ;;
+    --bin)
+      [ $# -ge 2 ] || { echo "--bin needs a path" >&2; exit 2; }
+      BIN="$2"; shift ;;
+    *) ARGS+=("$1") ;;
+  esac
+  shift
 done
 HOME_DIR="${ARGS[0]:-$HOME/.claudegate}"
 DURATION="${ARGS[1]:-60}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 TAB="$(printf '\t')"
+
+# The binary to prove: --bin, else the newest of the two profiles. Preferring release
+# whenever it existed let a stale release build "prove" code it did not contain.
+pick_bin() {
+  if [ -n "$BIN" ]; then
+    [ -x "$BIN" ] || { echo "--bin is not an executable file: $BIN" >&2; exit 2; }
+    return
+  fi
+  local rel="$REPO/target/release/claudegate-desktop" dbg="$REPO/target/debug/claudegate-desktop"
+  if [ -x "$rel" ] && [ -x "$dbg" ]; then
+    if [ "$dbg" -nt "$rel" ]; then BIN="$dbg"; else BIN="$rel"; fi
+  elif [ -x "$rel" ]; then BIN="$rel"
+  elif [ -x "$dbg" ]; then BIN="$dbg"
+  else echo "no built binary under target/ (run cargo build, or pass --bin)" >&2; exit 2
+  fi
+}
+
+describe_bin() {
+  echo "binary: $BIN (built $(date -r "$BIN" '+%Y-%m-%d %H:%M:%S %z'))"
+  echo "HEAD: $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  local newer=""
+  for d in core/src src-tauri/src ui/src; do
+    [ -d "$REPO/$d" ] || continue
+    newer="$(find "$REPO/$d" -type f -newer "$BIN" -print 2>/dev/null | head -n 1)"
+    [ -n "$newer" ] && break
+  done
+  if [ -n "$newer" ]; then
+    echo "WARNING: $BIN is older than ${newer#"$REPO"/}; rebuild, or this proves stale code" >&2
+  fi
+}
+
+if [ "$PRINT_BIN" = 1 ]; then
+  pick_bin
+  describe_bin
+  exit 0
+fi
 
 case "$DURATION" in
   ''|*[!0-9]*|0) echo "duration must be a positive integer, got: $DURATION" >&2; exit 2 ;;
@@ -34,9 +82,8 @@ snap "$TMP/before.txt"
 echo "before: $(wc -l < "$TMP/before.txt") files, sha256 $(sha256sum < "$TMP/before.txt" | cut -c1-16)"
 
 if [ "$NO_APP" = 0 ]; then
-  BIN="$REPO/target/release/claudegate-desktop"
-  [ -x "$BIN" ] || BIN="$REPO/target/debug/claudegate-desktop"
-  [ -x "$BIN" ] || { echo "no built binary under target/ (run cargo build)" >&2; exit 2; }
+  pick_bin
+  describe_bin
   echo "running $BIN for ${DURATION}s against $HOME_DIR"
   if [ -n "${READONLY_PROOF_HEADLESS:-}" ]; then
     CLAUDEGATE_HOME="$HOME_DIR" setsid env -u WAYLAND_DISPLAY GDK_BACKEND=x11 xvfb-run -a "$BIN" &
