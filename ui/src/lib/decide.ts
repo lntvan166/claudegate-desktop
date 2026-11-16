@@ -29,6 +29,8 @@ export type DecideError = {
   changed?: string[];
   /** Store errors: what earlier scopes completed. */
   partial?: DecideReport;
+  /** Store errors: the dir holding the changed files' bytes from just before they were written. */
+  snapshot?: string | null;
 };
 
 const KINDS: readonly string[] = ["store", "readOnly", "notFound", "badTarget", "invalid"];
@@ -57,8 +59,25 @@ export function parseDecideError(raw: unknown): DecideError {
       left: Array.isArray(p?.left) ? p.left : [],
       errors: Array.isArray(p?.errors) ? p.errors : [],
     };
+    out.snapshot = typeof o.snapshot === "string" ? o.snapshot : null;
   }
   return out;
+}
+
+/**
+ * The second line of a store error, and whether to offer Retry. A reject is never retried: its
+ * files were already restored or deleted, so a second reject would record the original as
+ * Claude's version. Claude's real version is in the snapshot, which the note names.
+ */
+export function storeFailure(action: DecideAction, err: DecideError): { note: string; retry: boolean } {
+  const changed = err.changed ?? [];
+  const retry = action !== "reject";
+  if (changed.length === 0) return { note: "Nothing was changed.", retry };
+  if (err.snapshot) {
+    const what = action === "reject" ? "Claude's version was" : "The files' previous contents were";
+    return { note: `${what} saved to ${err.snapshot}`, retry };
+  }
+  return { note: "Files changed but the review log was not updated.", retry };
 }
 
 export type Undo = {

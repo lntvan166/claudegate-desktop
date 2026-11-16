@@ -5,6 +5,10 @@
 //!
 //! Every write first copies the on-disk session to `<desktop_home>/backups/<hash>/`; a failed
 //! backup refuses the write. `persist` refuses any path whose parent is not `<home>/sessions`.
+//! `decide` takes that backup up front with `preflight`, before it touches any workspace file,
+//! and saves each workspace file it is about to overwrite or delete with `FileSnapshots`
+//! (`<desktop_home>/backups/<hash>/files/<stamp>/<path>`), so a failed session write can never
+//! leave Claude's version (or the user's) only in memory.
 
 use crate::merge::{merge_fresh_captures, MergeGuards};
 use crate::model::{parse_session, Session, Shape, Status};
@@ -185,7 +189,11 @@ fn backup_stamp(t: SystemTime) -> String {
 /// Sort key of a backup name `<stamp>[-N].json`: `(stamp, N)`, with no suffix as 0. Plain name
 /// order would put `…Z-1.json` before `…Z.json` (`-` < `.`) and `-10` before `-9`.
 fn backup_key(name: &str) -> Option<(String, u64)> {
-    let stem = name.strip_suffix(".json")?;
+    stamp_key(name.strip_suffix(".json")?)
+}
+
+/// `(stamp, N)` of a name `<stamp>[-N]`: a backup's stem, or a file-snapshot stamp dir.
+fn stamp_key(stem: &str) -> Option<(String, u64)> {
     if stem.len() < 20 || !stem.is_char_boundary(20) {
         return None;
     }
@@ -259,14 +267,39 @@ fn prune_backups(dir: &Path) {
     }
 }
 
-/// Read-merge-write `mine` under the lock, as the extension's `persist`: re-read the disk copy
-/// and merge in what other writers added, set `status`, back up, then write atomically.
-/// Returns the session as written. Refuses a disk copy of unknown shape without writing.
-pub(crate) fn persist(paths: &StorePaths, mine: Session, guards: &MergeGuards) -> Result<Session, StoreError> {
+fn check_session_path(paths: &StorePaths) -> Result<(), StoreError> {
     let sessions = paths.home.join("sessions");
     if paths.session_file.parent() != Some(sessions.as_path()) || paths.session_file.file_name().is_none() {
         return Err(StoreError::OutsideHome);
     }
+    Ok(())
+}
+
+/// What `decide` runs once per scope before its first write of any kind: the checks `persist`
+/// would make (the session path, a disk copy of known shape), then the session backup. A
+/// failure here refuses the decision for that scope with nothing changed. The `persist` that
+/// follows is told the backup was taken, so one decision makes one backup.
+pub(crate) fn preflight(paths: &StorePaths) -> Result<(), StoreError> {
+    check_session_path(paths)?;
+    if let Ok(text) = fs::read_to_string(&paths.session_file) {
+        if let Ok((_, Shape::Unknown(_))) = parse_session(&text) {
+            return Err(StoreError::UnknownShape);
+        }
+    }
+    backup(&paths.desktop_home, &paths.session_file)
+}
+
+/// Read-merge-write `mine` under the lock, as the extension's `persist`: re-read the disk copy
+/// and merge in what other writers added, set `status`, back up (unless `take_backup` is false
+/// because `preflight` already did), then write atomically. Returns the session as written.
+/// Refuses a disk copy of unknown shape without writing.
+pub(crate) fn persist(
+    paths: &StorePaths,
+    mine: Session,
+    guards: &MergeGuards,
+    take_backup: bool,
+) -> Result<Session, StoreError> {
+    check_session_path(paths)?;
     let _lock = acquire_lock(&paths.session_file);
 
     // No readable/parseable disk copy: write our own state (never lose it).
@@ -279,11 +312,101 @@ pub(crate) fn persist(paths: &StorePaths, mine: Session, guards: &MergeGuards) -
 
     session.status = if session.files.is_empty() { Status::Reviewed } else { Status::Active };
 
-    backup(&paths.desktop_home, &paths.session_file)?;
+    if take_backup {
+        backup(&paths.desktop_home, &paths.session_file)?;
+    }
 
     let text = serde_json::to_string_pretty(&session).map_err(|e| StoreError::Write(e.to_string()))?;
     atomic_write(&paths.session_file, &text, false).map_err(|e| StoreError::Write(e.to_string()))?;
     Ok(session)
+}
+
+/// Raw-byte copies of the workspace files one decision is about to overwrite or delete, in
+/// `<desktop_home>/backups/<hash>/files/<stamp>[-N]/<path relative to the scope root>`. The stamp
+/// dir is created on the first save; the newest `BACKUPS_KEPT` stamp dirs are kept per hash.
+#[derive(Debug)]
+pub(crate) struct FileSnapshots {
+    root: PathBuf,
+    stamp: String,
+    dir: Option<PathBuf>,
+}
+
+impl FileSnapshots {
+    pub(crate) fn new(desktop_home: &Path, session_file: &Path) -> Result<FileSnapshots, StoreError> {
+        let root = backup_dir(desktop_home, session_file)?.join("files");
+        Ok(FileSnapshots { root, stamp: backup_stamp(SystemTime::now()), dir: None })
+    }
+
+    /// The stamp dir, once something was saved.
+    pub(crate) fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
+    }
+
+    fn ensure_dir(&mut self) -> io::Result<PathBuf> {
+        if let Some(d) = &self.dir {
+            return Ok(d.clone());
+        }
+        fs::create_dir_all(&self.root)?;
+        let mut n = 0u64;
+        let dir = loop {
+            let name = if n == 0 { self.stamp.clone() } else { format!("{}-{n}", self.stamp) };
+            let d = self.root.join(name);
+            match fs::create_dir(&d) {
+                Ok(()) => break d,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < 10_000 => n += 1,
+                Err(e) => return Err(e),
+            }
+        };
+        prune_snapshot_dirs(&self.root, &dir);
+        self.dir = Some(dir.clone());
+        Ok(dir)
+    }
+
+    /// Copy `src`'s current bytes (through a symlink) to `<stamp dir>/<rel>`. `Ok(false)` when
+    /// `src` does not exist: there is nothing to lose. `rel` must be relative and made only of
+    /// plain names, so it cannot leave the stamp dir.
+    pub(crate) fn save(&mut self, rel: &Path, src: &Path) -> io::Result<bool> {
+        use std::path::Component;
+        if rel.as_os_str().is_empty() || !rel.components().all(|c| matches!(c, Component::Normal(_))) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unsafe snapshot path {}", rel.display())));
+        }
+        let bytes = match fs::read(src) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        let dest = self.ensure_dir()?.join(rel);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut f = OpenOptions::new().write(true).create_new(true).open(&dest)?;
+        if let Err(e) = f.write_all(&bytes).and_then(|()| f.sync_all()) {
+            drop(f);
+            let _ = fs::remove_file(&dest);
+            return Err(e);
+        }
+        Ok(true)
+    }
+}
+
+/// Keep the newest `BACKUPS_KEPT` stamp dirs under `root`, never `current`. Best-effort.
+fn prune_snapshot_dirs(root: &Path, current: &Path) {
+    let Ok(rd) = fs::read_dir(root) else { return };
+    let mut all: Vec<((String, u64), PathBuf)> = rd
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| Some((stamp_key(&e.file_name().into_string().ok()?)?, e.path())))
+        .collect();
+    if all.len() <= BACKUPS_KEPT {
+        return;
+    }
+    all.sort();
+    let excess = all.len() - BACKUPS_KEPT;
+    for (_, p) in all.into_iter().take(excess) {
+        if p != current {
+            let _ = fs::remove_dir_all(p);
+        }
+    }
 }
 
 #[path = "../tests/unit/store.rs"]

@@ -7,6 +7,7 @@ import {
   parseDecideError,
   recordIdFor,
   SETTINGS_UNREADABLE_MESSAGE,
+  storeFailure,
   summarize,
   undoFor,
   type DecideReport,
@@ -121,7 +122,15 @@ describe("folderPrefix", () => {
 describe("parseDecideError", () => {
   it("reads a store error with its changed files and partial report", () => {
     const raw = JSON.stringify({ kind: "store", message: "disk full", changed: ["/w/a"], partial: { done: 1, left: [], errors: [] } });
-    expect(parseDecideError(raw)).toEqual({ kind: "store", message: "disk full", changed: ["/w/a"], partial: { done: 1, left: [], errors: [] } });
+    expect(parseDecideError(raw)).toEqual({
+      kind: "store",
+      message: "disk full",
+      changed: ["/w/a"],
+      partial: { done: 1, left: [], errors: [] },
+      snapshot: null,
+    });
+    const withSnap = JSON.stringify({ kind: "store", message: "m", changed: ["/w/a"], partial: null, snapshot: "/d/files/s" });
+    expect(parseDecideError(withSnap).snapshot).toBe("/d/files/s");
   });
   it("reads the plain kinds", () => {
     for (const kind of ["readOnly", "notFound", "badTarget", "invalid"]) {
@@ -168,5 +177,40 @@ describe("summarize", () => {
       text: "Couldn't reject a.ts",
       tone: "error",
     });
+  });
+});
+
+describe("storeFailure", () => {
+  const err = (changed: string[], snapshot: string | null = null) => ({
+    kind: "store" as const,
+    message: "could not write the session file",
+    changed,
+    partial: { done: 0, left: [], errors: [] },
+    snapshot,
+  });
+
+  it("never offers Retry for a reject: the files are already restored", () => {
+    expect(storeFailure("reject", err(["/w/a"], "/d/files/s")).retry).toBe(false);
+    expect(storeFailure("reject", err([])).retry).toBe(false);
+  });
+
+  it("points a reject at the snapshot that holds Claude's version", () => {
+    expect(storeFailure("reject", err(["/w/a"], "/d/files/s")).note).toBe("Claude's version was saved to /d/files/s");
+  });
+
+  it("says nothing changed when the preflight refused", () => {
+    expect(storeFailure("reject", err([])).note).toBe("Nothing was changed.");
+    expect(storeFailure("accept", err([]))).toEqual({ note: "Nothing was changed.", retry: true });
+  });
+
+  it("reapply names the snapshot of what it overwrote, and can be retried", () => {
+    expect(storeFailure("reapply", err(["/w/a"], "/d/files/s"))).toEqual({
+      note: "The files' previous contents were saved to /d/files/s",
+      retry: true,
+    });
+  });
+
+  it("other actions keep Retry", () => {
+    expect(storeFailure("accept", err(["/w/a"])).retry).toBe(true);
   });
 });

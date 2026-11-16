@@ -30,6 +30,7 @@
     isSettingsUnreadable,
     parseDecideError,
     recordIdFor,
+    storeFailure,
     summarize,
     undoFor,
     type BulkAction,
@@ -336,14 +337,10 @@
     });
   }
 
-  async function failed(root: string, err: DecideError, retry: () => void) {
+  async function failed(root: string, action: DecideAction, err: DecideError, retry: () => void) {
     if (err.kind === "store") {
-      show({
-        text: err.message,
-        tone: "error",
-        note: "Files changed but the review log was not updated — retry",
-        retry,
-      });
+      const f = storeFailure(action, err);
+      show({ text: err.message, tone: "error", note: f.note, retry: f.retry ? retry : undefined });
       return;
     }
     if (err.kind === "readOnly") {
@@ -396,7 +393,7 @@
       if (root !== selected) return;
       // Whatever the refusal, the list may be out of date (that is often why it was refused).
       await loadView(root);
-      await failed(root, err, () => void runDecide(action, target, opts));
+      await failed(root, action, err, () => void runDecide(action, target, opts));
     } finally {
       busy = false;
     }

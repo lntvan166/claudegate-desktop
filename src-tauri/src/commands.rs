@@ -228,8 +228,8 @@ pub fn error_json(e: &DecideError) -> String {
         DecideError::ReadOnly(_) => serde_json::json!({ "kind": "readOnly", "message": message }),
         DecideError::NotFound => serde_json::json!({ "kind": "notFound", "message": message }),
         DecideError::BadTarget(_) => serde_json::json!({ "kind": "badTarget", "message": message }),
-        DecideError::Store { changed, partial, .. } => serde_json::json!({
-            "kind": "store", "message": message, "changed": changed, "partial": partial,
+        DecideError::Store { changed, partial, snapshot, .. } => serde_json::json!({
+            "kind": "store", "message": message, "changed": changed, "partial": partial, "snapshot": snapshot,
         }),
     };
     v.to_string()

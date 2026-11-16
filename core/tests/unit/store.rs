@@ -156,11 +156,11 @@ fn persist_refuses_path_outside_sessions() {
         session_file: e.paths.home.join("other").join("x.json"),
     };
     let mine = session(json!({ "sessionId": "a", "status": "active", "files": {} }));
-    assert!(matches!(persist(&p, mine.clone(), &MergeGuards::default()), Err(StoreError::OutsideHome)));
+    assert!(matches!(persist(&p, mine.clone(), &MergeGuards::default(), true), Err(StoreError::OutsideHome)));
     p.session_file = e.paths.home.join("sessions").join("nested").join("x.json");
-    assert!(matches!(persist(&p, mine.clone(), &MergeGuards::default()), Err(StoreError::OutsideHome)));
+    assert!(matches!(persist(&p, mine.clone(), &MergeGuards::default(), true), Err(StoreError::OutsideHome)));
     p.session_file = e.paths.home.join("sessions").join("..").join("x.json");
-    assert!(matches!(persist(&p, mine, &MergeGuards::default()), Err(StoreError::OutsideHome)));
+    assert!(matches!(persist(&p, mine, &MergeGuards::default(), true), Err(StoreError::OutsideHome)));
     assert!(!e.paths.home.join("other").exists());
     assert!(!e.paths.home.join("x.json").exists());
 }
@@ -169,7 +169,7 @@ fn persist_refuses_path_outside_sessions() {
 fn persist_sets_status_reviewed_when_files_empty() {
     let e = env();
     let mine = session(json!({ "sessionId": "a", "status": "active", "files": {} }));
-    let out = persist(&e.paths, mine, &MergeGuards::default()).unwrap();
+    let out = persist(&e.paths, mine, &MergeGuards::default(), true).unwrap();
     assert_eq!(out.status, Status::Reviewed);
     let disk: Value = serde_json::from_str(&fs::read_to_string(&e.paths.session_file).unwrap()).unwrap();
     assert_eq!(disk["status"], "reviewed");
@@ -178,7 +178,7 @@ fn persist_sets_status_reviewed_when_files_empty() {
         "sessionId": "a", "status": "reviewed",
         "files": { "/w/a.ts": entry("x", "2026-11-16T00:00:00.000Z") }
     }));
-    let out = persist(&e.paths, mine, &MergeGuards::default()).unwrap();
+    let out = persist(&e.paths, mine, &MergeGuards::default(), true).unwrap();
     assert_eq!(out.status, Status::Active);
 }
 
@@ -189,7 +189,7 @@ fn persist_writes_pretty_json_two_space() {
         "sessionId": "a", "status": "active",
         "files": { "/w/a.ts": entry("x", "2026-11-16T00:00:00.000Z") }
     }));
-    let out = persist(&e.paths, mine, &MergeGuards::default()).unwrap();
+    let out = persist(&e.paths, mine, &MergeGuards::default(), true).unwrap();
     let text = fs::read_to_string(&e.paths.session_file).unwrap();
     assert_eq!(text, serde_json::to_string_pretty(&out).unwrap());
     assert!(text.starts_with("{\n  \"sessionId\": \"a\",\n  \"status\": \"active\",\n  \"files\": {\n    \"/w/a.ts\""));
@@ -212,7 +212,7 @@ fn persist_keeps_capture_written_after_load() {
     disk["files"]["/w/b.ts"] = entry("b0", "2026-11-16T00:00:05.000Z");
     fs::write(&e.paths.session_file, serde_json::to_string_pretty(&disk).unwrap()).unwrap();
 
-    let out = persist(&e.paths, mine, &MergeGuards::default()).unwrap();
+    let out = persist(&e.paths, mine, &MergeGuards::default(), true).unwrap();
     assert!(out.files.contains_key("/w/a.ts"));
     assert!(out.files.contains_key("/w/b.ts"));
     let written = parse_session(&fs::read_to_string(&e.paths.session_file).unwrap()).unwrap().0;
@@ -231,7 +231,7 @@ fn persist_writes_ours_when_disk_unparsable() {
         "sessionId": "a", "status": "active",
         "files": { "/w/a.ts": entry("a0", "2026-11-16T00:00:00.000Z") }
     }));
-    let out = persist(&e.paths, mine, &MergeGuards::default()).unwrap();
+    let out = persist(&e.paths, mine, &MergeGuards::default(), true).unwrap();
     assert!(out.files.contains_key("/w/a.ts"));
     assert_eq!(fs::read_to_string(&e.paths.session_file).unwrap(), serde_json::to_string_pretty(&out).unwrap());
 }
@@ -243,7 +243,7 @@ fn persist_refuses_unknown_disk_shape() {
     let text = serde_json::to_string_pretty(&disk).unwrap();
     fs::write(&e.paths.session_file, &text).unwrap();
     let mine = session(json!({ "sessionId": "a", "status": "active", "files": {} }));
-    assert!(matches!(persist(&e.paths, mine, &MergeGuards::default()), Err(StoreError::UnknownShape)));
+    assert!(matches!(persist(&e.paths, mine, &MergeGuards::default(), true), Err(StoreError::UnknownShape)));
     assert_eq!(fs::read_to_string(&e.paths.session_file).unwrap(), text, "untouched");
     assert!(!lock_path(&e.paths.session_file).exists(), "lock released on refusal");
 }
@@ -262,6 +262,68 @@ fn persist_aborts_when_backup_fails() {
         "sessionId": "a", "status": "active",
         "files": { "/w/a.ts": entry("a0", "2026-11-16T00:00:00.000Z") }
     }));
-    assert!(matches!(persist(&e.paths, mine, &MergeGuards::default()), Err(StoreError::Backup(_))));
+    assert!(matches!(persist(&e.paths, mine, &MergeGuards::default(), true), Err(StoreError::Backup(_))));
     assert_eq!(fs::read_to_string(&e.paths.session_file).unwrap(), text, "no write without a backup");
+}
+
+// ── File snapshots (C1(b)) ──────────────────────────────────────────────────
+
+use crate::store::{preflight, FileSnapshots};
+
+#[test]
+fn file_snapshots_keep_raw_bytes_and_skip_missing_files() {
+    let e = env();
+    let src = e._tmp.path().join("w/x.bin");
+    fs::create_dir_all(src.parent().unwrap()).unwrap();
+    fs::write(&src, [0xffu8, 0, 0x80]).unwrap();
+    let mut snaps = FileSnapshots::new(&e.paths.desktop_home, &e.paths.session_file).unwrap();
+    assert!(snaps.dir().is_none(), "nothing saved, no dir");
+    assert!(!snaps.save(Path::new("gone.txt"), &e._tmp.path().join("gone.txt")).unwrap());
+    assert!(snaps.dir().is_none(), "a missing file creates no stamp dir");
+    assert!(snaps.save(Path::new("w/x.bin"), &src).unwrap());
+    let dir = snaps.dir().unwrap().to_path_buf();
+    assert!(dir.starts_with(backups_dir(&e).join("files")), "{dir:?}");
+    assert_eq!(fs::read(dir.join("w/x.bin")).unwrap(), [0xffu8, 0, 0x80]);
+}
+
+#[test]
+fn file_snapshots_refuse_a_path_that_leaves_the_stamp_dir() {
+    let e = env();
+    let src = e._tmp.path().join("a.txt");
+    fs::write(&src, "x").unwrap();
+    let mut snaps = FileSnapshots::new(&e.paths.desktop_home, &e.paths.session_file).unwrap();
+    for bad in ["../a.txt", "/abs/a.txt", "", "x/../../a.txt", "./a.txt"] {
+        assert!(snaps.save(Path::new(bad), &src).is_err(), "{bad:?}");
+    }
+    assert!(!e._tmp.path().join("cgd/backups/0123456789abcdef0123456789abcdef/a.txt").exists());
+}
+
+#[test]
+fn file_snapshots_keep_the_newest_50_decisions() {
+    let e = env();
+    let src = e._tmp.path().join("a.txt");
+    fs::write(&src, "x").unwrap();
+    for _ in 0..55 {
+        let mut snaps = FileSnapshots::new(&e.paths.desktop_home, &e.paths.session_file).unwrap();
+        snaps.save(Path::new("a.txt"), &src).unwrap();
+    }
+    let n = fs::read_dir(backups_dir(&e).join("files")).unwrap().count();
+    assert_eq!(n, 50);
+}
+
+#[test]
+fn preflight_checks_shape_before_backing_up() {
+    let e = env();
+    let text = serde_json::to_string(&json!({ "sessionId": "s", "status": "active", "files": {}, "future": 1 })).unwrap();
+    fs::write(&e.paths.session_file, &text).unwrap();
+    assert!(matches!(preflight(&e.paths), Err(StoreError::UnknownShape)));
+    assert!(!backups_dir(&e).exists(), "no backup for a write that will not happen");
+    let known = serde_json::to_string(&json!({ "sessionId": "s", "status": "active", "files": {} })).unwrap();
+    fs::write(&e.paths.session_file, &known).unwrap();
+    preflight(&e.paths).unwrap();
+    assert_eq!(fs::read_dir(backups_dir(&e)).unwrap().count(), 1);
+    // persist told the backup was taken does not take a second one.
+    persist(&e.paths, session(json!({ "sessionId": "s", "status": "active", "files": {} })), &MergeGuards::default(), false)
+        .unwrap();
+    assert_eq!(fs::read_dir(backups_dir(&e)).unwrap().count(), 1);
 }

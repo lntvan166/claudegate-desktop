@@ -6,6 +6,7 @@ use claudegate_core::decide::{
     decide, decide_with, Action, DecideError, DecidePaths, DecideReport, Target, UNKNOWN_SHAPE_MESSAGE,
 };
 use claudegate_core::paths::session_file_for;
+use claudegate_core::store::StoreError;
 use md5::{Digest, Md5};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -73,7 +74,21 @@ impl Fx {
 
     fn backups(&self, scope: &Path) -> usize {
         let hash = self.session_file(scope).file_stem().unwrap().to_owned();
-        fs::read_dir(self.paths.desktop_home.join("backups").join(hash)).map(|d| d.count()).unwrap_or(0)
+        // Session backups only: the `files/` dir beside them holds workspace-file snapshots.
+        fs::read_dir(self.paths.desktop_home.join("backups").join(hash))
+            .map(|d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "json")).count())
+            .unwrap_or(0)
+    }
+
+    fn files_dir(&self, scope: &Path) -> PathBuf {
+        let hash = self.session_file(scope).file_stem().unwrap().to_owned();
+        self.paths.desktop_home.join("backups").join(hash).join("files")
+    }
+
+    /// Every snapshot of `rel` (relative to the scope root), across decision stamps.
+    fn snapshots(&self, scope: &Path, rel: &str) -> Vec<PathBuf> {
+        let Ok(rd) = fs::read_dir(self.files_dir(scope)) else { return vec![] };
+        rd.flatten().map(|e| e.path().join(rel)).filter(|p| p.exists()).collect()
     }
 
     fn run(&self, action: Action, target: Target) -> Result<DecideReport, DecideError> {
@@ -377,11 +392,11 @@ fn reject_all_with_an_unwritable_file_still_does_the_others() {
     assert!(s["rejected"].get(&b).is_some() && s["rejected"].get(&n).is_some());
 }
 
-/// Ruling 3: the workspace write happened but the session write failed — the error names the
-/// file already restored, so the UI can say the files changed but the log did not.
+/// Ruling 3 + C1: the workspace write happened but the session write failed. The error names the
+/// file already restored, and Claude's bytes survive in the file snapshot taken before the restore.
 #[cfg(unix)]
 #[test]
-fn persist_failure_after_a_restore_names_the_changed_files() {
+fn persist_failure_after_a_restore_keeps_claudes_bytes_in_the_snapshot() {
     let fx = Fx::new();
     let a = fx.file("a.txt", "claude");
     fx.write_session(&fx.ws, session_json(json!({ &a: pending(Some("orig")) }), json!([]), json!({})));
@@ -396,17 +411,143 @@ fn persist_failure_after_a_restore_names_the_changed_files() {
         eprintln!("skipping: running as root");
         return;
     }
-    match r {
-        Err(e @ DecideError::Store { .. }) => {
-            let DecideError::Store { changed, partial, .. } = &e else { unreachable!() };
-            assert_eq!(changed, &vec![a.clone()]);
-            assert_eq!(partial, &DecideReport::default());
-            assert!(e.to_string().contains(&a), "{e}");
-        }
-        other => panic!("expected a Store error, got {other:?}"),
-    }
+    let e = r.unwrap_err();
+    let DecideError::Store { changed, partial, snapshot, .. } = &e else { panic!("expected Store, got {e:?}") };
+    assert_eq!(changed, &vec![a.clone()]);
+    assert_eq!(partial, &DecideReport::default());
+    assert!(e.to_string().contains(&a), "{e}");
+    assert!(!e.to_string().contains("retry"), "a reject must not be retried: {e}");
+    let dir = PathBuf::from(snapshot.as_ref().expect("the snapshot dir is reported"));
+    assert!(dir.starts_with(fx.files_dir(&fx.ws)), "{dir:?}");
+    assert_eq!(fs::read(dir.join("a.txt")).unwrap(), b"claude", "Claude's version was saved first");
     assert_eq!(fs::read_to_string(&a).unwrap(), "orig");
     assert!(keys(&fx.session(&fx.ws)["files"]).contains(&a), "session file unchanged");
+}
+
+/// C1(a): the session backup is taken before any workspace write. When it fails, nothing changes.
+#[test]
+fn a_failing_preflight_backup_changes_no_file() {
+    for action in [Action::Reject, Action::Reapply] {
+        let fx = Fx::new();
+        let a = fx.file("a.txt", "claude");
+        let n = fx.file("made.txt", "new file");
+        let t = "2026-11-16T11:00:00.000Z";
+        let (files, rejected) = if action == Action::Reject {
+            (json!({ &a: pending(Some("orig")), &n: pending_new() }), json!({}))
+        } else {
+            (json!({}), json!({ &a: record(&a, Some("orig"), Some("again"), t) }))
+        };
+        fx.write_session(&fx.ws, session_json(files, json!([]), rejected));
+        // A file where the backups dir must go makes the backup fail.
+        fs::create_dir_all(&fx.paths.desktop_home).unwrap();
+        fs::write(fx.paths.desktop_home.join("backups"), "").unwrap();
+        let before = snapshot(fx.tmp.path());
+        let e = fx.run(action, Target::All).unwrap_err();
+        let DecideError::Store { error, changed, snapshot: snap, .. } = &e else { panic!("{action:?}: got {e:?}") };
+        assert!(matches!(error, StoreError::Backup(_)), "{action:?}: {error:?}");
+        assert!(changed.is_empty() && snap.is_none(), "{action:?}");
+        assert_eq!(snapshot(fx.tmp.path()), before, "{action:?}: nothing changed");
+    }
+}
+
+/// C1(a): a session that turned to a newer shape after our load is refused before any write.
+#[test]
+fn a_session_that_turned_unknown_before_the_first_write_changes_no_file() {
+    let fx = Fx::new();
+    let a = fx.file("a.txt", "claude");
+    fx.write_session(&fx.ws, session_json(json!({ &a: pending(Some("orig")) }), json!([]), json!({})));
+    let sf = fx.session_file(&fx.ws);
+    // decide_with's hook runs before persist; turn the file Unknown via a pre-load race instead:
+    // load_checked reads it Known, then the preflight sees it Unknown.
+    let r = claudegate_core::decide::decide_with_preflight_hook(&fx.paths, &fx.ws, Action::Reject, Target::All, NOW, &mut || {
+        let mut v: Value = serde_json::from_str(&fs::read_to_string(&sf).unwrap()).unwrap();
+        v["futureField"] = json!(1);
+        fs::write(&sf, v.to_string()).unwrap();
+    });
+    let e = r.unwrap_err();
+    let DecideError::Store { error, changed, .. } = &e else { panic!("got {e:?}") };
+    assert!(matches!(error, StoreError::UnknownShape), "{error:?}");
+    assert!(changed.is_empty());
+    assert_eq!(fs::read_to_string(&a).unwrap(), "claude");
+    assert_eq!(fx.backups(&fx.ws), 0, "no backup of a file we will not write");
+}
+
+/// C1(b): a non-UTF-8 file Claude created is deleted on reject; its raw bytes are in the snapshot.
+#[test]
+fn reject_of_a_non_utf8_new_file_snapshots_its_bytes_before_deleting() {
+    let fx = Fx::new();
+    let bytes: &[u8] = &[0xff, 0xfe, 0x00, b'x', 0x80];
+    let n = fx.ws.join("bin/made.dat");
+    fs::create_dir_all(n.parent().unwrap()).unwrap();
+    fs::write(&n, bytes).unwrap();
+    let n = n.to_string_lossy().into_owned();
+    fx.write_session(&fx.ws, session_json(json!({ &n: pending_new() }), json!([]), json!({})));
+    let r = fx.run(Action::Reject, fx.file_target(&fx.ws, &n)).unwrap();
+    assert_eq!(r.done, 1);
+    assert!(!Path::new(&n).exists());
+    let saved = fx.snapshots(&fx.ws, "bin/made.dat");
+    assert_eq!(saved.len(), 1, "{saved:?}");
+    assert_eq!(fs::read(&saved[0]).unwrap(), bytes);
+}
+
+/// C1(b): reapply snapshots what it overwrites; a file outside the scope root lands under _outside.
+#[test]
+fn reapply_snapshots_the_file_it_overwrites() {
+    let fx = Fx::new();
+    let a = fx.file("src/a.txt", "the user's edit");
+    let t = "2026-11-16T11:00:00.000Z";
+    fx.write_session(&fx.ws, session_json(json!({}), json!([]), json!({ &a: record(&a, Some("orig"), Some("claude"), t) })));
+    fx.run(Action::Reapply, fx.file_target(&fx.ws, &a)).unwrap();
+    assert_eq!(fs::read_to_string(&a).unwrap(), "claude");
+    let saved = fx.snapshots(&fx.ws, "src/a.txt");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(fs::read_to_string(&saved[0]).unwrap(), "the user's edit");
+}
+
+#[test]
+fn a_file_outside_the_scope_root_is_snapshotted_under_outside() {
+    let fx = Fx::new();
+    let dir = fx.tmp.path().join("elsewhere");
+    fs::create_dir_all(&dir).unwrap();
+    let q = dir.join("q.txt");
+    fs::write(&q, "claude").unwrap();
+    let q = q.to_string_lossy().into_owned();
+    fx.write_session(&fx.ws, session_json(json!({ &q: pending(Some("orig")) }), json!([]), json!({})));
+    fx.run(Action::Reject, fx.file_target(&fx.ws, &q)).unwrap();
+    assert_eq!(fs::read_to_string(&q).unwrap(), "orig");
+    let rel = format!("_outside{q}");
+    let saved = fx.snapshots(&fx.ws, &rel);
+    assert_eq!(saved.len(), 1, "{rel}");
+    assert_eq!(fs::read_to_string(&saved[0]).unwrap(), "claude");
+}
+
+/// C1(b): a file whose snapshot cannot be taken is refused and reported; the others still land.
+#[cfg(unix)]
+#[test]
+fn a_file_that_cannot_be_snapshotted_is_refused() {
+    let fx = Fx::new();
+    let a = fx.file("a.txt", "claude");
+    let unreadable = fx.file("secret.txt", "claude");
+    fx.write_session(
+        &fx.ws,
+        session_json(json!({ &a: pending(Some("orig")), &unreadable: pending(Some("orig")) }), json!([]), json!({})),
+    );
+    chmod(Path::new(&unreadable), 0o200); // writable, not readable: the restore alone would succeed
+    if fs::read(&unreadable).is_ok() {
+        chmod(Path::new(&unreadable), 0o644);
+        eprintln!("skipping: running as root");
+        return;
+    }
+    let r = fx.run(Action::Reject, Target::All);
+    chmod(Path::new(&unreadable), 0o644);
+    let r = r.unwrap();
+    assert_eq!(r.done, 1);
+    assert_eq!(r.errors.len(), 1);
+    assert_eq!(r.errors[0].0, unreadable);
+    assert!(r.errors[0].1.contains("Claude's version"), "{:?}", r.errors);
+    assert_eq!(fs::read_to_string(&unreadable).unwrap(), "claude", "not restored without a snapshot");
+    assert_eq!(fs::read_to_string(&a).unwrap(), "orig");
+    assert_eq!(keys(&fx.session(&fx.ws)["files"]), vec![unreadable]);
 }
 
 // ── Revert ──────────────────────────────────────────────────────────────────
@@ -678,7 +819,9 @@ fn every_session_write_makes_a_backup() {
     let mut expected = 0;
     let backups = fx.paths.desktop_home.join("backups").join(fx.session_file(&fx.ws).file_stem().unwrap());
     let list = || -> std::collections::BTreeSet<PathBuf> {
-        fs::read_dir(&backups).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default()
+        fs::read_dir(&backups)
+            .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect())
+            .unwrap_or_default()
     };
     for (action, target) in steps {
         let pre = fs::read(fx.session_file(&fx.ws)).unwrap();

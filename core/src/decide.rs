@@ -7,13 +7,19 @@
 //! whole action. Inside a scope the TS order is kept: per file, read `after`, write the
 //! workspace file, record; then one `persist` for the scope. Workspace files are written only
 //! through `workspace_write`.
+//!
+//! Two guards the TS does not have keep a failed session write from losing anyone's text:
+//! before a scope's first write of any kind, `store::preflight` makes the checks `persist` would
+//! make and takes the session backup (a failure refuses the scope with nothing changed), and
+//! every workspace file is copied raw into a `FileSnapshots` stamp dir just before it is
+//! restored, deleted or overwritten (a failed copy refuses that file).
 
 use crate::excludes::ExcludeMatcher;
 use crate::merge::{accept_entry, reject_entry, MergeGuards};
 use crate::model::{has_real_change, parse_session, FileEntry, Session, Shape};
 use crate::paths::{resolve_root, session_file_for};
 use crate::project::{project_matcher, project_scopes, read_disk};
-use crate::store::{persist, StoreError, StorePaths};
+use crate::store::{persist, preflight, FileSnapshots, StoreError, StorePaths};
 use crate::workspace_write;
 use serde::Serialize;
 use std::path::{Component, Path, PathBuf, MAIN_SEPARATOR};
@@ -68,11 +74,13 @@ pub enum DecideError {
     /// The target cannot be acted on safely, e.g. a folder prefix that is not strictly inside
     /// the scope root. Nothing was changed.
     BadTarget(String),
-    /// A scope's session write failed. `changed` lists the workspace files already restored,
-    /// deleted or rewritten in that scope, which its review log therefore does not reflect.
-    /// `partial` aggregates the scopes that completed before it (persisted, or with nothing to
-    /// persist); scopes after it were not touched.
-    Store { error: StoreError, changed: Vec<String>, partial: DecideReport },
+    /// A scope's session write, or its preflight, failed. `changed` lists the workspace files
+    /// already restored, deleted or rewritten in that scope, which its review log therefore does
+    /// not reflect (empty when the preflight refused: nothing was changed). `snapshot` is the dir
+    /// holding those files' bytes from just before they were written. `partial` aggregates the
+    /// scopes that completed before it (persisted, or with nothing to persist); scopes after it
+    /// were not touched.
+    Store { error: StoreError, changed: Vec<String>, partial: DecideReport, snapshot: Option<String> },
 }
 
 impl std::fmt::Display for DecideError {
@@ -81,7 +89,7 @@ impl std::fmt::Display for DecideError {
             DecideError::ReadOnly(msg) => f.write_str(msg),
             DecideError::NotFound => f.write_str("nothing to decide: the file or record is no longer there"),
             DecideError::BadTarget(msg) => f.write_str(msg),
-            DecideError::Store { error, changed, partial } => {
+            DecideError::Store { error, changed, partial, .. } => {
                 write!(f, "{error}")?;
                 if partial.done > 0 || !partial.left.is_empty() || !partial.errors.is_empty() {
                     write!(
@@ -95,7 +103,7 @@ impl std::fmt::Display for DecideError {
                 if !changed.is_empty() {
                     write!(
                         f,
-                        ". These files were changed on disk but the review log was not updated — retry: {}",
+                        ". These files were changed on disk but the review log was not updated: {}",
                         changed.join(", ")
                     )?;
                 }
@@ -130,6 +138,105 @@ pub fn decide_with(
     now_iso: &str,
     before_persist: &mut dyn FnMut(&Path),
 ) -> Result<DecideReport, DecideError> {
+    run(paths, root, action, target, read_only, now_iso, Hooks { before_preflight: &mut || {}, before_persist })
+}
+
+/// `decide` with a hook run just before each scope's preflight (after the load). Tests use it to
+/// change the disk copy in the window the preflight exists to close.
+#[doc(hidden)]
+pub fn decide_with_preflight_hook(
+    paths: &DecidePaths,
+    root: &Path,
+    action: Action,
+    target: Target,
+    now_iso: &str,
+    before_preflight: &mut dyn FnMut(),
+) -> Result<DecideReport, DecideError> {
+    run(paths, root, action, target, false, now_iso, Hooks { before_preflight, before_persist: &mut |_| {} })
+}
+
+struct Hooks<'a> {
+    before_preflight: &'a mut dyn FnMut(),
+    before_persist: &'a mut dyn FnMut(&Path),
+}
+
+/// One scope's writes: the preflight, taken once before the first write of any kind, and the
+/// raw snapshots of workspace files about to be overwritten or deleted.
+struct Writes<'a> {
+    store: StorePaths,
+    preflighted: bool,
+    snaps: Option<FileSnapshots>,
+    hook: &'a mut dyn FnMut(),
+}
+
+impl Writes<'_> {
+    fn preflight(&mut self) -> Result<(), DecideError> {
+        if !self.preflighted {
+            (self.hook)();
+            preflight(&self.store).map_err(|error| DecideError::Store {
+                error,
+                changed: Vec::new(),
+                partial: DecideReport::default(),
+                snapshot: None,
+            })?;
+            self.preflighted = true;
+        }
+        Ok(())
+    }
+
+    /// Copy `fp`'s current bytes into this decision's stamp dir before it is written.
+    fn save(&mut self, scope: &Path, fp: &str) -> Result<(), String> {
+        let rel = snapshot_rel(scope, fp).ok_or_else(|| format!("{fp} is not a plain absolute path"))?;
+        if self.snaps.is_none() {
+            let snaps = FileSnapshots::new(&self.store.desktop_home, &self.store.session_file).map_err(|e| e.to_string())?;
+            self.snaps = Some(snaps);
+        }
+        let snaps = self.snaps.as_mut().expect("just set");
+        snaps.save(&rel, Path::new(fp)).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    fn snapshot_dir(&self) -> Option<String> {
+        self.snaps.as_ref().and_then(|s| s.dir()).map(|d| d.to_string_lossy().into_owned())
+    }
+}
+
+/// Where a file's snapshot goes inside a stamp dir: its path relative to the scope root, or
+/// `_outside/<its absolute path>` for a key outside the root. `None` for a key with `.`/`..`
+/// segments or no name, which could not be placed safely.
+fn snapshot_rel(scope: &Path, key: &str) -> Option<PathBuf> {
+    let p = Path::new(key);
+    if !p.is_absolute() {
+        return None;
+    }
+    let rel = match p.strip_prefix(scope) {
+        Ok(r) => r.to_path_buf(),
+        Err(_) => {
+            let mut out = PathBuf::from("_outside");
+            for c in p.components() {
+                match c {
+                    Component::Prefix(px) => out.push(px.as_os_str().to_string_lossy().replace([':', '\\', '?'], "")),
+                    Component::RootDir => {}
+                    Component::Normal(n) => out.push(n),
+                    Component::CurDir | Component::ParentDir => return None,
+                }
+            }
+            out
+        }
+    };
+    let plain = !rel.as_os_str().is_empty() && rel.components().all(|c| matches!(c, Component::Normal(_)));
+    plain.then_some(rel)
+}
+
+fn run(
+    paths: &DecidePaths,
+    root: &Path,
+    action: Action,
+    target: Target,
+    read_only: bool,
+    now_iso: &str,
+    hooks: Hooks,
+) -> Result<DecideReport, DecideError> {
+    let Hooks { before_preflight, before_persist } = hooks;
     if read_only {
         return Err(DecideError::ReadOnly(READ_ONLY_MESSAGE.to_owned()));
     }
@@ -169,22 +276,33 @@ pub fn decide_with(
         let mut changed = Vec::new();
         let mut scope_report = DecideReport::default();
         let ctx = Ctx { scope: &scope, matcher: &matcher, now_iso };
+        let store = StorePaths { home: paths.home.clone(), desktop_home: paths.desktop_home.clone(), session_file: file };
+        let mut w = Writes { store, preflighted: false, snaps: None, hook: &mut *before_preflight };
         let r = &mut scope_report;
-        let mutated = match action {
-            Action::Accept => accept(&ctx, &target, &mut session, &mut guards, r)?,
-            Action::Reject => reject(&ctx, &target, &mut session, r, &mut changed)?,
-            Action::Revert => revert(&ctx, &target, &mut session, &mut guards, r)?,
-            Action::Reapply => reapply(&ctx, &target, &mut session, &mut guards, r, &mut changed)?,
-            Action::ClearAccepted => clear_accepted(&target, &mut session, &mut guards, r)?,
-            Action::ClearRejected => clear_rejected(&target, &mut session, &mut guards, r)?,
+        let outcome = match action {
+            Action::Accept => accept(&ctx, &target, &mut session, &mut guards, r),
+            Action::Reject => reject(&ctx, &target, &mut session, r, &mut changed, &mut w),
+            Action::Revert => revert(&ctx, &target, &mut session, &mut guards, r),
+            Action::Reapply => reapply(&ctx, &target, &mut session, &mut guards, r, &mut changed, &mut w),
+            Action::ClearAccepted => clear_accepted(&target, &mut session, &mut guards, r),
+            Action::ClearRejected => clear_rejected(&target, &mut session, &mut guards, r),
+        };
+        // A refused preflight inside the action: nothing in this scope was written.
+        let refused = |error| DecideError::Store { error, changed: changed.clone(), partial: report.clone(), snapshot: None };
+        let mutated = match outcome {
+            Ok(m) => m,
+            Err(DecideError::Store { error, .. }) => return Err(refused(error)),
+            Err(e) => return Err(e),
         };
         // The TS returns early when nothing was decided; a scope with no change is not written.
         if mutated {
-            before_persist(&file);
-            let sp =
-                StorePaths { home: paths.home.clone(), desktop_home: paths.desktop_home.clone(), session_file: file };
-            if let Err(error) = persist(&sp, session, &guards) {
-                return Err(DecideError::Store { error, changed, partial: report });
+            if let Err(DecideError::Store { error, .. }) = w.preflight() {
+                return Err(refused(error));
+            }
+            before_persist(&w.store.session_file);
+            if let Err(error) = persist(&w.store, session, &guards, false) {
+                let snapshot = w.snapshot_dir();
+                return Err(DecideError::Store { error, changed, partial: report, snapshot });
             }
         }
         report.done += scope_report.done;
@@ -300,17 +418,27 @@ fn apply_reject(s: &Session, fp: &str, entry: &FileEntry) -> std::io::Result<Rej
 }
 
 /// `rejectFile` / `rejectFolder` / `rejectAll`. Persisted with no guards, as the TS does.
+/// Before a file is restored or deleted, the scope is preflighted and the file's bytes (Claude's
+/// version, whatever its encoding) are saved; a file that cannot be saved is left alone.
 fn reject(
     ctx: &Ctx,
     target: &Target,
     s: &mut Session,
     report: &mut DecideReport,
     changed: &mut Vec<String>,
+    w: &mut Writes,
 ) -> Result<bool, DecideError> {
     let mut mutated = false;
     for fp in pending_targets(ctx, target, s)? {
         let Some(entry) = s.files.get(&fp).cloned() else { continue };
         let after = read_disk(&fp); // Claude's discarded version
+        if entry.original_content.is_some() || entry.new_file == Some(true) {
+            w.preflight()?;
+            if let Err(e) = w.save(ctx.scope, &fp) {
+                report.errors.push((fp, format!("Couldn't save Claude's version before rejecting, so the file was left as is: {e}")));
+                continue;
+            }
+        }
         match apply_reject(s, &fp, &entry) {
             Err(e) => {
                 report.errors.push((fp, e.to_string()));
@@ -372,6 +500,7 @@ fn reapply(
     guards: &mut MergeGuards,
     report: &mut DecideReport,
     changed: &mut Vec<String>,
+    w: &mut Writes,
 ) -> Result<bool, DecideError> {
     let paths: Vec<String> = match target {
         Target::File { key, .. } => {
@@ -396,6 +525,11 @@ fn reapply(
             report.errors.push((fp, format!("Claude's version of \"{name}\" was not saved")));
             continue;
         };
+        w.preflight()?;
+        if let Err(e) = w.save(ctx.scope, &fp) {
+            report.errors.push((fp, format!("Couldn't save the file on disk before reapplying, so it was left as is: {e}")));
+            continue;
+        }
         if let Err(e) = workspace_write::restore(s, Path::new(&fp), after) {
             report.errors.push((fp, e.to_string()));
             continue;
@@ -470,7 +604,19 @@ fn clear_rejected(
 
 #[cfg(test)]
 mod tests {
-    use super::is_under;
+    use super::{is_under, snapshot_rel};
+    use std::path::{Path, PathBuf};
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_rel_is_relative_to_the_scope_or_under_outside() {
+        let ws = Path::new("/ws");
+        assert_eq!(snapshot_rel(ws, "/ws/src/a.ts"), Some(PathBuf::from("src/a.ts")));
+        assert_eq!(snapshot_rel(ws, "/elsewhere/q.txt"), Some(PathBuf::from("_outside/elsewhere/q.txt")));
+        assert_eq!(snapshot_rel(ws, "/ws/../etc/passwd"), None);
+        assert_eq!(snapshot_rel(ws, "/ws"), None);
+        assert_eq!(snapshot_rel(ws, "rel.txt"), None);
+    }
 
     #[test]
     fn is_under_needs_a_separator_after_the_dir() {

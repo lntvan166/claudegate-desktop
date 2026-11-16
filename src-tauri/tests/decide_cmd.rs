@@ -195,12 +195,22 @@ fn store_error_json_carries_changed_and_partial() {
         error: StoreError::Write("disk full".into()),
         changed: vec!["/ws/a.txt".into()],
         partial,
+        snapshot: Some("/d/backups/h/files/20261116T120000.000Z".into()),
     };
     let v: Value = serde_json::from_str(&error_json(&e)).unwrap();
     assert_eq!(v["kind"], "store");
     assert!(v["message"].as_str().unwrap().contains("disk full"));
     assert_eq!(v["changed"], json!(["/ws/a.txt"]));
     assert_eq!(v["partial"], json!({"done":2,"left":["l"],"errors":[["p","m"]]}));
+    assert_eq!(v["snapshot"], "/d/backups/h/files/20261116T120000.000Z");
+    let none = DecideError::Store {
+        error: StoreError::Backup("x".into()),
+        changed: vec![],
+        partial: DecideReport::default(),
+        snapshot: None,
+    };
+    let v: Value = serde_json::from_str(&error_json(&none)).unwrap();
+    assert_eq!(v["snapshot"], Value::Null);
 }
 
 #[test]

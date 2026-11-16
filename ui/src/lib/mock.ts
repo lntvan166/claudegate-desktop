@@ -454,6 +454,7 @@ function mockDecide(root: string, action: DecideAction, target: DecideTarget): D
       message: "cannot write the session file: No space left on device (os error 28)",
       changed,
       partial: { done: 0, left: [], errors: [] },
+      snapshot: changed.length ? "/home/you/.claudegate-desktop/backups/3f2a9c/files/20261116T120000.000Z" : null,
     });
   }
   return report;
