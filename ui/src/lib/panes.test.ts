@@ -110,3 +110,13 @@ describe("collapsed projects column", () => {
     expect(loadCollapsed('{"collapsed":"yes"}')).toBe(false);
   });
 });
+
+describe("stacked", () => {
+  it("matches the CSS breakpoint: at or below 720px the diff pane is hidden", async () => {
+    const { stacked, STACK_MAX } = await import("./panes");
+    expect(STACK_MAX).toBe(720);
+    expect(stacked(720)).toBe(true);
+    expect(stacked(480)).toBe(true);
+    expect(stacked(721)).toBe(false);
+  });
+});

@@ -12,6 +12,10 @@ export const CHROME = 10;
 export const STORE_KEY = "claudegate.paneWidths";
 /** The collapsed Projects column: a rail of project initials. */
 export const RAIL = 44;
+/** At or below this window width the layout stacks: projects on top, no diff pane. Must match
+ *  the `max-width` media query in App.svelte. */
+export const STACK_MAX = 720;
+export const stacked = (width: number) => width <= STACK_MAX;
 
 const STEP = 16;
 const BIG_STEP = 64;

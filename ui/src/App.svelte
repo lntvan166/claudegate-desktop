@@ -55,6 +55,7 @@
     maxFor,
     reset as resetPane,
     save as savePanes,
+    stacked,
     toggleCollapsed,
     withWidth,
     type Pane,
@@ -97,8 +98,9 @@
   /** On only around a toggle, so dragging a splitter never animates. */
   let animatePanes = $state(false);
   let innerWidth = $state(typeof window === "undefined" ? 1200 : window.innerWidth);
-  /** A narrow window stacks the projects on top, where a rail has no meaning. */
-  const railed = $derived(projectsCollapsed && innerWidth > 720);
+  /** A narrow window stacks the projects on top, where a rail has no meaning, and hides the diff. */
+  const narrow = $derived(stacked(innerWidth));
+  const railed = $derived(projectsCollapsed && !narrow);
   const panes = $derived(layout(preferred, innerWidth, railed));
 
   function readStored(): string | null {
@@ -707,6 +709,10 @@
           {/if}
         </div>
       {/if}
+      {#if narrow}
+        <!-- The diff pane (the bar's usual home) is hidden here; store errors and "left on disk" must stay visible. -->
+        <ResultBar result={shownResult} {busy} ondismiss={() => (result = null)} />
+      {/if}
     </section>
 
     <div class="split">
@@ -736,7 +742,9 @@
       ondismiss={() => (openError = null)}
     >
       {#snippet footer()}
-        <ResultBar result={shownResult} {busy} ondismiss={() => (result = null)} />
+        {#if !narrow}
+          <ResultBar result={shownResult} {busy} ondismiss={() => (result = null)} />
+        {/if}
       {/snippet}
     </DiffView>
   </div>
