@@ -8,3 +8,5 @@ pub mod textfile;
 pub mod time;
 pub mod merge;
 pub mod store;
+pub mod decide;
+pub mod workspace_write;

@@ -108,7 +108,7 @@ fn record_item(primary: &str, scope: &str, r: &ReviewRecord) -> RecordItem {
 
 /// The file as the extension's `readFileOrNull` sees it: `None` when it is missing, unreadable
 /// or not valid UTF-8 (it decodes with `TextDecoder("utf-8", { fatal: true })`).
-fn read_disk(path: &str) -> Option<String> {
+pub(crate) fn read_disk(path: &str) -> Option<String> {
     std::fs::read(path).ok().and_then(|b| String::from_utf8(b).ok())
 }
 
@@ -231,6 +231,22 @@ pub fn pending_state(
     }
 }
 
+/// The project's scopes: the primary root first, then every nested worktree (sorted).
+/// `primary` must already be resolved (`resolve_root`).
+pub(crate) fn project_scopes(primary: &Path) -> Vec<PathBuf> {
+    let mut scopes = vec![primary.to_path_buf()];
+    scopes.extend(nested_worktrees_under(primary));
+    scopes
+}
+
+/// The exclude matcher for a project: the primary root's globs, anchored at the primary root
+/// for every scope (worktrees included), as the extension does.
+pub(crate) fn project_matcher(home: &Path, primary: &Path) -> ExcludeMatcher {
+    let key = primary.to_string_lossy();
+    let globs = read_excludes(home).get(key.as_ref()).cloned().unwrap_or_default();
+    ExcludeMatcher::new(primary, &globs)
+}
+
 pub fn load_project(home: &Path, root: &Path) -> ProjectView {
     load_project_at(home, root, now_ms())
 }
@@ -251,11 +267,9 @@ pub fn load_project_at(home: &Path, root: &Path, now_ms: i64) -> ProjectView {
     if view.missing {
         return view;
     }
-    let globs = read_excludes(home).get(&primary).cloned().unwrap_or_default();
-    let matcher = ExcludeMatcher::new(&primary_path, &globs);
-    load_scope(home, &primary_path, &primary, &matcher, false, now_ms, &mut view);
-    for wt in nested_worktrees_under(&primary_path) {
-        load_scope(home, &wt, &primary, &matcher, true, now_ms, &mut view);
+    let matcher = project_matcher(home, &primary_path);
+    for (i, scope) in project_scopes(&primary_path).iter().enumerate() {
+        load_scope(home, scope, &primary, &matcher, i > 0, now_ms, &mut view);
     }
     view.pending.sort_by(|a, b| a.path.cmp(&b.path));
     view.accepted.sort_by(|a, b| b.decided_at.cmp(&a.decided_at));

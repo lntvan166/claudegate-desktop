@@ -1,6 +1,7 @@
 //! Static guard: only the allowed writers may use filesystem-mutating APIs:
 //! `src-tauri/src/config.rs` (the app's own ~/.claudegate-desktop) and
-//! `core/src/store.rs` (session file, lock, temp, backups). A trailing `#[cfg(test)] mod ...` block is
+//! `core/src/store.rs` (session file, lock, temp, backups) and `core/src/workspace_write.rs`
+//! (workspace files on reject and reapply, only keys of the session being decided). A trailing `#[cfg(test)] mod ...` block is
 //! ignored, since unit tests write to temp dirs. A `#[cfg(test)]` on anything
 //! else (a helper, a `use`) does not cut: the rest of the file is still scanned.
 
@@ -27,7 +28,7 @@ const FORBIDDEN: &[&str] = &[
     "write_all",
 ];
 
-const ALLOWED: &[&str] = &["src-tauri/src/config.rs", "core/src/store.rs"];
+const ALLOWED: &[&str] = &["src-tauri/src/config.rs", "core/src/store.rs", "core/src/workspace_write.rs"];
 
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = fs::read_dir(dir) else { return };
