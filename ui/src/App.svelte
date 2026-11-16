@@ -25,7 +25,20 @@
   import { actionFor, isTypingTarget, nextIndex } from "./lib/keys";
   import { basename, groupsFor, scopeLabel, selectionAfterList, sortProjects, type Row } from "./lib/rows";
   import { Rechecks } from "./lib/recheck";
-  import { MIN, STORE_KEY as PANES_KEY, fit, load as loadPanes, maxFor, reset as resetPane, save as savePanes, type Pane, type Widths } from "./lib/panes";
+  import {
+    MIN,
+    STORE_KEY as PANES_KEY,
+    layout,
+    load as loadPanes,
+    loadCollapsed,
+    maxFor,
+    reset as resetPane,
+    save as savePanes,
+    toggleCollapsed,
+    withWidth,
+    type Pane,
+    type Widths,
+  } from "./lib/panes";
   import { relTime } from "./lib/time";
   import { collapseKeysToReveal, fileOrder, visibleItems } from "./lib/visible";
 
@@ -51,24 +64,43 @@
 
   /** The widths the user chose; `panes` is what fits the window right now. */
   let preferred = $state<Widths>(readPanes());
+  /** The Projects column shown as a rail of initials; its stored width is kept for expanding. */
+  let projectsCollapsed = $state(readCollapsed());
+  /** On only around a toggle, so dragging a splitter never animates. */
+  let animatePanes = $state(false);
   let innerWidth = $state(typeof window === "undefined" ? 1200 : window.innerWidth);
-  const panes = $derived(fit(preferred, innerWidth));
+  /** A narrow window stacks the projects on top, where a rail has no meaning. */
+  const railed = $derived(projectsCollapsed && innerWidth > 720);
+  const panes = $derived(layout(preferred, innerWidth, railed));
 
-  function readPanes(): Widths {
+  function readStored(): string | null {
     try {
-      return loadPanes(localStorage.getItem(PANES_KEY));
+      return localStorage.getItem(PANES_KEY);
     } catch {
-      return loadPanes(null);
+      return null;
     }
   }
+  function readPanes(): Widths {
+    return loadPanes(readStored());
+  }
+  function readCollapsed(): boolean {
+    return loadCollapsed(readStored());
+  }
   function setPane(pane: Pane, width: number) {
-    const max = maxFor(panes, pane, innerWidth);
-    preferred = fit({ ...panes, [pane]: Math.min(max, Math.max(MIN[pane], width)) }, innerWidth);
+    preferred = withWidth(preferred, pane, width, innerWidth, railed);
   }
   function storePanes() {
     try {
-      localStorage.setItem(PANES_KEY, savePanes(preferred));
+      localStorage.setItem(PANES_KEY, savePanes(preferred, projectsCollapsed));
     } catch {}
+  }
+  let animTimer: ReturnType<typeof setTimeout> | undefined;
+  function toggleProjects() {
+    animatePanes = true;
+    clearTimeout(animTimer);
+    animTimer = setTimeout(() => (animatePanes = false), 200);
+    projectsCollapsed = toggleCollapsed(projectsCollapsed);
+    storePanes();
   }
   function resetPaneWidth(pane: Pane) {
     preferred = resetPane(preferred, pane, innerWidth);
@@ -225,6 +257,13 @@
     if (e.defaultPrevented || e.repeat && e.key === "o") return;
     if (isTypingTarget(e.target as HTMLElement | null)) return;
     const a = actionFor(e);
+    if (a?.type === "projects") {
+      // Not while the Open-with menu is up, wherever focus is.
+      if (document.querySelector('[role="menu"]')) return;
+      toggleProjects();
+      e.preventDefault();
+      return;
+    }
     if (!a || !view || view.missing) return;
     switch (a.type) {
       case "row": {
@@ -296,7 +335,7 @@
 
 <svelte:window bind:innerWidth />
 
-<div class="app" style:--sidebar-w="{panes.projects}px" style:--tree-w="{panes.tree}px">
+<div class="app" class:animate={animatePanes} style:--sidebar-w="{panes.projects}px" style:--tree-w="{panes.tree}px">
   <header class="toolbar">
     <div class="brand">
       <svg class="mark" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
@@ -326,8 +365,16 @@
     </div>
   </header>
 
-  <ProjectList {projects} {selected} loading={loadingList} onselect={select} />
+  <ProjectList
+    {projects}
+    {selected}
+    loading={loadingList}
+    collapsed={railed}
+    onselect={select}
+    ontoggle={toggleProjects}
+  />
 
+  {#if !railed}
   <div class="split split-projects">
     <Splitter
       label="Resize projects"
@@ -340,6 +387,7 @@
       onreset={() => resetPaneWidth("projects")}
     />
   </div>
+  {/if}
 
   <div class="sheet">
     <section class="review" aria-label="Changes">
@@ -455,6 +503,18 @@
     position: relative;
     height: 100vh;
     background: var(--frame);
+  }
+
+  /* Collapsing or expanding the projects slides the columns, briefly; a drag never animates. */
+  .app.animate,
+  .app.animate .sheet {
+    transition: grid-template-columns 140ms var(--ease);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .app.animate,
+    .app.animate .sheet {
+      transition: none;
+    }
   }
 
   /* Splitters float over the edges they move; the wrapper takes no grid cell of its own. */

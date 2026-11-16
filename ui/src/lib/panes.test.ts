@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CHROME, DEFAULTS, MIN, fit, keyStep, load, resize, reset, save } from "./panes";
+import { CHROME, DEFAULTS, MIN, RAIL, fit, keyStep, layout, load, loadCollapsed, maxFor, resize, reset, save, toggleCollapsed, withWidth } from "./panes";
 
 const WIDE = 1600;
 
@@ -64,5 +64,49 @@ describe("load and save", () => {
     for (const raw of [null, "", "{", "null", "42", "[]", '{"projects":"wide","tree":400}', '{"projects":250}', '{"projects":NaN}', '{"projects":-5,"tree":1e999}']) {
       expect(load(raw)).toEqual(DEFAULTS);
     }
+  });
+});
+
+describe("collapsed projects column", () => {
+  const w = { projects: 300, tree: 400 };
+
+  it("takes only the rail's width, and gives the rest to the tree and diff", () => {
+    expect(layout(w, WIDE, true)).toEqual({ projects: RAIL, tree: 400 });
+    // At 900 the expanded tree is squeezed to fit; collapsed, it gets the projects' width back.
+    expect(layout(w, 900, false)).toEqual(fit(w, 900));
+    expect(fit(w, 900).tree).toBeLessThan(400);
+    expect(layout(w, 900, true).tree).toBe(400);
+    expect(layout({ projects: 300, tree: 9999 }, 900, true).tree).toBe(900 - CHROME - MIN.diff - RAIL);
+  });
+
+  it("lets the tree grow into the freed width", () => {
+    expect(maxFor(layout(w, 1200, true), "tree", 1200)).toBe(1200 - CHROME - MIN.diff - RAIL);
+  });
+
+  it("toggles, and expanding restores the stored projects width", () => {
+    expect(toggleCollapsed(false)).toBe(true);
+    expect(toggleCollapsed(true)).toBe(false);
+    const c = toggleCollapsed(false);
+    expect(layout(w, WIDE, c).projects).toBe(RAIL);
+    expect(layout(w, WIDE, toggleCollapsed(c))).toEqual({ projects: 300, tree: 400 });
+  });
+
+  it("resizing the tree while collapsed keeps the stored projects width", () => {
+    const next = withWidth(w, "tree", 600, WIDE, true);
+    expect(next).toEqual({ projects: 300, tree: 600 });
+    expect(withWidth(w, "tree", 9999, 1200, true).tree).toBe(1200 - CHROME - MIN.diff - RAIL);
+    expect(withWidth(w, "projects", 260, WIDE, false)).toEqual({ projects: 260, tree: 400 });
+    expect(withWidth(w, "tree", 9999, 1200, false)).toEqual({ projects: 300, tree: 1200 - CHROME - MIN.diff - 300 });
+  });
+
+  it("persists alongside the widths", () => {
+    expect(loadCollapsed(save(w, true))).toBe(true);
+    expect(loadCollapsed(save(w, false))).toBe(false);
+    expect(load(save(w, true))).toEqual(w);
+    // Stored before this existed, or garbage: expanded.
+    expect(loadCollapsed('{"projects":250,"tree":400}')).toBe(false);
+    expect(loadCollapsed(null)).toBe(false);
+    expect(loadCollapsed("nope")).toBe(false);
+    expect(loadCollapsed('{"collapsed":"yes"}')).toBe(false);
   });
 });

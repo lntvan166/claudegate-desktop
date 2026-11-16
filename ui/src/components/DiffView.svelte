@@ -294,6 +294,7 @@
           <div><dt><kbd>N</kbd> <kbd>P</kbd></dt><dd>Next and previous pending, across worktrees</dd></div>
           <div><dt><kbd>O</kbd></dt><dd>Open in {label} at the first change</dd></div>
           <div><dt><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></dt><dd>Pending, accepted, rejected</dd></div>
+          <div><dt><kbd>[</kbd></dt><dd>Collapse or expand projects</dd></div>
         </dl>
       </div>
     {:else if pane === "loading"}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProjectSummary, ProjectView } from "./api";
-import { groupsFor, nodeKey, selectionAfterList, sortProjects } from "./rows";
+import { groupsFor, initials, nodeKey, selectionAfterList, sortProjects } from "./rows";
 import { buildTree } from "./tree";
 
 const view: ProjectView = {
@@ -104,5 +104,22 @@ describe("selectionAfterList", () => {
 
   it("clears only when there is nothing to select", () => {
     expect(selectionAfterList([], "/a", "/a")).toEqual({ kind: "clear" });
+  });
+});
+
+describe("initials", () => {
+  it("takes the first letters of the first two words of a project name", () => {
+    expect(initials("shop-api")).toBe("SA");
+    expect(initials("herdr-pokemon")).toBe("HP");
+    expect(initials("legacy_billing v2")).toBe("LB");
+    expect(initials("claudeGate")).toBe("CG");
+    expect(initials("my.site.io")).toBe("MS");
+  });
+
+  it("is one letter for a one-word name, and never empty", () => {
+    expect(initials("bifrost")).toBe("B");
+    expect(initials("-x-")).toBe("X");
+    expect(initials("")).toBe("?");
+    expect(initials("ổn-định")).toBe("ỔĐ");
   });
 });

@@ -11,6 +11,7 @@ export type KeyAction =
   | { type: "row"; dir: 1 | -1 }
   | { type: "pending"; dir: 1 | -1 }
   | { type: "open" }
+  | { type: "projects" }
   | { type: "tab"; tab: DiffKind };
 
 type KeyLike = { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean };
@@ -33,6 +34,8 @@ export function actionFor(e: KeyLike): KeyAction | null {
       return { type: "pending", dir: -1 };
     case "o":
       return { type: "open" };
+    case "[":
+      return { type: "projects" };
   }
   const tab = TABS[e.key];
   return tab ? { type: "tab", tab } : null;

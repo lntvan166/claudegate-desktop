@@ -103,3 +103,16 @@ export function selectionAfterList(
     projects.find((p) => p.root === remembered) ?? projects.find((p) => p.pending > 0) ?? projects[0];
   return pick ? { kind: "select", root: pick.root } : { kind: "clear" };
 }
+
+/** A project's rail label: the first letters of its first two words, or one letter for one word. */
+export function initials(name: string): string {
+  const words = name
+    .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, "$1 $2")
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+  if (words.length === 0) return "?";
+  return words
+    .slice(0, 2)
+    .map((w) => [...w][0].toLocaleUpperCase())
+    .join("");
+}

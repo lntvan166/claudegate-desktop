@@ -1,5 +1,5 @@
-// Pane widths for the three columns (Projects | Review | Diff): clamping, keyboard steps and
-// persistence. Pure, so the splitters and the window-resize clamp share one set of rules.
+// Pane widths for the three columns (Projects | Review | Diff): clamping, keyboard steps, the
+// collapsed Projects rail and persistence. Pure, so the splitters and the window-resize clamp share one set of rules.
 
 export type Pane = "projects" | "tree";
 export type Widths = Record<Pane, number>;
@@ -10,6 +10,8 @@ export const MIN = { projects: 160, tree: 240, diff: 360 } as const;
 /** Horizontal space that is neither pane: the sheet's right inset (8px) and its 1px borders. */
 export const CHROME = 10;
 export const STORE_KEY = "claudegate.paneWidths";
+/** The collapsed Projects column: a rail of project initials. */
+export const RAIL = 44;
 
 const STEP = 16;
 const BIG_STEP = 64;
@@ -31,6 +33,26 @@ export function fit(w: Widths, total: number): Widths {
   }
   if (over > 0) projects -= Math.min(over, projects - MIN.projects);
   return { projects, tree };
+}
+
+/**
+ * What is on screen: `fit` when the Projects column is expanded; when collapsed, the rail, with the
+ * tree free to take the width it gave up. `w.projects` is never touched, so expanding restores it.
+ */
+export function layout(w: Widths, total: number, collapsed: boolean): Widths {
+  if (!collapsed) return fit(w, total);
+  const room = total - CHROME - MIN.diff - RAIL;
+  return { projects: RAIL, tree: Math.max(MIN.tree, Math.min(Math.round(w.tree), room)) };
+}
+
+export const toggleCollapsed = (collapsed: boolean) => !collapsed;
+
+/** The preference after the user sets `pane` to `width` (clamped). Collapsed, the stored
+ *  projects width stays as it was. */
+export function withWidth(w: Widths, pane: Pane, width: number, total: number, collapsed: boolean): Widths {
+  const cur = layout(w, total, collapsed);
+  const v = Math.min(maxFor(cur, pane, total), Math.max(MIN[pane], Math.round(width)));
+  return collapsed ? { ...w, [pane]: v } : fit({ ...cur, [pane]: v }, total);
 }
 
 /** The largest width `pane` can take in a window `total` px wide, with the other pane as it is. */
@@ -59,8 +81,19 @@ export function keyStep(key: string, shift: boolean): number | null {
   return null;
 }
 
-export function save(w: Widths): string {
-  return JSON.stringify({ projects: w.projects, tree: w.tree });
+export function save(w: Widths, collapsed = false): string {
+  return JSON.stringify({ projects: w.projects, tree: w.tree, collapsed });
+}
+
+/** Whether the Projects column was left collapsed; anything but a stored `true` is expanded. */
+export function loadCollapsed(raw: string | null): boolean {
+  if (!raw) return false;
+  try {
+    const v: unknown = JSON.parse(raw);
+    return !!v && typeof v === "object" && (v as Record<string, unknown>).collapsed === true;
+  } catch {
+    return false;
+  }
 }
 
 /** A stored value, or the defaults when it is missing or not two positive finite numbers. */

@@ -40,6 +40,7 @@ describe("actionFor", () => {
     expect(actionFor(k("1"))).toEqual({ type: "tab", tab: "pending" });
     expect(actionFor(k("2"))).toEqual({ type: "tab", tab: "accepted" });
     expect(actionFor(k("3"))).toEqual({ type: "tab", tab: "rejected" });
+    expect(actionFor(k("["))).toEqual({ type: "projects" });
   });
 
   it("leaves modified and unknown keys to the system", () => {
@@ -48,6 +49,7 @@ describe("actionFor", () => {
     expect(actionFor(k("1", { altKey: true }))).toBeNull();
     expect(actionFor(k("J"))).toBeNull();
     expect(actionFor(k("x"))).toBeNull();
+    expect(actionFor(k("[", { ctrlKey: true }))).toBeNull();
   });
 });
 
