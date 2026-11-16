@@ -22,11 +22,15 @@ use crate::project::{project_matcher, project_scopes, read_disk};
 use crate::store::{persist, preflight, FileSnapshots, StoreError, StorePaths};
 use crate::workspace_write;
 use serde::Serialize;
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf, MAIN_SEPARATOR};
 
 /// Spec, "Protecting production" rule 1.
 pub const UNKNOWN_SHAPE_MESSAGE: &str =
     "This project was written by a newer ClaudeGate. Update the app to make decisions here.";
+/// A key the user confirmed that is no longer eligible when the action runs.
+pub const CHANGED_SINCE_CONFIRM_MESSAGE: &str = "Changed since you confirmed, so it was left alone";
 /// Reapply of a path that is pending again.
 pub const REEDITED_MESSAGE: &str = "Claude has edited this file again — review the new change first";
 pub const READ_ONLY_MESSAGE: &str = "ClaudeGate Desktop is in read-only mode. Turn it off to make decisions.";
@@ -128,6 +132,23 @@ pub fn decide(
     decide_with(paths, root, action, target, read_only, now_iso, &mut |_| {})
 }
 
+/// `decide` limited to the keys the user confirmed (paths; record ids for Revert and
+/// ClearAccepted). For a folder or all target it acts only on keys that are both confirmed and
+/// still eligible, and reports each confirmed key that no longer is. Never acts on a key the user
+/// was not shown, such as a capture that landed after the count. Ignored for a file target.
+pub fn decide_confirmed(
+    paths: &DecidePaths,
+    root: &Path,
+    action: Action,
+    target: Target,
+    keys: Option<&[String]>,
+    read_only: bool,
+    now_iso: &str,
+) -> Result<DecideReport, DecideError> {
+    let hooks = Hooks { before_preflight: &mut || {}, before_persist: &mut |_| {} };
+    run(paths, root, action, target, keys, read_only, now_iso, hooks)
+}
+
 /// `decide` with a hook run just before each scope's `persist`, given the session file. Tests use
 /// it to write the disk copy between our load and our write, as the hook or VS Code can.
 #[doc(hidden)]
@@ -140,7 +161,7 @@ pub fn decide_with(
     now_iso: &str,
     before_persist: &mut dyn FnMut(&Path),
 ) -> Result<DecideReport, DecideError> {
-    run(paths, root, action, target, read_only, now_iso, Hooks { before_preflight: &mut || {}, before_persist })
+    run(paths, root, action, target, None, read_only, now_iso, Hooks { before_preflight: &mut || {}, before_persist })
 }
 
 /// `decide` with a hook run just before each scope's preflight (after the load). Tests use it to
@@ -154,7 +175,7 @@ pub fn decide_with_preflight_hook(
     now_iso: &str,
     before_preflight: &mut dyn FnMut(),
 ) -> Result<DecideReport, DecideError> {
-    run(paths, root, action, target, false, now_iso, Hooks { before_preflight, before_persist: &mut |_| {} })
+    run(paths, root, action, target, None, false, now_iso, Hooks { before_preflight, before_persist: &mut |_| {} })
 }
 
 struct Hooks<'a> {
@@ -229,11 +250,13 @@ fn snapshot_rel(scope: &Path, key: &str) -> Option<PathBuf> {
     plain.then_some(rel)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     paths: &DecidePaths,
     root: &Path,
     action: Action,
     target: Target,
+    keys: Option<&[String]>,
     read_only: bool,
     now_iso: &str,
     hooks: Hooks,
@@ -270,6 +293,10 @@ fn run(
     }
 
     let matcher = project_matcher(&paths.home, &primary);
+    // A file target names its key; confirmed keys only narrow folder and all targets.
+    let confirmed: Option<HashSet<String>> =
+        keys.filter(|_| !matches!(target, Target::File { .. })).map(|k| k.iter().cloned().collect());
+    let seen = RefCell::new(HashSet::new());
     // `report` holds only completed scopes; each scope works on its own and is folded in once
     // it is persisted (or had nothing to persist).
     let mut report = DecideReport::default();
@@ -277,7 +304,7 @@ fn run(
         let mut guards = MergeGuards::default();
         let mut changed = Vec::new();
         let mut scope_report = DecideReport::default();
-        let ctx = Ctx { scope: &scope, matcher: &matcher, now_iso };
+        let ctx = Ctx { scope: &scope, matcher: &matcher, now_iso, confirmed: confirmed.as_ref(), seen: &seen };
         let store = StorePaths { home: paths.home.clone(), desktop_home: paths.desktop_home.clone(), session_file: file };
         let mut w = Writes { store, preflighted: false, snaps: None, hook: &mut *before_preflight };
         let r = &mut scope_report;
@@ -286,8 +313,8 @@ fn run(
             Action::Reject => reject(&ctx, &target, &mut session, r, &mut changed, &mut w),
             Action::Revert => revert(&ctx, &target, &mut session, &mut guards, r),
             Action::Reapply => reapply(&ctx, &target, &mut session, &mut guards, r, &mut changed, &mut w),
-            Action::ClearAccepted => clear_accepted(&target, &mut session, &mut guards, r),
-            Action::ClearRejected => clear_rejected(&target, &mut session, &mut guards, r),
+            Action::ClearAccepted => clear_accepted(&ctx, &target, &mut session, &mut guards, r),
+            Action::ClearRejected => clear_rejected(&ctx, &target, &mut session, &mut guards, r),
         };
         // A refused preflight inside the action: nothing in this scope was written.
         let refused = |error| DecideError::Store { error, changed: changed.clone(), partial: report.clone(), snapshot: None };
@@ -310,6 +337,14 @@ fn run(
         report.done += scope_report.done;
         report.left.extend(scope_report.left);
         report.errors.extend(scope_report.errors);
+    }
+    if let (Some(keys), Some(_)) = (keys, &confirmed) {
+        let seen = seen.borrow();
+        for k in keys.iter().filter(|k| !seen.contains(*k)) {
+            // A record id is `<decidedAt>::<path>`; report the path.
+            let path = k.split_once("::").map_or(k.as_str(), |(_, p)| p);
+            report.errors.push((path.to_owned(), CHANGED_SINCE_CONFIRM_MESSAGE.to_owned()));
+        }
     }
     Ok(report)
 }
@@ -349,6 +384,22 @@ struct Ctx<'a> {
     scope: &'a Path,
     matcher: &'a ExcludeMatcher,
     now_iso: &'a str,
+    /// The keys the user confirmed, for a folder or all target; `None` means no narrowing.
+    confirmed: Option<&'a HashSet<String>>,
+    /// Confirmed keys found eligible in some scope; the rest are reported at the end.
+    seen: &'a RefCell<HashSet<String>>,
+}
+
+impl Ctx<'_> {
+    /// Whether an eligible `key` of a folder or all target may be acted on; marks it seen.
+    fn take(&self, key: &str) -> bool {
+        let Some(c) = self.confirmed else { return true };
+        let ok = c.contains(key);
+        if ok {
+            self.seen.borrow_mut().insert(key.to_owned());
+        }
+        ok
+    }
 }
 
 /// `path` lies strictly inside directory `dir` (`pathIsUnder`: `startsWith(dir + sep)`).
@@ -372,12 +423,18 @@ fn pending_targets(ctx: &Ctx, target: &Target, s: &Session) -> Result<Vec<String
             }
             vec![key.clone()]
         }
-        Target::Folder { prefix, .. } => {
-            s.files.iter().filter(|(fp, e)| is_under(fp, prefix) && keep(fp, e)).map(|(fp, _)| fp.clone()).collect()
-        }
-        Target::All => {
-            s.files.iter().filter(|(fp, e)| is_under(fp, &scope) && keep(fp, e)).map(|(fp, _)| fp.clone()).collect()
-        }
+        Target::Folder { prefix, .. } => s
+            .files
+            .iter()
+            .filter(|(fp, e)| is_under(fp, prefix) && keep(fp, e) && ctx.take(fp))
+            .map(|(fp, _)| fp.clone())
+            .collect(),
+        Target::All => s
+            .files
+            .iter()
+            .filter(|(fp, e)| is_under(fp, &scope) && keep(fp, e) && ctx.take(fp))
+            .map(|(fp, _)| fp.clone())
+            .collect(),
     })
 }
 
@@ -476,8 +533,10 @@ fn revert(
         Target::File { key, .. } => {
             vec![s.accepted.iter().find(|r| &r.id == key).cloned().ok_or(DecideError::NotFound)?]
         }
-        Target::Folder { prefix, .. } => s.accepted.iter().filter(|r| is_under(&r.path, prefix)).cloned().collect(),
-        Target::All => s.accepted.clone(),
+        Target::Folder { prefix, .. } => {
+            s.accepted.iter().filter(|r| is_under(&r.path, prefix) && ctx.take(&r.id)).cloned().collect()
+        }
+        Target::All => s.accepted.iter().filter(|r| ctx.take(&r.id)).cloned().collect(),
     };
     for rec in &recs {
         if let Some(i) = s.accepted.iter().position(|r| r.id == rec.id) {
@@ -515,10 +574,10 @@ fn reapply(
         Target::Folder { prefix, .. } => s
             .rejected
             .keys()
-            .filter(|fp| is_under(fp, prefix) && !ctx.matcher.is_excluded(fp))
+            .filter(|fp| is_under(fp, prefix) && !ctx.matcher.is_excluded(fp) && ctx.take(fp))
             .cloned()
             .collect(),
-        Target::All => s.rejected.keys().filter(|fp| !ctx.matcher.is_excluded(fp)).cloned().collect(),
+        Target::All => s.rejected.keys().filter(|fp| !ctx.matcher.is_excluded(fp) && ctx.take(fp)).cloned().collect(),
     };
     let mut mutated = false;
     for fp in paths {
@@ -556,6 +615,7 @@ fn reapply(
 /// `clearAccepted`, which clears every record; a file or folder target narrows it to one id or
 /// to the records under a folder.
 fn clear_accepted(
+    ctx: &Ctx,
     target: &Target,
     s: &mut Session,
     guards: &mut MergeGuards,
@@ -566,8 +626,8 @@ fn clear_accepted(
         .iter()
         .filter(|r| match target {
             Target::File { key, .. } => &r.id == key,
-            Target::Folder { prefix, .. } => is_under(&r.path, prefix),
-            Target::All => true,
+            Target::Folder { prefix, .. } => is_under(&r.path, prefix) && ctx.take(&r.id),
+            Target::All => ctx.take(&r.id),
         })
         .map(|r| r.id.clone())
         .collect();
@@ -584,6 +644,7 @@ fn clear_accepted(
 
 /// `clearRejected`, narrowed the same way as `clear_accepted` (a file target is a path).
 fn clear_rejected(
+    ctx: &Ctx,
     target: &Target,
     s: &mut Session,
     guards: &mut MergeGuards,
@@ -594,8 +655,8 @@ fn clear_rejected(
         .keys()
         .filter(|fp| match target {
             Target::File { key, .. } => *fp == key,
-            Target::Folder { prefix, .. } => is_under(fp, prefix),
-            Target::All => true,
+            Target::Folder { prefix, .. } => is_under(fp, prefix) && ctx.take(fp),
+            Target::All => ctx.take(fp),
         })
         .cloned()
         .collect();

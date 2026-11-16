@@ -3,7 +3,7 @@
 //! ~/.claudegate, ~/.claudegate-desktop or a real workspace.
 
 use claudegate_core::decide::{
-    decide, decide_with, Action, DecideError, DecidePaths, DecideReport, Target, UNKNOWN_SHAPE_MESSAGE,
+    decide, decide_confirmed, decide_with, Action, DecideError, DecidePaths, DecideReport, Target, UNKNOWN_SHAPE_MESSAGE,
 };
 use claudegate_core::paths::session_file_for;
 use claudegate_core::store::StoreError;
@@ -955,4 +955,91 @@ fn a_corrupt_session_is_refused_and_changes_nothing() {
         }
         assert_eq!(snapshot(fx.tmp.path()), before);
     }
+}
+
+// ── I4: bulk actions act only on what the user confirmed ────────────────────
+
+/// The UI counted (and the user confirmed) `a` and `gone`. Then the hook captured `late`, and
+/// VS Code accepted `gone`. Accept all decides `a` only: `late` was never seen, and `gone` is
+/// reported as changed since the confirmation.
+#[test]
+fn accept_all_acts_only_on_the_confirmed_keys() {
+    let fx = Fx::new();
+    let a = fx.file("a.txt", "new");
+    let gone = fx.file("gone.txt", "new");
+    fx.write_session(&fx.ws, session_json(json!({ &a: pending(Some("old")), &gone: pending(Some("old")) }), json!([]), json!({})));
+    let confirmed = vec![a.clone(), gone.clone()];
+    // After the count: a capture lands, and another writer decides `gone`.
+    let late = fx.file("late.txt", "new");
+    let mut v = fx.session(&fx.ws);
+    v["files"].as_object_mut().unwrap().remove(&gone);
+    v["files"][&late] = pending(Some("old"));
+    fx.write_session(&fx.ws, v);
+
+    let r = decide_confirmed(&fx.paths, &fx.ws, Action::Accept, Target::All, Some(&confirmed), false, NOW).unwrap();
+    assert_eq!(r.done, 1);
+    assert_eq!(r.errors, vec![(gone.clone(), "Changed since you confirmed, so it was left alone".to_owned())]);
+    let s = fx.session(&fx.ws);
+    assert_eq!(keys(&s["files"]), vec![late.clone()], "the unseen capture stays pending");
+    assert_eq!(s["accepted"][0]["path"], a.as_str());
+}
+
+#[test]
+fn reject_folder_with_keys_never_touches_an_unseen_file() {
+    let fx = Fx::new();
+    let a = fx.file("src/a.txt", "claude");
+    let late = fx.file("src/late.txt", "claude");
+    fx.write_session(
+        &fx.ws,
+        session_json(json!({ &a: pending(Some("orig")), &late: pending(Some("orig")) }), json!([]), json!({})),
+    );
+    let prefix = fx.ws.join("src").to_string_lossy().into_owned();
+    let target = Target::Folder { scope: fx.ws_str(), prefix };
+    let r = decide_confirmed(&fx.paths, &fx.ws, Action::Reject, target, Some(&[a.clone()]), false, NOW).unwrap();
+    assert_eq!(r.done, 1);
+    assert!(r.errors.is_empty());
+    assert_eq!(fs::read_to_string(&a).unwrap(), "orig");
+    assert_eq!(fs::read_to_string(&late).unwrap(), "claude", "never seen, never restored");
+    assert_eq!(keys(&fx.session(&fx.ws)["files"]), vec![late]);
+}
+
+/// Keys span scopes for All: a key of the worktree is not "missing" from the primary.
+#[test]
+fn revert_and_reapply_all_filter_by_keys_across_scopes() {
+    let fx = Fx::new();
+    let wt = fx.worktree("wt1");
+    let t = "2026-11-16T11:00:00.000Z";
+    let a = fx.file("a.txt", "accepted");
+    let b = fx.file("b.txt", "accepted");
+    let d = fx.file("wt1/d.txt", "accepted");
+    let (ra, rb, rd) = (record(&a, Some("o"), Some("accepted"), t), record(&b, Some("o"), Some("accepted"), t), record(&d, Some("o"), Some("accepted"), t));
+    fx.write_session(&fx.ws, session_json(json!({}), json!([ra.clone(), rb]), json!({})));
+    fx.write_session(&wt, session_json(json!({}), json!([rd.clone()]), json!({})));
+    let ids = vec![ra["id"].as_str().unwrap().to_owned(), rd["id"].as_str().unwrap().to_owned()];
+    let r = decide_confirmed(&fx.paths, &fx.ws, Action::Revert, Target::All, Some(&ids), false, NOW).unwrap();
+    assert_eq!(r.done, 2);
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_eq!(fx.session(&fx.ws)["accepted"].as_array().unwrap().len(), 1, "b was not confirmed");
+
+    // Reapply: a record confirmed but gone since is reported by path.
+    let c = fx.file("c.txt", "orig");
+    fx.write_session(&fx.ws, session_json(json!({}), json!([]), json!({ &c: record(&c, Some("orig"), Some("claude"), t) })));
+    let r = decide_confirmed(&fx.paths, &fx.ws, Action::Reapply, Target::All, Some(&[c.clone(), b.clone()]), false, NOW).unwrap();
+    assert_eq!(r.done, 1);
+    assert_eq!(r.errors, vec![(b, "Changed since you confirmed, so it was left alone".to_owned())]);
+    assert_eq!(fs::read_to_string(&c).unwrap(), "claude");
+}
+
+#[test]
+fn clear_with_keys_keeps_records_the_user_did_not_see() {
+    let fx = Fx::new();
+    let t = "2026-11-16T11:00:00.000Z";
+    let a = fx.file("a.txt", "x");
+    let b = fx.file("b.txt", "x");
+    let (ra, rb) = (record(&a, Some("o"), Some("x"), t), record(&b, Some("o"), Some("x"), t));
+    fx.write_session(&fx.ws, session_json(json!({}), json!([ra.clone(), rb]), json!({})));
+    let ids = vec![ra["id"].as_str().unwrap().to_owned()];
+    let r = decide_confirmed(&fx.paths, &fx.ws, Action::ClearAccepted, Target::All, Some(&ids), false, NOW).unwrap();
+    assert_eq!(r.done, 1);
+    assert_eq!(fx.session(&fx.ws)["accepted"][0]["path"], b.as_str());
 }

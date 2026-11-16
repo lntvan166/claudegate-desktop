@@ -381,6 +381,15 @@ function mockDecide(root: string, action: DecideAction, target: DecideTarget): D
   const m = (globalThis as unknown as Record<string, { failStore?: boolean }>).__mock;
   const report: DecideReport = { done: 0, left: [], errors: [] };
   const now = new Date().toISOString();
+  // Confirmed keys narrow folder and all targets; one that is no longer there is reported.
+  const confirmed = target.kind === "file" ? undefined : target.keys;
+  const seen = new Set<string>();
+  const take = (key: string) => {
+    if (!confirmed) return true;
+    if (!confirmed.includes(key)) return false;
+    seen.add(key);
+    return true;
+  };
   const inScope = (scope: string, path: string) => {
     if (target.kind === "all") return true;
     if (target.scope !== scope) return false;
@@ -393,7 +402,7 @@ function mockDecide(root: string, action: DecideAction, target: DecideTarget): D
     case "accept":
     case "reject": {
       const picked = v.pending.filter(
-        (p) => inScope(p.scope, p.path) && (target.kind === "file" ? p.path === target.key : !p.waiting),
+        (p) => inScope(p.scope, p.path) && (target.kind === "file" ? p.path === target.key : !p.waiting && take(p.path)),
       );
       if (picked.length === 0) throw fail("notFound", "nothing to decide: the file or record is no longer there");
       for (const p of picked) {
@@ -423,7 +432,9 @@ function mockDecide(root: string, action: DecideAction, target: DecideTarget): D
     case "reapply": {
       const list = action === "revert" ? v.accepted : v.rejected;
       const picked = list.filter(
-        (r) => inScope(r.scope, r.path) && (target.kind !== "file" || (action === "revert" ? r.id : r.path) === target.key),
+        (r) =>
+          inScope(r.scope, r.path) &&
+          (target.kind !== "file" ? take(action === "revert" ? r.id : r.path) : (action === "revert" ? r.id : r.path) === target.key),
       );
       if (picked.length === 0) throw fail("notFound", "nothing to decide: the file or record is no longer there");
       for (const r of picked) {
@@ -449,6 +460,9 @@ function mockDecide(root: string, action: DecideAction, target: DecideTarget): D
       report.done = v.rejected.length;
       v.rejected = [];
       break;
+  }
+  for (const k of confirmed ?? []) {
+    if (!seen.has(k)) report.errors.push([k.includes("::") ? k.slice(k.indexOf("::") + 2) : k, "Changed since you confirmed, so it was left alone"]);
   }
   if (m?.failStore) {
     m.failStore = false;

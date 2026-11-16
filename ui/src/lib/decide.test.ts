@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
-  actionableCount,
   folderPrefix,
   isSettingsUnreadable,
   nextAfterDecision,
   parseDecideError,
   recordIdFor,
   SETTINGS_UNREADABLE_MESSAGE,
+  bulkKeys,
   bulkPrompt,
   folderRejectPrompt,
   storeFailure,
@@ -104,12 +104,6 @@ describe("nextAfterDecision", () => {
   });
   it("is null when the key is not listed", () => {
     expect(nextAfterDecision(rows, "z")).toBeNull();
-  });
-});
-
-describe("actionableCount", () => {
-  it("counts only rows whose write has landed", () => {
-    expect(actionableCount([{ waiting: false }, { waiting: true }, { waiting: false }])).toBe(2);
   });
 });
 
@@ -259,5 +253,28 @@ describe("folderRejectPrompt", () => {
       go: "Reject 3",
       danger: true,
     });
+  });
+});
+
+describe("bulkKeys", () => {
+  const p = (path: string, scope = "/w", waiting = false) => ({ path, scope, waiting });
+  const r = (id: string, path: string) => ({ id, path });
+  const view = {
+    pending: [p("/w/a.ts"), p("/w/b.ts", "/w", true), p("/tmp/out.log"), p("/w/.wt/x/c.ts", "/w/.wt/x"), p("/wx/d.ts")],
+    accepted: [r("t1::/w/a.ts", "/w/a.ts"), r("t2::/w/e.ts", "/w/e.ts")],
+    rejected: [r("t3::/w/f.ts", "/w/f.ts")],
+  };
+
+  it("pending: rows whose write landed, inside their scope root (what the backend acts on)", () => {
+    expect(bulkKeys(view, "pending")).toEqual(["/w/a.ts", "/w/.wt/x/c.ts"]);
+  });
+
+  it("accepted: record ids; rejected: paths", () => {
+    expect(bulkKeys(view, "accepted")).toEqual(["t1::/w/a.ts", "t2::/w/e.ts"]);
+    expect(bulkKeys(view, "rejected")).toEqual(["/w/f.ts"]);
+  });
+
+  it("a scope root with a trailing slash or backslashes still matches", () => {
+    expect(bulkKeys({ ...view, pending: [p("C:\\w\\a.ts", "C:\\w\\")] }, "pending")).toEqual(["C:\\w\\a.ts"]);
   });
 });

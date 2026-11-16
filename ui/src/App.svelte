@@ -25,7 +25,7 @@
     type ProjectView,
   } from "./lib/api";
   import {
-    actionableCount,
+    bulkKeys,
     nextAfterDecision,
     isSettingsUnreadable,
     parseDecideError,
@@ -182,10 +182,8 @@
   const shownResult = $derived(
     result && !canDecide ? { ...result, undo: undefined, retry: undefined } : result,
   );
-  /** What the tab's bulk actions touch: pending rows whose write has landed, or every record. */
-  const bulkCount = $derived(
-    !view ? 0 : tab === "pending" ? actionableCount(view.pending) : view[tab].length,
-  );
+  /** What the tab's bulk actions touch and count: see `bulkKeys`. */
+  const bulk = $derived(view ? bulkKeys(view, tab) : []);
 
   // Responses can arrive out of order when events land in quick succession.
   let viewSeq = 0;
@@ -421,8 +419,9 @@
     await runDecide(u.action, { ...u.target, key }, { reselect: u.target.key });
   }
 
-  function runBulk(a: BulkAction) {
-    const all: DecideTarget = { kind: "all" };
+  /** `keys` are the rows the user counted and confirmed; the backend decides no other. */
+  function runBulk(a: BulkAction, keys: string[]) {
+    const all: DecideTarget = { kind: "all", keys };
     const action: DecideAction =
       a === "acceptAll"
         ? "accept"
@@ -662,9 +661,9 @@
               </button>
             {/if}
           </div>
-        {:else if view && canDecide && bulkCount > 0}
+        {:else if view && canDecide && bulk.length > 0}
           {#key tab}
-            <ActionBar {tab} count={bulkCount} {busy} onaction={runBulk} />
+            <ActionBar {tab} keys={bulk} {busy} onaction={runBulk} />
           {/key}
         {/if}
         <div class="scroll">

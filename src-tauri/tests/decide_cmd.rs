@@ -65,7 +65,7 @@ impl Fx {
 }
 
 fn file(scope: &str, key: &str) -> TargetDto {
-    TargetDto { kind: "file".into(), scope: Some(scope.into()), key: Some(key.into()), prefix: None }
+    TargetDto { kind: "file".into(), scope: Some(scope.into()), key: Some(key.into()), prefix: None, keys: None }
 }
 
 #[test]
@@ -86,10 +86,10 @@ fn malformed_targets_are_errors() {
     let fx = Fx::new();
     fx.seed(&[("a.txt", "old")]);
     let lock = Mutex::new(());
-    let folder = TargetDto { kind: "folder".into(), scope: Some(fx.root()), key: None, prefix: None };
-    let nokey = TargetDto { kind: "file".into(), scope: Some(fx.root()), key: None, prefix: None };
-    let noscope = TargetDto { kind: "file".into(), scope: None, key: Some("x".into()), prefix: None };
-    let weird = TargetDto { kind: "galaxy".into(), scope: None, key: None, prefix: None };
+    let folder = TargetDto { kind: "folder".into(), scope: Some(fx.root()), key: None, prefix: None, keys: None };
+    let nokey = TargetDto { kind: "file".into(), scope: Some(fx.root()), key: None, prefix: None, keys: None };
+    let noscope = TargetDto { kind: "file".into(), scope: None, key: Some("x".into()), prefix: None, keys: None };
+    let weird = TargetDto { kind: "galaxy".into(), scope: None, key: None, prefix: None, keys: None };
     for t in [folder, nokey, noscope, weird] {
         let out = fx.run(&lock, "accept", &t);
         let e: Value = serde_json::from_str(&out.result.unwrap_err()).unwrap();
@@ -263,4 +263,20 @@ fn malformed_config_pauses_decisions_and_a_missing_one_does_not() {
     let out = fx.run(&Mutex::new(()), "accept", &file(&fx.root(), &keys[0]));
     assert_eq!(out.result.unwrap().done, 1);
     assert!(!fx.cfg.exists());
+}
+
+/// I4: the UI sends the keys it counted; a capture landing after the count is not decided.
+#[test]
+fn bulk_keys_limit_the_action_to_what_was_confirmed() {
+    let fx = Fx::new();
+    let keys = fx.seed(&[("a.txt", "old"), ("late.txt", "old")]);
+    let all = TargetDto { kind: "all".into(), scope: None, key: None, prefix: None, keys: Some(vec![keys[0].clone()]) };
+    let out = fx.run(&Mutex::new(()), "accept", &all);
+    assert_eq!(out.result.unwrap().done, 1);
+    let files = fx.session()["files"].as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    assert_eq!(files, vec![keys[1].clone()]);
+    let dto: TargetDto = serde_json::from_value(json!({ "kind": "folder", "scope": "/w", "prefix": "/w/src", "keys": ["/w/src/a"] })).unwrap();
+    assert_eq!(dto.keys, Some(vec!["/w/src/a".to_owned()]));
+    let dto: TargetDto = serde_json::from_value(json!({ "kind": "all" })).unwrap();
+    assert_eq!(dto.keys, None);
 }

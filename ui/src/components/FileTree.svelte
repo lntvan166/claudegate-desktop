@@ -80,12 +80,13 @@
   }
 
   /** A folder reject waiting for its answer, shown inline under the folder's row. */
-  let folderAsk = $state<{ id: string; scope: string; prefix: string; prompt: Prompt } | null>(null);
+  let folderAsk = $state<{ id: string; scope: string; prefix: string; keys: string[]; prompt: Prompt } | null>(null);
   let askEl: HTMLDivElement | undefined = $state();
 
   async function askFolderReject(id: string, scope: string, n: TreeNode<Row>) {
-    const count = actionableRows(n).length;
-    folderAsk = { id, scope, prefix: folderPrefix(scope, n.rel), prompt: folderRejectPrompt(count, n.rel) };
+    // The rows counted in the question are the rows sent: nothing that lands later is rejected.
+    const keys = actionableRows(n).map((r) => r.path);
+    folderAsk = { id, scope, prefix: folderPrefix(scope, n.rel), keys, prompt: folderRejectPrompt(keys.length, n.rel) };
     await tick();
     // Cancel is the safe default.
     askEl?.querySelector<HTMLButtonElement>("[data-cancel]")?.focus();
@@ -100,7 +101,7 @@
   function confirmFolderAsk() {
     const a = folderAsk;
     folderAsk = null;
-    if (a) ondecide("reject", { kind: "folder", scope: a.scope, prefix: a.prefix }, null);
+    if (a) ondecide("reject", { kind: "folder", scope: a.scope, prefix: a.prefix, keys: a.keys }, null);
   }
 
   /** Focus stays inside the question until it is answered; Esc answers no. */
@@ -277,7 +278,10 @@
           disabled={busy || actionableRows(n).length === 0}
           aria-label="Accept folder {n.rel}"
           title="Accept folder"
-          onclick={() => ondecide("accept", { kind: "folder", scope, prefix }, null)}
+          onclick={() => {
+            const keys = actionableRows(n).map((r) => r.path);
+            ondecide("accept", { kind: "folder", scope, prefix, keys }, null);
+          }}
         >{@render check()}</button>
         <button
           class="act reject"

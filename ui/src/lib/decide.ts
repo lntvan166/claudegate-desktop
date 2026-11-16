@@ -6,11 +6,15 @@ export type BulkAction = "acceptAll" | "rejectAll" | "revertAll" | "reapplyAll" 
 
 export type DecideAction = "accept" | "reject" | "revert" | "reapply" | "clearAccepted" | "clearRejected";
 
-/** For accept/reject/reapply `key` is the path; for revert it is the record id. */
+/**
+ * For accept/reject/reapply `key` is the path; for revert it is the record id. `keys` on a folder or
+ * all target are the rows the user counted and confirmed; the backend acts on no other row and
+ * reports any that changed since.
+ */
 export type DecideTarget =
   | { kind: "file"; scope: string; key: string }
-  | { kind: "folder"; scope: string; prefix: string }
-  | { kind: "all" };
+  | { kind: "folder"; scope: string; prefix: string; keys?: string[] }
+  | { kind: "all"; keys?: string[] };
 
 export type DecideReport = {
   done: number;
@@ -143,12 +147,28 @@ export function nextAfterDecision(rows: { key: string }[], decidedKey: string): 
   return rows[i + 1]?.key ?? rows[i - 1]?.key ?? null;
 }
 
+/** `path` lies strictly inside `dir`, either separator, as the backend's `is_under`. */
+function isUnder(path: string, dir: string): boolean {
+  const d = norm(dir);
+  return norm(path).startsWith(`${d}/`);
+}
+
 /**
- * How many rows a bulk accept or reject touches. Excluded entries never reach the view; rows still
- * waiting for Claude's write are skipped by the backend, so they are not counted.
+ * The keys a tab's bulk action acts on, which are also what its count shows. Pending: rows whose
+ * write has landed and that lie inside their scope root (the backend skips waiting rows and rows
+ * outside the root; excluded ones never reach the view). Accepted: record ids. Rejected: paths.
  */
-export function actionableCount(rows: { waiting: boolean }[]): number {
-  return rows.filter((r) => !r.waiting).length;
+export function bulkKeys(
+  view: {
+    pending: { path: string; scope: string; waiting: boolean }[];
+    accepted: { id: string }[];
+    rejected: { path: string }[];
+  },
+  tab: "pending" | "accepted" | "rejected",
+): string[] {
+  if (tab === "accepted") return view.accepted.map((r) => r.id);
+  if (tab === "rejected") return view.rejected.map((r) => r.path);
+  return view.pending.filter((r) => !r.waiting && isUnder(r.path, r.scope)).map((r) => r.path);
 }
 
 /** The absolute folder path a folder row stands for: its scope root plus its relative path. */

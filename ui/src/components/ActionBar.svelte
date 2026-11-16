@@ -5,26 +5,30 @@
 
   let {
     tab,
-    count,
+    keys,
     busy,
     onaction,
   }: {
     tab: DiffKind;
-    /** How many files (or records, for Clear) the tab's bulk actions touch. */
-    count: number;
+    /** The files (or records, for Clear) the tab's bulk actions touch; see `bulkKeys`. */
+    keys: string[];
     busy: boolean;
-    onaction: (a: BulkAction) => void;
+    /** `keys` are exactly the rows counted in the question the user answered. */
+    onaction: (a: BulkAction, keys: string[]) => void;
   } = $props();
 
-  /** The action waiting for confirmation, if any. */
+  const count = $derived(keys.length);
+  /** The action waiting for confirmation, if any, and the rows its question counted. */
   let confirming = $state<BulkAction | null>(null);
+  let asked = $state<string[]>([]);
   let region: HTMLDivElement | undefined = $state();
 
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
-  const prompt = $derived(confirming ? bulkPrompt(confirming, tab, count) : null);
+  const prompt = $derived(confirming ? bulkPrompt(confirming, tab, asked.length) : null);
 
   async function ask(a: BulkAction) {
+    asked = [...keys];
     confirming = a;
     await tick();
     // Cancel is the safe default.
@@ -38,7 +42,7 @@
   function go() {
     const a = confirming;
     confirming = null;
-    if (a) onaction(a);
+    if (a) onaction(a, asked);
   }
 
   // Nothing left to act on (the list emptied underneath): the question no longer applies.
@@ -102,7 +106,7 @@
 {:else}
   <div class="bar" role="toolbar" aria-label="{tab} actions">
     {#if tab === "pending"}
-      <button class="btn" disabled={busy || count === 0} onclick={() => onaction("acceptAll")}>
+      <button class="btn" disabled={busy || count === 0} onclick={() => onaction("acceptAll", [...keys])}>
         {@render check()} Accept all
       </button>
       <button class="btn" disabled={busy || count === 0} onclick={() => void ask("rejectAll")}>

@@ -2,7 +2,7 @@
 //! blocking pool; errors cross the boundary as `String`.
 
 use crate::watch::KnownMap;
-use claudegate_core::decide::{decide as core_decide, Action, DecideError, DecidePaths, DecideReport, Target};
+use claudegate_core::decide::{decide_confirmed, Action, DecideError, DecidePaths, DecideReport, Target};
 use claudegate_core::model::{parse_session, ReviewRecord, Session};
 use claudegate_core::paths::{claudegate_home, resolve_root, session_file_for};
 use claudegate_core::project::{load_project, ProjectSummary, ProjectView};
@@ -162,7 +162,9 @@ pub async fn get_diff(
 #[derive(Default)]
 pub struct WriteLock(pub Mutex<()>);
 
-/// `{ kind: "file"|"folder"|"all", scope?, key?, prefix? }` as the UI sends it.
+/// `{ kind: "file"|"folder"|"all", scope?, key?, prefix?, keys? }` as the UI sends it. `keys` are
+/// the rows a folder or all action counted and the user confirmed (paths, or record ids for
+/// revert and clearAccepted); the core acts on no other key.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetDto {
@@ -170,6 +172,8 @@ pub struct TargetDto {
     pub scope: Option<String>,
     pub key: Option<String>,
     pub prefix: Option<String>,
+    #[serde(default)]
+    pub keys: Option<Vec<String>>,
 }
 
 pub fn parse_action(s: &str) -> Result<Action, String> {
@@ -276,7 +280,8 @@ pub fn run_decide(
     target: &TargetDto,
     now_iso: &str,
 ) -> DecideOutcome {
-    let parsed = parse_action(action).and_then(|a| parse_target(target).map(|t| (a, t)));
+    let target_dto = target;
+    let parsed = parse_action(action).and_then(|a| parse_target(target_dto).map(|t| (a, t)));
     let (action, target) = match parsed {
         Ok(p) => p,
         Err(m) => return DecideOutcome { result: Err(invalid_json(&m)), changed: false },
@@ -294,7 +299,8 @@ pub fn run_decide(
             return DecideOutcome { result: Err(j), changed: false };
         }
     };
-    match core_decide(paths, &resolve_root(Path::new(root)), action, target, read_only, now_iso) {
+    let keys = target_dto.keys.as_deref();
+    match decide_confirmed(paths, &resolve_root(Path::new(root)), action, target, keys, read_only, now_iso) {
         Ok(r) => DecideOutcome { result: Ok(r), changed: true },
         Err(e) => {
             let changed = matches!(e, DecideError::Store { .. });
