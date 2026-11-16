@@ -16,11 +16,14 @@ pub struct Config {
     /// A user-supplied template offered as "Custom…" in the Open-with menu.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_editor: Option<String>,
+    /// When true every decision is refused. Read from disk on each call, never cached.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { editor: DEFAULT_EDITOR.into(), custom_editor: None }
+        Self { editor: DEFAULT_EDITOR.into(), custom_editor: None, read_only: false }
     }
 }
 
@@ -47,6 +50,7 @@ fn from_value(v: &serde_json::Value) -> Config {
     Config {
         editor: non_empty(v.get("editor").and_then(|e| e.as_str())).unwrap_or_else(|| DEFAULT_EDITOR.into()),
         custom_editor: non_empty(v.get("customEditor").and_then(|e| e.as_str())),
+        read_only: v.get("readOnly").and_then(|e| e.as_bool()).unwrap_or(false),
     }
 }
 
@@ -107,13 +111,13 @@ pub fn allowed_template(template: &str, cfg: &Config) -> Result<String, String> 
     }
 }
 
-/// Persists `template` as the remembered editor, keeping every other key in the file.
-/// `guard` is the ClaudeGate home: a config path under it is refused outright.
-pub fn save_editor(path: &Path, template: &str, guard: Option<&Path>) -> Result<Config, String> {
-    let template = template.trim();
-    if template.is_empty() {
-        return Err("The editor command is empty.".into());
-    }
+/// Reads the config file as a JSON object (missing reads as `{}`), applies `f`, writes it back.
+/// Every other key is kept. `guard` is the ClaudeGate home: a config path under it is refused.
+fn update_config(
+    path: &Path,
+    guard: Option<&Path>,
+    f: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>, &Config) -> Result<(), String>,
+) -> Result<Config, String> {
     if let Some(g) = guard {
         if path.starts_with(g) {
             return Err("Refusing to write settings inside the ClaudeGate folder.".into());
@@ -129,11 +133,31 @@ pub fn save_editor(path: &Path, template: &str, guard: Option<&Path>) -> Result<
     if !v.is_object() {
         return Err(format!("{} is not a JSON object.", path.display()));
     }
-    let template = allowed_template(template, &from_value(&v))?;
-    let obj = v.as_object_mut().expect("checked above");
-    obj.insert("editor".into(), serde_json::Value::String(template));
+    let cfg = from_value(&v);
+    f(v.as_object_mut().expect("checked above"), &cfg)?;
     write_json(path, &v).map_err(|e| format!("Cannot save {}: {e}", path.display()))?;
     Ok(from_value(&v))
+}
+
+/// Persists `template` as the remembered editor, keeping every other key in the file.
+pub fn save_editor(path: &Path, template: &str, guard: Option<&Path>) -> Result<Config, String> {
+    let template = template.trim();
+    if template.is_empty() {
+        return Err("The editor command is empty.".into());
+    }
+    update_config(path, guard, |obj, cfg| {
+        let t = allowed_template(template, cfg)?;
+        obj.insert("editor".into(), serde_json::Value::String(t));
+        Ok(())
+    })
+}
+
+/// Persists the read-only switch, keeping every other key in the file.
+pub fn save_read_only(path: &Path, on: bool, guard: Option<&Path>) -> Result<Config, String> {
+    update_config(path, guard, |obj, _| {
+        obj.insert("readOnly".into(), serde_json::Value::Bool(on));
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -147,6 +171,15 @@ pub async fn get_config() -> Result<Config, String> {
 pub async fn set_editor(template: String) -> Result<Config, String> {
     tauri::async_runtime::spawn_blocking(move || {
         save_editor(&config_path(), &template, Some(&claudegate_core::paths::claudegate_home()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn set_read_only(on: bool) -> Result<Config, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_read_only(&config_path(), on, Some(&claudegate_core::paths::claudegate_home()))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -168,8 +201,8 @@ mod tests {
     #[test]
     fn serializes_camel_case_without_absent_custom() {
         let v = serde_json::to_value(Config::default()).unwrap();
-        assert_eq!(v, serde_json::json!({ "editor": "zed {path}:{line}" }));
-        let c = Config { editor: VSCODE.into(), custom_editor: Some("x".into()) };
+        assert_eq!(v, serde_json::json!({ "editor": "zed {path}:{line}", "readOnly": false }));
+        let c = Config { editor: VSCODE.into(), custom_editor: Some("x".into()), read_only: false };
         assert_eq!(serde_json::to_value(c).unwrap()["customEditor"], "x");
     }
 }

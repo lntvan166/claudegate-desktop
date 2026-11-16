@@ -1,0 +1,188 @@
+//! The decide command's plain logic and the read-only switch. Temp homes only: the real
+//! ~/.claudegate and ~/.claudegate-desktop are never touched.
+use claudegate_core::decide::{DecideError, DecidePaths};
+use claudegate_core::paths::session_file_for;
+use claudegate_desktop_lib::commands::{error_json, iso_from_ms, run_decide, TargetDto};
+use claudegate_desktop_lib::config::{load_or_create, save_editor, save_read_only, VSCODE};
+use serde_json::{json, Value};
+use std::fs;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+const NOW: &str = "2026-11-16T12:00:00.000Z";
+
+struct Fx {
+    _tmp: tempfile::TempDir,
+    paths: DecidePaths,
+    ws: PathBuf,
+    cfg: PathBuf,
+}
+
+impl Fx {
+    fn new() -> Fx {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("cg");
+        let desktop_home = tmp.path().join("cgd");
+        let ws = tmp.path().join("ws");
+        fs::create_dir_all(home.join("sessions")).unwrap();
+        fs::create_dir_all(&ws).unwrap();
+        let cfg = desktop_home.join("config.json");
+        Fx { paths: DecidePaths { home, desktop_home }, ws, cfg, _tmp: tmp }
+    }
+    fn root(&self) -> String {
+        self.ws.to_string_lossy().into_owned()
+    }
+    fn session_file(&self) -> PathBuf {
+        session_file_for(&self.paths.home, &self.ws)
+    }
+    /// Pending entries for each (name, original) pair; the files on disk hold "new".
+    fn seed(&self, files: &[(&str, &str)]) -> Vec<String> {
+        let mut m = serde_json::Map::new();
+        let mut keys = vec![];
+        for (name, orig) in files {
+            let p = self.ws.join(name);
+            fs::write(&p, "new").unwrap();
+            let k = p.to_string_lossy().into_owned();
+            m.insert(
+                k.clone(),
+                json!({ "originalContent": orig, "reviewStatus": "pending", "sessionId": "s1",
+                        "capturedAt": "2026-11-16T10:00:00.000Z" }),
+            );
+            keys.push(k);
+        }
+        let v = json!({ "sessionId": "2026-11-16T09:00:00.000Z", "status": "active",
+                        "files": m, "accepted": [], "rejected": {} });
+        fs::write(self.session_file(), serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        keys
+    }
+    fn session(&self) -> Value {
+        serde_json::from_str(&fs::read_to_string(self.session_file()).unwrap()).unwrap()
+    }
+    fn run(&self, lock: &Mutex<()>, action: &str, t: &TargetDto) -> claudegate_desktop_lib::commands::DecideOutcome {
+        run_decide(lock, &self.paths, &self.cfg, &self.root(), action, t, NOW)
+    }
+}
+
+fn file(scope: &str, key: &str) -> TargetDto {
+    TargetDto { kind: "file".into(), scope: Some(scope.into()), key: Some(key.into()), prefix: None }
+}
+
+#[test]
+fn unknown_action_is_an_error_before_anything_is_loaded() {
+    let fx = Fx::new();
+    let keys = fx.seed(&[("a.txt", "old")]);
+    let before = fs::read_to_string(fx.session_file()).unwrap();
+    let out = fx.run(&Mutex::new(()), "obliterate", &file(&fx.root(), &keys[0]));
+    let e: Value = serde_json::from_str(&out.result.unwrap_err()).unwrap();
+    assert_eq!(e["kind"], "invalid");
+    assert!(!out.changed);
+    assert_eq!(fs::read_to_string(fx.session_file()).unwrap(), before);
+    assert!(!fx.paths.desktop_home.join("backups").exists());
+}
+
+#[test]
+fn malformed_targets_are_errors() {
+    let fx = Fx::new();
+    fx.seed(&[("a.txt", "old")]);
+    let lock = Mutex::new(());
+    let folder = TargetDto { kind: "folder".into(), scope: Some(fx.root()), key: None, prefix: None };
+    let nokey = TargetDto { kind: "file".into(), scope: Some(fx.root()), key: None, prefix: None };
+    let noscope = TargetDto { kind: "file".into(), scope: None, key: Some("x".into()), prefix: None };
+    let weird = TargetDto { kind: "galaxy".into(), scope: None, key: None, prefix: None };
+    for t in [folder, nokey, noscope, weird] {
+        let out = fx.run(&lock, "accept", &t);
+        let e: Value = serde_json::from_str(&out.result.unwrap_err()).unwrap();
+        assert_eq!(e["kind"], "invalid");
+        assert!(!out.changed);
+    }
+    assert_eq!(fx.session()["files"].as_object().unwrap().len(), 1);
+}
+
+#[test]
+fn read_only_config_refuses_and_leaves_the_sandbox_alone() {
+    let fx = Fx::new();
+    let keys = fx.seed(&[("a.txt", "old")]);
+    save_read_only(&fx.cfg, true, None).unwrap();
+    let before = fs::read_to_string(fx.session_file()).unwrap();
+    let out = fx.run(&Mutex::new(()), "reject", &file(&fx.root(), &keys[0]));
+    let e: Value = serde_json::from_str(&out.result.unwrap_err()).unwrap();
+    assert_eq!(e["kind"], "readOnly");
+    assert!(e["message"].as_str().unwrap().contains("read-only"));
+    assert_eq!(fs::read_to_string(fx.session_file()).unwrap(), before);
+    assert_eq!(fs::read_to_string(&keys[0]).unwrap(), "new");
+    assert!(!fx.paths.desktop_home.join("backups").exists());
+    // flipping the switch takes effect on the very next call: nothing is cached
+    save_read_only(&fx.cfg, false, None).unwrap();
+    let out = fx.run(&Mutex::new(()), "accept", &file(&fx.root(), &keys[0]));
+    assert_eq!(out.result.unwrap().done, 1);
+    assert!(out.changed);
+}
+
+#[test]
+fn concurrent_decides_on_one_project_both_apply() {
+    let fx = Arc::new(Fx::new());
+    let keys = fx.seed(&[("a.txt", "old"), ("b.txt", "old")]);
+    let lock = Arc::new(Mutex::new(()));
+    let handles: Vec<_> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, k)| {
+            let (fx, lock, k) = (fx.clone(), lock.clone(), k.clone());
+            std::thread::spawn(move || {
+                let action = if i == 0 { "accept" } else { "reject" };
+                fx.run(&lock, action, &file(&fx.root(), &k)).result.unwrap().done
+            })
+        })
+        .collect();
+    for h in handles {
+        assert_eq!(h.join().unwrap(), 1);
+    }
+    let s = fx.session();
+    assert!(s["files"].as_object().unwrap().is_empty());
+    assert_eq!(s["status"], "reviewed");
+    let accepted = s["accepted"].as_array().unwrap();
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(accepted[0]["path"], keys[0]);
+    assert!(s["rejected"].as_object().unwrap().contains_key(&keys[1]));
+    assert_eq!(fs::read_to_string(&keys[0]).unwrap(), "new");
+    assert_eq!(fs::read_to_string(&keys[1]).unwrap(), "old");
+}
+
+#[test]
+fn set_read_only_persists_and_save_editor_keeps_it() {
+    let fx = Fx::new();
+    fs::create_dir_all(fx.cfg.parent().unwrap()).unwrap();
+    fs::write(&fx.cfg, r#"{"editor":"zed {path}:{line}","extra":{"k":1}}"#).unwrap();
+    let c = save_read_only(&fx.cfg, true, None).unwrap();
+    assert!(c.read_only);
+    assert!(load_or_create(&fx.cfg).read_only);
+    let c = save_editor(&fx.cfg, VSCODE, None).unwrap();
+    assert!(c.read_only);
+    assert_eq!(c.editor, VSCODE);
+    let v: Value = serde_json::from_str(&fs::read_to_string(&fx.cfg).unwrap()).unwrap();
+    assert_eq!(v["readOnly"], true);
+    assert_eq!(v["extra"], json!({"k":1}));
+    // and the reverse: turning it off keeps the editor
+    let c = save_read_only(&fx.cfg, false, None).unwrap();
+    assert!(!c.read_only);
+    assert_eq!(c.editor, VSCODE);
+    // the guard refuses a config path inside the ClaudeGate home
+    assert!(save_read_only(&fx.cfg, true, Some(fx.paths.desktop_home.as_path())).is_err());
+}
+
+#[test]
+fn error_json_shapes() {
+    let ro = serde_json::from_str::<Value>(&error_json(&DecideError::ReadOnly("nope".into()))).unwrap();
+    assert_eq!(ro, json!({"kind":"readOnly","message":"nope"}));
+    let nf = serde_json::from_str::<Value>(&error_json(&DecideError::NotFound)).unwrap();
+    assert_eq!(nf["kind"], "notFound");
+    let bt = serde_json::from_str::<Value>(&error_json(&DecideError::BadTarget("x".into()))).unwrap();
+    assert_eq!(bt, json!({"kind":"badTarget","message":"x"}));
+}
+
+#[test]
+fn iso_matches_to_iso_string() {
+    assert_eq!(iso_from_ms(0), "1970-01-01T00:00:00.000Z");
+    assert_eq!(iso_from_ms(1_763_294_400_123), "2025-11-16T12:00:00.123Z");
+    assert_eq!(iso_from_ms(951_782_400_000), "2000-02-29T00:00:00.000Z");
+}

@@ -9,6 +9,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .manage(watch::KnownMap::default())
+        .manage(commands::WriteLock::default())
         .setup(|app| {
             let known = app.state::<watch::KnownMap>().inner().clone();
             watch::start(app.handle().clone(), claudegate_core::paths::claudegate_home(), known);
@@ -19,8 +20,10 @@ pub fn run() {
             commands::list_projects,
             commands::get_project,
             commands::get_diff,
+            commands::decide,
             config::get_config,
             config::set_editor,
+            config::set_read_only,
             editor::open_in_editor,
             tray::set_pending_count
         ])
