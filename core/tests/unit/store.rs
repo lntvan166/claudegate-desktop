@@ -1,9 +1,14 @@
 //! Session store: the extension's lock, atomic write, backup and persist (v1.16.1 `sessionManager.ts`).
 //! Temp dirs only; nothing here touches ~/.claudegate or ~/.claudegate-desktop.
+//!
+//! Compiled as a unit-test module of `store.rs` (`#[path]`), not as an integration test: `persist`,
+//! `backup` and `acquire_lock` are crate-private so that only `decide` can reach them. It lives
+//! under `core/tests/unit/` so `no_writes` (which scans `core/src`) does not count its writes and
+//! cargo does not build it a second time as its own test target.
 
-use claudegate_core::merge::MergeGuards;
-use claudegate_core::model::{parse_session, Session, Status};
-use claudegate_core::store::{acquire_lock, backup, persist, StoreError, StorePaths};
+use crate::merge::MergeGuards;
+use crate::model::{parse_session, Session, Status};
+use crate::store::{acquire_lock, backup, persist, StoreError, StorePaths};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -73,6 +78,42 @@ fn stale_lock_is_stolen() {
     assert_eq!(fs::read_to_string(&lp).unwrap(), std::process::id().to_string());
 }
 
+
+/// M6: a stale lock that cannot be unlinked (read-only sessions dir) must not spin: the wait
+/// ends at the 200 ms deadline like any other held lock, and we proceed unlocked.
+#[cfg(unix)]
+#[test]
+fn an_unremovable_stale_lock_times_out_instead_of_spinning() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = env();
+    let lp = lock_path(&e.paths.session_file);
+    fs::write(&lp, "99999").unwrap();
+    let f = fs::File::options().write(true).open(&lp).unwrap();
+    f.set_modified(SystemTime::now() - Duration::from_secs(4)).unwrap();
+    drop(f);
+    let dir = e.paths.session_file.parent().unwrap().to_path_buf();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = dir.join(".probe");
+    if fs::write(&probe, "x").is_ok() {
+        let _ = fs::remove_file(&probe);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("skipping: running as root");
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let file = e.paths.session_file.clone();
+    std::thread::spawn(move || {
+        let t = Instant::now();
+        let got = acquire_lock(&file).is_some();
+        let _ = tx.send((got, t.elapsed()));
+    });
+    let r = rx.recv_timeout(Duration::from_secs(3));
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let (got, waited) = r.expect("acquire_lock spun past its deadline");
+    assert!(!got, "the lock could not be taken");
+    assert!(waited >= Duration::from_millis(190) && waited < Duration::from_millis(1500), "{waited:?}");
+    assert!(lp.exists(), "the stale lock is still there");
+}
 
 #[test]
 fn backup_keeps_newest_50() {

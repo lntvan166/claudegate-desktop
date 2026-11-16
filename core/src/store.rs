@@ -81,7 +81,7 @@ impl Drop for Lock {
 /// Take the lock, stealing a stale one. `None` means proceed without it: the wait timed out,
 /// or the lock could not be created for a reason other than it existing (fail-open, as the
 /// extension does).
-pub fn acquire_lock(session_file: &Path) -> Option<Lock> {
+pub(crate) fn acquire_lock(session_file: &Path) -> Option<Lock> {
     let path = with_suffix(session_file, ".lock");
     let deadline = Instant::now() + Duration::from_millis(LOCK_TIMEOUT_MS);
     loop {
@@ -98,8 +98,14 @@ pub fn acquire_lock(session_file: &Path) -> Option<Lock> {
                 // A future mtime reads as age 0, like the TS's negative age.
                 let age = SystemTime::now().duration_since(mtime).map(|d| d.as_millis()).unwrap_or(0);
                 if age > LOCK_STALE_MS {
-                    let _ = fs::remove_file(&path); // raced: someone else removed it
-                    continue;
+                    // Retry at once only when the stale lock is gone (our unlink, or someone
+                    // else's). An unlink that fails (a read-only dir) falls through to the
+                    // deadline, or the loop would spin forever.
+                    match fs::remove_file(&path) {
+                        Ok(()) => continue,
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                        Err(_) => {}
+                    }
                 }
             }
             Err(_) => continue, // vanished between open and stat: try to grab it
@@ -202,7 +208,7 @@ fn backup_dir(desktop_home: &Path, session_file: &Path) -> Result<PathBuf, Store
 
 /// Copy the current session file to `<desktop_home>/backups/<hash>/<stamp>[-N].json` and keep
 /// the newest 50. A missing session file needs no backup. Never overwrites an existing backup.
-pub fn backup(desktop_home: &Path, session_file: &Path) -> Result<(), StoreError> {
+pub(crate) fn backup(desktop_home: &Path, session_file: &Path) -> Result<(), StoreError> {
     let err = |e: io::Error| StoreError::Backup(e.to_string());
     let bytes = match fs::read(session_file) {
         Ok(b) => b,
@@ -256,7 +262,7 @@ fn prune_backups(dir: &Path) {
 /// Read-merge-write `mine` under the lock, as the extension's `persist`: re-read the disk copy
 /// and merge in what other writers added, set `status`, back up, then write atomically.
 /// Returns the session as written. Refuses a disk copy of unknown shape without writing.
-pub fn persist(paths: &StorePaths, mine: Session, guards: &MergeGuards) -> Result<Session, StoreError> {
+pub(crate) fn persist(paths: &StorePaths, mine: Session, guards: &MergeGuards) -> Result<Session, StoreError> {
     let sessions = paths.home.join("sessions");
     if paths.session_file.parent() != Some(sessions.as_path()) || paths.session_file.file_name().is_none() {
         return Err(StoreError::OutsideHome);
@@ -279,6 +285,10 @@ pub fn persist(paths: &StorePaths, mine: Session, guards: &MergeGuards) -> Resul
     atomic_write(&paths.session_file, &text, false).map_err(|e| StoreError::Write(e.to_string()))?;
     Ok(session)
 }
+
+#[path = "../tests/unit/store.rs"]
+#[cfg(test)]
+mod store_tests;
 
 #[cfg(test)]
 mod tests {

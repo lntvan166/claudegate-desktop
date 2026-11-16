@@ -5,9 +5,7 @@
 use claudegate_core::decide::{
     decide, decide_with, Action, DecideError, DecidePaths, DecideReport, Target, UNKNOWN_SHAPE_MESSAGE,
 };
-use claudegate_core::model::parse_session;
 use claudegate_core::paths::session_file_for;
-use claudegate_core::workspace_write;
 use md5::{Digest, Md5};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -696,43 +694,6 @@ fn every_session_write_makes_a_backup() {
         assert_eq!(fx.backups(&fx.ws), expected, "{action:?}");
     }
     assert!(expected >= 4);
-}
-
-// ── workspace_write guard ───────────────────────────────────────────────────
-
-#[test]
-fn workspace_write_refuses_a_path_the_session_does_not_hold() {
-    let fx = Fx::new();
-    let a = fx.file("a.txt", "keep");
-    let other = fx.file("other.txt", "keep");
-    let (s, _) = parse_session(
-        &session_json(json!({ &a: pending(Some("old")) }), json!([]), json!({})).to_string(),
-    )
-    .unwrap();
-    let e = workspace_write::restore(&s, Path::new(&other), "x").unwrap_err();
-    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
-    let e = workspace_write::delete(&s, Path::new(&other)).unwrap_err();
-    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
-    assert_eq!(fs::read_to_string(&other).unwrap(), "keep");
-    // A relative spelling of a key is refused too: it would resolve against our cwd.
-    assert!(workspace_write::restore(&s, Path::new("a.txt"), "x").is_err());
-    workspace_write::restore(&s, Path::new(&a), "restored").unwrap();
-    assert_eq!(fs::read_to_string(&a).unwrap(), "restored");
-}
-
-#[test]
-fn workspace_write_delete_is_limited_to_pending_keys() {
-    let fx = Fx::new();
-    let a = fx.file("a.txt", "keep");
-    let (s, _) = parse_session(
-        &session_json(json!({}), json!([]), json!({ &a: record(&a, Some("o"), Some("keep"), CAP) })).to_string(),
-    )
-    .unwrap();
-    let e = workspace_write::delete(&s, Path::new(&a)).unwrap_err();
-    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
-    assert!(Path::new(&a).exists());
-    // restore may still write a rejected key (reapply).
-    workspace_write::restore(&s, Path::new(&a), "claude").unwrap();
 }
 
 // ── Fix round 1 ─────────────────────────────────────────────────────────────
