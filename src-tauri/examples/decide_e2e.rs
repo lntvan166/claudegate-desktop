@@ -1,6 +1,7 @@
 //! Sandbox-only driver for scripts/decide-e2e.sh: one `decide` against $CLAUDEGATE_HOME, with an
 //! optional shell command run between the decision's load and its persist, the moment the
-//! extension's hook can land a capture. Never run this against a real ClaudeGate home.
+//! extension's hook can land a capture. Never run this against a real ClaudeGate home: it exits 2
+//! unless CLAUDEGATE_HOME and CLAUDEGATE_DESKTOP_CONFIG are both set.
 //!
 //! Usage: decide_e2e <root> <desktop-home> <accept|reject> <file> [<shell command to run mid-decision>]
 use claudegate_core::decide::{decide_with, Action, DecidePaths, Target};
@@ -13,6 +14,14 @@ fn main() {
     if args.len() < 5 {
         eprintln!("usage: decide_e2e <root> <desktop-home> <accept|reject> <file> [during-cmd]");
         std::process::exit(2);
+    }
+    // Sandbox only: both variables must be set, or claudegate_home() would fall back to the real
+    // ~/.claudegate (and the desktop config to the real ~/.claudegate-desktop).
+    for var in ["CLAUDEGATE_HOME", "CLAUDEGATE_DESKTOP_CONFIG"] {
+        if std::env::var_os(var).is_none_or(|v| v.is_empty()) {
+            eprintln!("decide_e2e: {var} is not set; refusing to run outside a sandbox");
+            std::process::exit(2);
+        }
     }
     let root = Path::new(&args[1]);
     let paths = DecidePaths { home: claudegate_home(), desktop_home: args[2].clone().into() };

@@ -35,6 +35,14 @@ py() { python3 -I -c "import json,sys; s=json.load(open('$(session)')); $1"; }
 BIN="$REPO/target/debug/examples/decide_e2e"
 [ -x "$BIN" ] || fail "example binary not found"
 
+# 0. The driver refuses to run unless both sandbox variables are set (it must never fall back to
+# the real ~/.claudegate). HOME is the sandbox here, so even a regression stays inside it.
+for unset in CLAUDEGATE_HOME CLAUDEGATE_DESKTOP_CONFIG; do
+  set +e; env -u "$unset" "$BIN" "$WS" "$DESKTOP" accept "$WS/a.txt" >/dev/null 2>&1; rc=$?; set -e
+  [ "$rc" -eq 2 ] || fail "decide_e2e ran without $unset (exit $rc, want 2)"
+done
+[ -z "$(ls "$CLAUDEGATE_HOME/sessions")" ] || fail "the refused runs wrote a session"
+
 # 1. Claude edits a.txt: hook snapshots a0, then the file changes.
 hook "$WS/a.txt"; printf 'a1\n' > "$WS/a.txt"
 [ -n "$(session)" ] || fail "hook wrote no session file"
