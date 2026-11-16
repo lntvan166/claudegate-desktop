@@ -239,6 +239,26 @@ fn invalid_json(message: &str) -> String {
     serde_json::json!({ "kind": "invalid", "message": message }).to_string()
 }
 
+pub const SETTINGS_UNREADABLE_MESSAGE: &str = "ClaudeGate Desktop couldn't read its settings file (~/.claudegate-desktop/config.json), so decisions are paused. Fix or delete that file.";
+
+/// The app's own home for backups: the config file's parent. It must be absolute and outside
+/// the ClaudeGate home, or backups would land under the cwd or inside `~/.claudegate`.
+pub fn desktop_home_for(config_path: &Path, cg_home: &Path) -> Result<PathBuf, String> {
+    let dh = config_path.parent().map(Path::to_path_buf).unwrap_or_default();
+    check_desktop_home(&dh, cg_home)?;
+    Ok(dh)
+}
+
+fn check_desktop_home(dh: &Path, cg_home: &Path) -> Result<(), String> {
+    if !dh.is_absolute() {
+        return Err("The settings folder is not an absolute path, so backups cannot be placed safely.".into());
+    }
+    if dh.starts_with(cg_home) {
+        return Err("The settings folder is inside the ClaudeGate folder, so decisions are refused.".into());
+    }
+    Ok(())
+}
+
 pub struct DecideOutcome {
     pub result: Result<DecideReport, String>,
     /// Files may have changed (Ok, or a `Store` error): the caller should emit `changed` now.
@@ -261,8 +281,19 @@ pub fn run_decide(
         Ok(p) => p,
         Err(m) => return DecideOutcome { result: Err(invalid_json(&m)), changed: false },
     };
+    if let Err(m) = check_desktop_home(&paths.desktop_home, &paths.home) {
+        return DecideOutcome { result: Err(invalid_json(&m)), changed: false };
+    }
     let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-    let read_only = crate::config::load_or_create(config_path).read_only;
+    let read_only = match crate::config::read_only_strict(config_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("claudegate: {}: {e}", config_path.display());
+            let message = SETTINGS_UNREADABLE_MESSAGE;
+            let j = serde_json::json!({ "kind": "readOnly", "message": message }).to_string();
+            return DecideOutcome { result: Err(j), changed: false };
+        }
+    };
     match core_decide(paths, &resolve_root(Path::new(root)), action, target, read_only, now_iso) {
         Ok(r) => DecideOutcome { result: Ok(r), changed: true },
         Err(e) => {
@@ -285,17 +316,17 @@ pub async fn decide(
         let root = root.clone();
         move || {
             let lock = handle.state::<WriteLock>();
-            let paths = DecidePaths {
-                home: claudegate_home(),
-                desktop_home: crate::config::config_path()
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_default(),
+            let home = claudegate_home();
+            let cfg = crate::config::config_path();
+            let desktop_home = match desktop_home_for(&cfg, &home) {
+                Ok(d) => d,
+                Err(m) => return DecideOutcome { result: Err(invalid_json(&m)), changed: false },
             };
+            let paths = DecidePaths { home, desktop_home };
             run_decide(
                 &lock.0,
                 &paths,
-                &crate::config::config_path(),
+                &cfg,
                 &root,
                 &action,
                 &target,

@@ -1,8 +1,9 @@
 //! The decide command's plain logic and the read-only switch. Temp homes only: the real
 //! ~/.claudegate and ~/.claudegate-desktop are never touched.
-use claudegate_core::decide::{DecideError, DecidePaths};
+use claudegate_core::decide::{DecideError, DecidePaths, DecideReport};
+use claudegate_core::store::StoreError;
 use claudegate_core::paths::session_file_for;
-use claudegate_desktop_lib::commands::{error_json, iso_from_ms, run_decide, TargetDto};
+use claudegate_desktop_lib::commands::{desktop_home_for, error_json, iso_from_ms, run_decide, TargetDto};
 use claudegate_desktop_lib::config::{load_or_create, save_editor, save_read_only, VSCODE};
 use serde_json::{json, Value};
 use std::fs;
@@ -185,4 +186,71 @@ fn iso_matches_to_iso_string() {
     assert_eq!(iso_from_ms(0), "1970-01-01T00:00:00.000Z");
     assert_eq!(iso_from_ms(1_763_294_400_123), "2025-11-16T12:00:00.123Z");
     assert_eq!(iso_from_ms(951_782_400_000), "2000-02-29T00:00:00.000Z");
+}
+
+#[test]
+fn store_error_json_carries_changed_and_partial() {
+    let partial = DecideReport { done: 2, left: vec!["l".into()], errors: vec![("p".into(), "m".into())] };
+    let e = DecideError::Store {
+        error: StoreError::Write("disk full".into()),
+        changed: vec!["/ws/a.txt".into()],
+        partial,
+    };
+    let v: Value = serde_json::from_str(&error_json(&e)).unwrap();
+    assert_eq!(v["kind"], "store");
+    assert!(v["message"].as_str().unwrap().contains("disk full"));
+    assert_eq!(v["changed"], json!(["/ws/a.txt"]));
+    assert_eq!(v["partial"], json!({"done":2,"left":["l"],"errors":[["p","m"]]}));
+}
+
+#[test]
+fn desktop_home_is_absolute_and_outside_the_claudegate_home() {
+    let cg = std::path::Path::new("/h/.claudegate");
+    assert_eq!(
+        desktop_home_for(std::path::Path::new("/h/.claudegate-desktop/config.json"), cg).unwrap(),
+        PathBuf::from("/h/.claudegate-desktop")
+    );
+    assert!(desktop_home_for(std::path::Path::new("config.json"), cg).is_err());
+    assert!(desktop_home_for(std::path::Path::new(""), cg).is_err());
+    assert!(desktop_home_for(std::path::Path::new("/h/.claudegate/config.json"), cg).is_err());
+    assert!(desktop_home_for(std::path::Path::new("/h/.claudegate/x/config.json"), cg).is_err());
+}
+
+#[test]
+fn run_decide_refuses_an_unsafe_desktop_home_before_touching_anything() {
+    let mut fx = Fx::new();
+    let keys = fx.seed(&[("a.txt", "old")]);
+    let before = fs::read_to_string(fx.session_file()).unwrap();
+    for bad in [PathBuf::from("rel/dir"), fx.paths.home.join("desk")] {
+        fx.paths.desktop_home = bad;
+        let out = fx.run(&Mutex::new(()), "accept", &file(&fx.root(), &keys[0]));
+        let e: Value = serde_json::from_str(&out.result.unwrap_err()).unwrap();
+        assert_eq!(e["kind"], "invalid");
+        assert!(!out.changed);
+        assert_eq!(fs::read_to_string(fx.session_file()).unwrap(), before);
+    }
+    assert!(!std::path::Path::new("rel").exists());
+}
+
+#[test]
+fn malformed_config_pauses_decisions_and_a_missing_one_does_not() {
+    let fx = Fx::new();
+    let keys = fx.seed(&[("a.txt", "old")]);
+    let before = fs::read_to_string(fx.session_file()).unwrap();
+    for bad in ["{ not json", "[]", r#"{"readOnly":"yes"}"#] {
+        fs::create_dir_all(fx.cfg.parent().unwrap()).unwrap();
+        fs::write(&fx.cfg, bad).unwrap();
+        let out = fx.run(&Mutex::new(()), "accept", &file(&fx.root(), &keys[0]));
+        let e: Value = serde_json::from_str(&out.result.unwrap_err()).unwrap();
+        assert_eq!(e["kind"], "readOnly");
+        assert!(e["message"].as_str().unwrap().contains("couldn't read its settings file"));
+        assert!(!out.changed);
+        assert_eq!(fs::read_to_string(fx.session_file()).unwrap(), before);
+        assert_eq!(fs::read_to_string(&fx.cfg).unwrap(), bad, "config must be left alone");
+    }
+    // missing: defaults, decision applies, and decide does not create the config
+    fs::remove_file(&fx.cfg).unwrap();
+    let out = fx.run(&Mutex::new(()), "accept", &file(&fx.root(), &keys[0]));
+    assert_eq!(out.result.unwrap().done, 1);
+    assert!(!fx.cfg.exists());
 }

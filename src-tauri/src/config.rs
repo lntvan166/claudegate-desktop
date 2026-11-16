@@ -79,6 +79,23 @@ pub fn load_or_create(path: &Path) -> Config {
     }
 }
 
+/// The read-only switch for `decide`: reads without creating anything and fails closed. A missing
+/// file means the defaults (`false`); an unreadable or malformed one is an error.
+pub fn read_only_strict(path: &Path) -> Result<bool, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.to_string()),
+    };
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let obj = v.as_object().ok_or("not a JSON object")?;
+    match obj.get("readOnly") {
+        None => Ok(false),
+        Some(serde_json::Value::Bool(b)) => Ok(*b),
+        Some(_) => Err("readOnly is not a boolean".into()),
+    }
+}
+
 fn write_json(path: &Path, v: &serde_json::Value) -> std::io::Result<()> {
     let dir = path.parent().ok_or_else(|| std::io::Error::other("config path has no parent"))?;
     std::fs::create_dir_all(dir)?;
