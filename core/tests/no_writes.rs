@@ -1,6 +1,6 @@
-//! Static guard: the viewer must never write under the ClaudeGate home.
-//! Only `src-tauri/src/config.rs` (the app's own ~/.claudegate-desktop) may
-//! use filesystem-mutating APIs. A trailing `#[cfg(test)] mod ...` block is
+//! Static guard: only the allowed writers may use filesystem-mutating APIs:
+//! `src-tauri/src/config.rs` (the app's own ~/.claudegate-desktop) and
+//! `core/src/store.rs` (session file, lock, temp, backups). A trailing `#[cfg(test)] mod ...` block is
 //! ignored, since unit tests write to temp dirs. A `#[cfg(test)]` on anything
 //! else (a helper, a `use`) does not cut: the rest of the file is still scanned.
 
@@ -27,7 +27,7 @@ const FORBIDDEN: &[&str] = &[
     "write_all",
 ];
 
-const ALLOWED: &[&str] = &["src-tauri/src/config.rs"];
+const ALLOWED: &[&str] = &["src-tauri/src/config.rs", "core/src/store.rs"];
 
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = fs::read_dir(dir) else { return };
@@ -88,7 +88,7 @@ fn only_config_rs_may_write() {
     let offenders = scan(root);
     assert!(
         offenders.is_empty(),
-        "write APIs outside src-tauri/src/config.rs:\n{}",
+        "write APIs outside the allowed writers:\n{}",
         offenders.join("\n")
     );
 }
