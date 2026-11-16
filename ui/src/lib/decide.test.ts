@@ -7,6 +7,8 @@ import {
   parseDecideError,
   recordIdFor,
   SETTINGS_UNREADABLE_MESSAGE,
+  bulkPrompt,
+  folderRejectPrompt,
   storeFailure,
   summarize,
   undoFor,
@@ -212,5 +214,50 @@ describe("storeFailure", () => {
 
   it("other actions keep Retry", () => {
     expect(storeFailure("accept", err(["/w/a"])).retry).toBe(true);
+  });
+});
+
+describe("bulkPrompt", () => {
+  it("asks before Reject all", () => {
+    expect(bulkPrompt("rejectAll", "pending", 3)).toEqual({
+      text: "Reject 3 files? Originals are restored and files Claude created are deleted.",
+      go: "Reject 3",
+      danger: true,
+    });
+  });
+
+  it("asks before Revert all, in the extension's words", () => {
+    expect(bulkPrompt("revertAll", "accepted", 4)).toEqual({
+      text: "Revert all 4 accepted file(s) back to pending review?",
+      go: "Revert 4",
+      danger: false,
+    });
+  });
+
+  it("asks before Reapply all, in the extension's words", () => {
+    expect(bulkPrompt("reapplyAll", "rejected", 2)).toEqual({
+      text: "Re-apply Claude's version to all 2 rejected file(s) on disk?",
+      go: "Reapply 2",
+      danger: true,
+    });
+  });
+
+  it("asks before Clear, naming the list", () => {
+    expect(bulkPrompt("clear", "accepted", 1)?.text).toBe("Clear 1 record from Accepted? Files on disk stay as they are.");
+    expect(bulkPrompt("clear", "rejected", 5)?.go).toBe("Clear 5");
+  });
+
+  it("Accept all needs no question: it changes no file", () => {
+    expect(bulkPrompt("acceptAll", "pending", 3)).toBeNull();
+  });
+});
+
+describe("folderRejectPrompt", () => {
+  it("uses the extension's words and the folder's own name", () => {
+    expect(folderRejectPrompt(3, "src/api")).toEqual({
+      text: 'Reject 3 file(s) in "api"? This restores their original content.',
+      go: "Reject 3",
+      danger: true,
+    });
   });
 });

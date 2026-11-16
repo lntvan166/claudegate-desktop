@@ -648,6 +648,39 @@ fn reapply_without_a_saved_after_is_an_error_and_changes_nothing() {
     assert_eq!(snapshot(fx.tmp.path()), before);
 }
 
+/// I3: Claude edited a rejected file again. Reapply would overwrite that new edit and replace its
+/// frozen baseline, so it is refused for that path and reported; the other paths still land.
+#[test]
+fn reapply_refuses_a_path_claude_has_edited_again() {
+    let fx = Fx::new();
+    let a = fx.file("a.txt", "claude's second edit");
+    let b = fx.file("b.txt", "orig");
+    let t = "2026-11-16T11:00:00.000Z";
+    // The re-edit was captured after the reject (an earlier capture is superseded by it).
+    let recapture = "2026-11-16T11:30:00.000Z";
+    let mut again = pending(Some("orig"));
+    again["capturedAt"] = json!(recapture);
+    fx.write_session(
+        &fx.ws,
+        session_json(
+            json!({ &a: again }),
+            json!([]),
+            json!({ &a: record(&a, Some("orig"), Some("claude"), t), &b: record(&b, Some("orig"), Some("claude"), t) }),
+        ),
+    );
+    for target in [fx.file_target(&fx.ws, &a), Target::All] {
+        let r = fx.run(Action::Reapply, target).unwrap();
+        let err = r.errors.iter().find(|(p, _)| p == &a).expect("a is reported");
+        assert_eq!(err.1, "Claude has edited this file again — review the new change first");
+        assert_eq!(fs::read_to_string(&a).unwrap(), "claude's second edit", "the new edit is untouched");
+        let s = fx.session(&fx.ws);
+        assert_eq!(s["files"][&a]["originalContent"], "orig");
+        assert_eq!(s["files"][&a]["capturedAt"], recapture, "the pending baseline is untouched");
+        assert!(s["rejected"].get(&a).is_some(), "the record stays");
+    }
+    assert_eq!(fs::read_to_string(&b).unwrap(), "claude", "the bulk reapply still did b");
+}
+
 #[test]
 fn reapply_all_skips_excluded_records() {
     let fx = Fx::new();

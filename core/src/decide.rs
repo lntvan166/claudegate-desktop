@@ -27,6 +27,8 @@ use std::path::{Component, Path, PathBuf, MAIN_SEPARATOR};
 /// Spec, "Protecting production" rule 1.
 pub const UNKNOWN_SHAPE_MESSAGE: &str =
     "This project was written by a newer ClaudeGate. Update the app to make decisions here.";
+/// Reapply of a path that is pending again.
+pub const REEDITED_MESSAGE: &str = "Claude has edited this file again — review the new change first";
 pub const READ_ONLY_MESSAGE: &str = "ClaudeGate Desktop is in read-only mode. Turn it off to make decisions.";
 
 #[derive(Debug, Clone)]
@@ -492,7 +494,8 @@ fn revert(
 }
 
 /// `reapplyRejected` / `reapplyFolder` / `reapplyAll`: write the record's `after` back and reopen
-/// the entry as pending. Folder and all skip excluded paths.
+/// the entry as pending. Folder and all skip excluded paths. Unlike the TS, a path that is pending
+/// again (Claude re-edited it) is refused and reported, never overwritten.
 fn reapply(
     ctx: &Ctx,
     target: &Target,
@@ -520,6 +523,12 @@ fn reapply(
     let mut mutated = false;
     for fp in paths {
         let Some(rec) = s.rejected.get(&fp).cloned() else { continue };
+        // Claude edited the file again since the reject: writing the old `after` would destroy
+        // that edit and replace its frozen baseline. The new change is reviewed first.
+        if s.files.contains_key(&fp) {
+            report.errors.push((fp, REEDITED_MESSAGE.to_owned()));
+            continue;
+        }
         let Some(after) = rec.after.as_deref() else {
             let name = Path::new(&fp).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             report.errors.push((fp, format!("Claude's version of \"{name}\" was not saved")));

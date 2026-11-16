@@ -427,6 +427,10 @@ function mockDecide(root: string, action: DecideAction, target: DecideTarget): D
       );
       if (picked.length === 0) throw fail("notFound", "nothing to decide: the file or record is no longer there");
       for (const r of picked) {
+        if (action === "reapply" && v.pending.some((p) => p.path === r.path)) {
+          report.errors.push([r.path, "Claude has edited this file again — review the new change first"]);
+          continue;
+        }
         if (action === "revert") v.accepted = v.accepted.filter((x) => x !== r);
         else v.rejected = v.rejected.filter((x) => x !== r);
         if (!v.pending.some((p) => p.path === r.path)) {

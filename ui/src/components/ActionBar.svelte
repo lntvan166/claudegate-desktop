@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import type { DiffKind } from "../lib/api";
-  import type { BulkAction } from "../lib/decide";
+  import { bulkPrompt, type BulkAction } from "../lib/decide";
 
   let {
     tab,
@@ -22,22 +22,7 @@
 
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
-  const prompt = $derived.by(() => {
-    if (confirming === "rejectAll") {
-      return {
-        text: `Reject ${plural(count, "file", "files")}? Originals are restored and files Claude created are deleted.`,
-        go: `Reject ${count}`,
-      };
-    }
-    if (confirming === "clear") {
-      const list = tab === "accepted" ? "Accepted" : "Rejected";
-      return {
-        text: `Clear ${plural(count, "record", "records")} from ${list}? Files on disk stay as they are.`,
-        go: `Clear ${count}`,
-      };
-    }
-    return null;
-  });
+  const prompt = $derived(confirming ? bulkPrompt(confirming, tab, count) : null);
 
   async function ask(a: BulkAction) {
     confirming = a;
@@ -110,7 +95,7 @@
   <div class="bar confirm" role="group" aria-label="Confirm" data-confirm bind:this={region} onkeydown={trap}>
     <p class="question">{prompt.text}</p>
     <div class="buttons">
-      <button class="btn danger" disabled={busy} onclick={go}>{prompt.go}</button>
+      <button class="btn" class:danger={prompt.danger} class:primary={!prompt.danger} disabled={busy} onclick={go}>{prompt.go}</button>
       <button class="btn" data-cancel onclick={cancel}>Cancel</button>
     </div>
   </div>
@@ -127,7 +112,7 @@
       <button
         class="btn"
         disabled={busy || count === 0}
-        onclick={() => onaction(tab === "accepted" ? "revertAll" : "reapplyAll")}
+        onclick={() => void ask(tab === "accepted" ? "revertAll" : "reapplyAll")}
       >
         {@render undo()}
         {tab === "accepted" ? "Revert all" : "Reapply all"}
@@ -198,6 +183,14 @@
   }
   .btn.danger:hover:not(:disabled) {
     background: var(--danger-hover);
+  }
+  .btn.primary {
+    border-color: var(--text);
+    color: var(--surface);
+    background: var(--text);
+  }
+  .btn.primary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text) 85%, var(--surface));
   }
 
   .confirm {

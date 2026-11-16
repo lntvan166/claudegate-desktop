@@ -2,7 +2,7 @@
   import { tick } from "svelte";
   import type { SvelteSet } from "svelte/reactivity";
   import type { DiffKind } from "../lib/api";
-  import { folderPrefix, type DecideAction, type DecideTarget } from "../lib/decide";
+  import { folderPrefix, folderRejectPrompt, type DecideAction, type DecideTarget, type Prompt } from "../lib/decide";
   import { iconFor, type IconTheme } from "../lib/icons";
   import { nodeKey, type Group, type Row } from "../lib/rows";
   import { relTime } from "../lib/time";
@@ -72,6 +72,58 @@
   function countFiles(n: TreeNode<Row>): number {
     return n.kind === "file" ? 1 : (n.children ?? []).reduce((s, c) => s + countFiles(c), 0);
   }
+
+  /** The rows a folder action decides: every file under `n` whose write has landed. */
+  function actionableRows(n: TreeNode<Row>): Row[] {
+    if (n.kind === "file") return n.item && !n.item.waiting ? [n.item] : [];
+    return (n.children ?? []).flatMap(actionableRows);
+  }
+
+  /** A folder reject waiting for its answer, shown inline under the folder's row. */
+  let folderAsk = $state<{ id: string; scope: string; prefix: string; prompt: Prompt } | null>(null);
+  let askEl: HTMLDivElement | undefined = $state();
+
+  async function askFolderReject(id: string, scope: string, n: TreeNode<Row>) {
+    const count = actionableRows(n).length;
+    folderAsk = { id, scope, prefix: folderPrefix(scope, n.rel), prompt: folderRejectPrompt(count, n.rel) };
+    await tick();
+    // Cancel is the safe default.
+    askEl?.querySelector<HTMLButtonElement>("[data-cancel]")?.focus();
+  }
+
+  function cancelFolderAsk() {
+    const id = folderAsk?.id;
+    folderAsk = null;
+    if (id) void focusItem(id);
+  }
+
+  function confirmFolderAsk() {
+    const a = folderAsk;
+    folderAsk = null;
+    if (a) ondecide("reject", { kind: "folder", scope: a.scope, prefix: a.prefix }, null);
+  }
+
+  /** Focus stays inside the question until it is answered; Esc answers no. */
+  function trapAsk(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelFolderAsk();
+      return;
+    }
+    if (e.key !== "Tab" || !askEl) return;
+    const buttons = [...askEl.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+    if (buttons.length === 0) return;
+    const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    const next = e.shiftKey ? (i <= 0 ? buttons.length - 1 : i - 1) : i === buttons.length - 1 ? 0 : i + 1;
+    buttons[next].focus();
+    e.preventDefault();
+  }
+
+  // The folder left the list, or decisions were turned off: the question no longer applies.
+  $effect(() => {
+    if (folderAsk && (!canDecide || tab !== "pending" || !items.some((i) => i.id === folderAsk!.id))) folderAsk = null;
+  });
 
   function dirOf(rel: string): string {
     const i = rel.lastIndexOf("/");
@@ -222,7 +274,7 @@
         <button
           class="act accept"
           tabindex="-1"
-          disabled={busy}
+          disabled={busy || actionableRows(n).length === 0}
           aria-label="Accept folder {n.rel}"
           title="Accept folder"
           onclick={() => ondecide("accept", { kind: "folder", scope, prefix }, null)}
@@ -230,14 +282,32 @@
         <button
           class="act reject"
           tabindex="-1"
-          disabled={busy}
+          disabled={busy || actionableRows(n).length === 0}
           aria-label="Reject folder {n.rel}"
           title="Reject folder"
-          onclick={() => ondecide("reject", { kind: "folder", scope, prefix }, null)}
+          onclick={() => void askFolderReject(id, scope, n)}
         >{@render cross()}</button>
       </div>
     {/if}
     </div>
+    {#if folderAsk?.id === id}
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <div
+        class="ask"
+        role="group"
+        aria-label="Confirm"
+        data-confirm
+        style:padding-left="{pad(depth) + 16}px"
+        bind:this={askEl}
+        onkeydown={trapAsk}
+      >
+        <p class="question">{folderAsk.prompt.text}</p>
+        <div class="ask-buttons">
+          <button class="btn danger" disabled={busy} onclick={confirmFolderAsk}>{folderAsk.prompt.go}</button>
+          <button class="btn" data-cancel onclick={cancelFolderAsk}>Cancel</button>
+        </div>
+      </div>
+    {/if}
     {#if open}
       <div role="group">
         {#each n.children ?? [] as child (nodeKey(child))}
@@ -376,6 +446,56 @@
 </div>
 
 <style>
+  /* A folder reject's question, inline under its row (the ActionBar's confirm, row-sized). */
+  .ask {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 10px;
+    padding: 8px 12px 8px 0;
+    background: var(--raised);
+    border-block: 1px solid var(--rule);
+  }
+  .question {
+    flex: 1 1 180px;
+    min-width: 0;
+    font-size: var(--fs-small);
+    line-height: 1.45;
+    color: var(--text);
+  }
+  .ask-buttons {
+    display: flex;
+    gap: 6px;
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    height: 26px;
+    padding: 0 10px;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-control);
+    font-size: var(--fs-small);
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--text);
+    background: var(--surface);
+    transition: background 120ms var(--ease);
+  }
+  .btn:hover:not(:disabled) {
+    background: var(--hover);
+  }
+  .btn.danger {
+    border-color: transparent;
+    color: #fff;
+    background: var(--danger);
+  }
+  .btn.danger:hover:not(:disabled) {
+    background: var(--danger-hover);
+  }
+  .btn:disabled {
+    opacity: 0.6;
+  }
+
   .tree {
     padding: 6px 0 16px;
   }
