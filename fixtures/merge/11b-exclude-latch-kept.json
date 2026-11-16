@@ -1,0 +1,26 @@
+{
+ "mine": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [],
+  "rejected": {},
+  "excludeCleanupDone": true
+ },
+ "disk": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [],
+  "rejected": {}
+ },
+ "guards": {},
+ "expected": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [],
+  "rejected": {},
+  "excludeCleanupDone": true
+ }
+}

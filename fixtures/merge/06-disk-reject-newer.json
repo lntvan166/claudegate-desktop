@@ -1,0 +1,167 @@
+{
+ "mine": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [],
+  "rejected": {
+   "/ws/proj/newer-on-disk.ts": {
+    "id": "2026-11-16T10:00:01.000Z::/ws/proj/newer-on-disk.ts",
+    "path": "/ws/proj/newer-on-disk.ts",
+    "before": "before newer-on-disk.ts",
+    "after": "after newer-on-disk.ts",
+    "decidedAt": "2026-11-16T10:00:01.000Z",
+    "sessionId": "s1"
+   },
+   "/ws/proj/newer-ours.ts": {
+    "id": "2026-11-16T10:00:09.000Z::/ws/proj/newer-ours.ts",
+    "path": "/ws/proj/newer-ours.ts",
+    "before": "before newer-ours.ts",
+    "after": "after newer-ours.ts",
+    "decidedAt": "2026-11-16T10:00:09.000Z",
+    "sessionId": "s1"
+   },
+   "/ws/proj/ours-nan.ts": {
+    "id": "bad::/ws/proj/ours-nan.ts",
+    "path": "/ws/proj/ours-nan.ts",
+    "before": "before ours-nan.ts",
+    "after": "after ours-nan.ts",
+    "decidedAt": "bad",
+    "sessionId": "s1"
+   },
+   "/ws/proj/disk-nan.ts": {
+    "id": "2026-11-16T10:00:01.000Z::/ws/proj/disk-nan.ts",
+    "path": "/ws/proj/disk-nan.ts",
+    "before": "before disk-nan.ts",
+    "after": "after disk-nan.ts",
+    "decidedAt": "2026-11-16T10:00:01.000Z",
+    "sessionId": "s1"
+   },
+   "/ws/proj/tie.ts": {
+    "id": "2026-11-16T10:00:03.000Z::/ws/proj/tie.ts",
+    "path": "/ws/proj/tie.ts",
+    "before": "before tie.ts",
+    "after": "ours",
+    "decidedAt": "2026-11-16T10:00:03.000Z",
+    "sessionId": "s1"
+   }
+  }
+ },
+ "disk": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [],
+  "rejected": {
+   "/ws/proj/newer-on-disk.ts": {
+    "id": "2026-11-16T10:00:02.000Z::/ws/proj/newer-on-disk.ts",
+    "path": "/ws/proj/newer-on-disk.ts",
+    "before": "before newer-on-disk.ts",
+    "after": "disk",
+    "decidedAt": "2026-11-16T10:00:02.000Z",
+    "sessionId": "s1"
+   },
+   "/ws/proj/newer-ours.ts": {
+    "id": "2026-11-16T10:00:08.000Z::/ws/proj/newer-ours.ts",
+    "path": "/ws/proj/newer-ours.ts",
+    "before": "before newer-ours.ts",
+    "after": "disk",
+    "decidedAt": "2026-11-16T10:00:08.000Z",
+    "sessionId": "s1"
+   },
+   "/ws/proj/ours-nan.ts": {
+    "id": "2026-11-16T10:00:01.000Z::/ws/proj/ours-nan.ts",
+    "path": "/ws/proj/ours-nan.ts",
+    "before": "before ours-nan.ts",
+    "after": "disk",
+    "decidedAt": "2026-11-16T10:00:01.000Z",
+    "sessionId": "s1"
+   },
+   "/ws/proj/disk-nan.ts": {
+    "id": "bad::/ws/proj/disk-nan.ts",
+    "path": "/ws/proj/disk-nan.ts",
+    "before": "before disk-nan.ts",
+    "after": "disk",
+    "decidedAt": "bad",
+    "sessionId": "s1"
+   },
+   "/ws/proj/tie.ts": {
+    "id": "2026-11-16T10:00:03.000000+00:00::/ws/proj/tie.ts",
+    "path": "/ws/proj/tie.ts",
+    "before": "before tie.ts",
+    "after": "disk",
+    "decidedAt": "2026-11-16T10:00:03.000000+00:00",
+    "sessionId": "s1"
+   },
+   "/ws/proj/only-disk.ts": {
+    "id": "2026-11-16T10:00:01.000Z::/ws/proj/only-disk.ts",
+    "path": "/ws/proj/only-disk.ts",
+    "before": "before only-disk.ts",
+    "after": "after only-disk.ts",
+    "decidedAt": "2026-11-16T10:00:01.000Z",
+    "sessionId": "s1",
+    "newFile": true,
+    "reason": "nope"
+   }
+  }
+ },
+ "guards": {},
+ "expected": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [],
+  "rejected": {
+   "/ws/proj/newer-on-disk.ts": {
+    "id": "2026-11-16T10:00:02.000Z::/ws/proj/newer-on-disk.ts",
+    "path": "/ws/proj/newer-on-disk.ts",
+    "before": "before newer-on-disk.ts",
+    "after": "disk",
+    "decidedAt": "2026-11-16T10:00:02.000Z",
+    "sessionId": "s1"
+   },
+   "/ws/proj/newer-ours.ts": {
+    "id": "2026-11-16T10:00:09.000Z::/ws/proj/newer-ours.ts",
+    "path": "/ws/proj/newer-ours.ts",
+    "before": "before newer-ours.ts",
+    "after": "after newer-ours.ts",
+    "decidedAt": "2026-11-16T10:00:09.000Z",
+    "sessionId": "s1"
+   },
+   "/ws/proj/ours-nan.ts": {
+    "id": "2026-11-16T10:00:01.000Z::/ws/proj/ours-nan.ts",
+    "path": "/ws/proj/ours-nan.ts",
+    "before": "before ours-nan.ts",
+    "after": "disk",
+    "decidedAt": "2026-11-16T10:00:01.000Z",
+    "sessionId": "s1"
+   },
+   "/ws/proj/disk-nan.ts": {
+    "id": "2026-11-16T10:00:01.000Z::/ws/proj/disk-nan.ts",
+    "path": "/ws/proj/disk-nan.ts",
+    "before": "before disk-nan.ts",
+    "after": "after disk-nan.ts",
+    "decidedAt": "2026-11-16T10:00:01.000Z",
+    "sessionId": "s1"
+   },
+   "/ws/proj/tie.ts": {
+    "id": "2026-11-16T10:00:03.000Z::/ws/proj/tie.ts",
+    "path": "/ws/proj/tie.ts",
+    "before": "before tie.ts",
+    "after": "ours",
+    "decidedAt": "2026-11-16T10:00:03.000Z",
+    "sessionId": "s1"
+   },
+   "/ws/proj/only-disk.ts": {
+    "id": "2026-11-16T10:00:01.000Z::/ws/proj/only-disk.ts",
+    "path": "/ws/proj/only-disk.ts",
+    "before": "before only-disk.ts",
+    "after": "after only-disk.ts",
+    "decidedAt": "2026-11-16T10:00:01.000Z",
+    "sessionId": "s1",
+    "newFile": true,
+    "reason": "nope"
+   }
+  }
+ }
+}

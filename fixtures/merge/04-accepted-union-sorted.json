@@ -1,0 +1,147 @@
+{
+ "mine": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [
+   {
+    "id": "2026-11-16T10:00:02.000Z::/ws/proj/b.ts",
+    "path": "/ws/proj/b.ts",
+    "before": "before b.ts",
+    "after": "after b.ts",
+    "decidedAt": "2026-11-16T10:00:02.000Z",
+    "sessionId": "s1"
+   },
+   {
+    "id": "2026-11-16T10:00:04.000Z::/ws/proj/d.ts",
+    "path": "/ws/proj/d.ts",
+    "before": "before d.ts",
+    "after": "after d.ts",
+    "decidedAt": "2026-11-16T10:00:04.000Z",
+    "sessionId": "s1"
+   },
+   {
+    "id": "2026-11-16T10:00:06.000Z::/ws/proj/e1.ts",
+    "path": "/ws/proj/e1.ts",
+    "before": "before e1.ts",
+    "after": "after e1.ts",
+    "decidedAt": "2026-11-16T10:00:06.000Z",
+    "sessionId": "s1"
+   }
+  ],
+  "rejected": {}
+ },
+ "disk": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [
+   {
+    "id": "2026-11-16T10:00:02.000Z::/ws/proj/b.ts",
+    "path": "/ws/proj/b.ts",
+    "before": "before b.ts",
+    "after": "after b.ts",
+    "decidedAt": "2026-11-16T10:00:02.000Z",
+    "sessionId": "s1"
+   },
+   {
+    "id": "2026-11-16T10:00:01.000Z::/ws/proj/a.ts",
+    "path": "/ws/proj/a.ts",
+    "before": "before a.ts",
+    "after": "after a.ts",
+    "decidedAt": "2026-11-16T10:00:01.000Z",
+    "sessionId": "s1"
+   },
+   {
+    "id": "2026-11-16T10:00:03.000000+00:00::/ws/proj/c.ts",
+    "path": "/ws/proj/c.ts",
+    "before": "before c.ts",
+    "after": "after c.ts",
+    "decidedAt": "2026-11-16T10:00:03.000000+00:00",
+    "sessionId": "s1"
+   },
+   {
+    "id": "2026-11-16T10:00:06.000Z::/ws/proj/e2.ts",
+    "path": "/ws/proj/e2.ts",
+    "before": "before e2.ts",
+    "after": "after e2.ts",
+    "decidedAt": "2026-11-16T10:00:06.000Z",
+    "sessionId": "s1"
+   },
+   {
+    "id": "2026-11-16T10:00:00.500Z::/ws/proj/f.ts",
+    "path": "/ws/proj/f.ts",
+    "before": "before f.ts",
+    "after": "after f.ts",
+    "decidedAt": "2026-11-16T10:00:00.500Z",
+    "sessionId": "s1"
+   }
+  ],
+  "rejected": {}
+ },
+ "guards": {},
+ "expected": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [
+   {
+    "id": "2026-11-16T10:00:00.500Z::/ws/proj/f.ts",
+    "path": "/ws/proj/f.ts",
+    "before": "before f.ts",
+    "after": "after f.ts",
+    "decidedAt": "2026-11-16T10:00:00.500Z",
+    "sessionId": "s1"
+   },
+   {
+    "id": "2026-11-16T10:00:01.000Z::/ws/proj/a.ts",
+    "path": "/ws/proj/a.ts",
+    "before": "before a.ts",
+    "after": "after a.ts",
+    "decidedAt": "2026-11-16T10:00:01.000Z",
+    "sessionId": "s1"
+   },
+   {
+    "id": "2026-11-16T10:00:02.000Z::/ws/proj/b.ts",
+    "path": "/ws/proj/b.ts",
+    "before": "before b.ts",
+    "after": "after b.ts",
+    "decidedAt": "2026-11-16T10:00:02.000Z",
+    "sessionId": "s1"
+   },
+   {
+    "id": "2026-11-16T10:00:03.000000+00:00::/ws/proj/c.ts",
+    "path": "/ws/proj/c.ts",
+    "before": "before c.ts",
+    "after": "after c.ts",
+    "decidedAt": "2026-11-16T10:00:03.000000+00:00",
+    "sessionId": "s1"
+   },
+   {
+    "id": "2026-11-16T10:00:04.000Z::/ws/proj/d.ts",
+    "path": "/ws/proj/d.ts",
+    "before": "before d.ts",
+    "after": "after d.ts",
+    "decidedAt": "2026-11-16T10:00:04.000Z",
+    "sessionId": "s1"
+   },
+   {
+    "id": "2026-11-16T10:00:06.000Z::/ws/proj/e1.ts",
+    "path": "/ws/proj/e1.ts",
+    "before": "before e1.ts",
+    "after": "after e1.ts",
+    "decidedAt": "2026-11-16T10:00:06.000Z",
+    "sessionId": "s1"
+   },
+   {
+    "id": "2026-11-16T10:00:06.000Z::/ws/proj/e2.ts",
+    "path": "/ws/proj/e2.ts",
+    "before": "before e2.ts",
+    "after": "after e2.ts",
+    "decidedAt": "2026-11-16T10:00:06.000Z",
+    "sessionId": "s1"
+   }
+  ],
+  "rejected": {}
+ }
+}

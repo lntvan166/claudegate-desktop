@@ -1,0 +1,54 @@
+{
+ "mine": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [],
+  "rejected": {}
+ },
+ "disk": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [],
+  "rejected": {
+   "/ws/proj/cleared.ts": {
+    "id": "2026-11-16T10:00:02.000Z::/ws/proj/cleared.ts",
+    "path": "/ws/proj/cleared.ts",
+    "before": "before cleared.ts",
+    "after": "after cleared.ts",
+    "decidedAt": "2026-11-16T10:00:02.000Z",
+    "sessionId": "s1"
+   },
+   "/ws/proj/other.ts": {
+    "id": "2026-11-16T10:00:02.000Z::/ws/proj/other.ts",
+    "path": "/ws/proj/other.ts",
+    "before": "before other.ts",
+    "after": "after other.ts",
+    "decidedAt": "2026-11-16T10:00:02.000Z",
+    "sessionId": "s1"
+   }
+  }
+ },
+ "guards": {
+  "droppedRejectedPaths": [
+   "/ws/proj/cleared.ts"
+  ]
+ },
+ "expected": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [],
+  "rejected": {
+   "/ws/proj/other.ts": {
+    "id": "2026-11-16T10:00:02.000Z::/ws/proj/other.ts",
+    "path": "/ws/proj/other.ts",
+    "before": "before other.ts",
+    "after": "after other.ts",
+    "decidedAt": "2026-11-16T10:00:02.000Z",
+    "sessionId": "s1"
+   }
+  }
+ }
+}

@@ -1,0 +1,79 @@
+{
+ "mine": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [
+   {
+    "id": "2026-11-16T10:00:01.000Z::/ws/proj/keep.ts",
+    "path": "/ws/proj/keep.ts",
+    "before": "before keep.ts",
+    "after": "after keep.ts",
+    "decidedAt": "2026-11-16T10:00:01.000Z",
+    "sessionId": "s1"
+   }
+  ],
+  "rejected": {}
+ },
+ "disk": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [
+   {
+    "id": "2026-11-16T10:00:01.000Z::/ws/proj/keep.ts",
+    "path": "/ws/proj/keep.ts",
+    "before": "before keep.ts",
+    "after": "after keep.ts",
+    "decidedAt": "2026-11-16T10:00:01.000Z",
+    "sessionId": "s1"
+   },
+   {
+    "id": "2026-11-16T10:00:02.000Z::/ws/proj/reverted.ts",
+    "path": "/ws/proj/reverted.ts",
+    "before": "before reverted.ts",
+    "after": "after reverted.ts",
+    "decidedAt": "2026-11-16T10:00:02.000Z",
+    "sessionId": "s1"
+   },
+   {
+    "id": "2026-11-16T10:00:03.000Z::/ws/proj/other.ts",
+    "path": "/ws/proj/other.ts",
+    "before": "before other.ts",
+    "after": "after other.ts",
+    "decidedAt": "2026-11-16T10:00:03.000Z",
+    "sessionId": "s1"
+   }
+  ],
+  "rejected": {}
+ },
+ "guards": {
+  "droppedAcceptedIds": [
+   "2026-11-16T10:00:02.000Z::/ws/proj/reverted.ts"
+  ]
+ },
+ "expected": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [
+   {
+    "id": "2026-11-16T10:00:01.000Z::/ws/proj/keep.ts",
+    "path": "/ws/proj/keep.ts",
+    "before": "before keep.ts",
+    "after": "after keep.ts",
+    "decidedAt": "2026-11-16T10:00:01.000Z",
+    "sessionId": "s1"
+   },
+   {
+    "id": "2026-11-16T10:00:03.000Z::/ws/proj/other.ts",
+    "path": "/ws/proj/other.ts",
+    "before": "before other.ts",
+    "after": "after other.ts",
+    "decidedAt": "2026-11-16T10:00:03.000Z",
+    "sessionId": "s1"
+   }
+  ],
+  "rejected": {}
+ }
+}

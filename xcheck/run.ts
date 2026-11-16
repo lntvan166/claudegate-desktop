@@ -1,6 +1,12 @@
 import * as fs from "fs";
 import * as path from "path";
-import { migrateSession } from "../.xcheck-cache/claudegate/src/reviewModel";
+import {
+  acceptEntry,
+  mergeFreshCaptures,
+  migrateSession,
+  rejectEntry,
+  type MergeGuards,
+} from "../.xcheck-cache/claudegate/src/reviewModel";
 import { ExcludeMatcher } from "../.xcheck-cache/claudegate/src/excludeMatcher";
 
 const root = path.resolve(__dirname, "..");
@@ -43,8 +49,35 @@ for (const c of ex.cases) {
   if (got !== c.excluded) fail(`exclude globs=${JSON.stringify(c.globs)} path=${c.path}: extension=${got}, fixture=${c.excluded}`);
 }
 
+// Merge fixtures carry { mine, disk, guards, expected }; decision fixtures add an `op`.
+const session = (raw: unknown) => migrateSession(JSON.parse(JSON.stringify(raw))).session;
+const mergeDir = path.join(fixtures, "merge");
+const mergeFiles = fs.readdirSync(mergeDir).filter((f) => f.endsWith(".json")).sort();
+for (const f of mergeFiles) {
+  const fx = JSON.parse(fs.readFileSync(path.join(mergeDir, f), "utf8"));
+  let got;
+  if (fx.op === undefined) {
+    const g = fx.guards ?? {};
+    const guards: MergeGuards = {
+      prunedFiles: g.prunedFiles
+        ? new Map(Object.entries<string | null>(g.prunedFiles).map(([k, v]) => [k, v ?? undefined]))
+        : undefined,
+      droppedAcceptedIds: g.droppedAcceptedIds ? new Set(g.droppedAcceptedIds) : undefined,
+      droppedRejectedPaths: g.droppedRejectedPaths ? new Set(g.droppedRejectedPaths) : undefined,
+    };
+    got = mergeFreshCaptures(session(fx.mine), session(fx.disk), guards);
+  } else {
+    got = session(fx.session);
+    if (fx.op === "accept") acceptEntry(got, fx.path, fx.after, fx.decidedAt);
+    else if (fx.op === "reject") rejectEntry(got, fx.path, fx.after, fx.decidedAt);
+    else { fail(`merge ${f}: unknown op ${fx.op}`); continue; }
+  }
+  const d = firstDiff(JSON.parse(JSON.stringify(got)), fx.expected);
+  if (d) fail(`merge ${f}: ${d}`);
+}
+
 if (failures) {
   console.error(`${failures} mismatch(es)`);
   process.exit(1);
 }
-console.log(`ok - ${sessionFiles.length} session cases, ${ex.cases.length} exclude cases`);
+console.log(`ok - ${sessionFiles.length} session cases, ${ex.cases.length} exclude cases, ${mergeFiles.length} merge cases`);

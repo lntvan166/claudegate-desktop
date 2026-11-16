@@ -1,0 +1,48 @@
+{
+ "op": "reject",
+ "session": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/a.ts": {
+    "originalContent": null,
+    "reviewStatus": "pending",
+    "sessionId": "s2",
+    "capturedAt": "2026-11-16T10:00:01.000Z",
+    "newFile": true
+   }
+  },
+  "accepted": [],
+  "rejected": {
+   "/ws/proj/a.ts": {
+    "id": "2026-11-16T10:00:00.000Z::/ws/proj/a.ts",
+    "path": "/ws/proj/a.ts",
+    "before": "before a.ts",
+    "after": "after a.ts",
+    "decidedAt": "2026-11-16T10:00:00.000Z",
+    "sessionId": "s1",
+    "reason": "old reason"
+   }
+  }
+ },
+ "path": "/ws/proj/a.ts",
+ "after": "discarded",
+ "decidedAt": "2026-11-16T10:00:05.000Z",
+ "expected": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [],
+  "rejected": {
+   "/ws/proj/a.ts": {
+    "id": "2026-11-16T10:00:05.000Z::/ws/proj/a.ts",
+    "path": "/ws/proj/a.ts",
+    "before": null,
+    "after": "discarded",
+    "decidedAt": "2026-11-16T10:00:05.000Z",
+    "sessionId": "s2",
+    "newFile": true
+   }
+  }
+ }
+}

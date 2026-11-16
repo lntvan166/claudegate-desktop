@@ -319,19 +319,26 @@ fn migrate(raw: &Map<String, Value>) -> Session {
             }
         }
     }
-    // capAcceptedLog: drop oldest-first.
-    if accepted.len() > MAX_ACCEPTED_RECORDS {
-        let excess = accepted.len() - MAX_ACCEPTED_RECORDS;
-        accepted.drain(..excess);
-    }
-    Session {
+    let mut session = Session {
         session_id,
         status,
         files,
         accepted,
         rejected,
         exclude_cleanup_done: raw.get("excludeCleanupDone") == Some(&Value::Bool(true)),
-    }
+    };
+    cap_accepted_log(&mut session);
+    session
+}
+
+/// Port of `capAcceptedLog`: trim `accepted[]` to the newest `MAX_ACCEPTED_RECORDS`, dropping
+/// oldest-first. Returns whether anything was dropped.
+pub fn cap_accepted_log(s: &mut Session) -> bool {
+    let Some(excess) = s.accepted.len().checked_sub(MAX_ACCEPTED_RECORDS).filter(|&e| e > 0) else {
+        return false;
+    };
+    s.accepted.drain(..excess);
+    true
 }
 
 /// `new Date().toISOString()` stand-in, used only when a session has no `sessionId`.

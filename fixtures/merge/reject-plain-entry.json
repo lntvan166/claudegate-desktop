@@ -1,0 +1,33 @@
+{
+ "op": "reject",
+ "session": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/b.ts": {
+    "originalContent": "orig",
+    "reviewStatus": "pending"
+   }
+  },
+  "accepted": [],
+  "rejected": {}
+ },
+ "path": "/ws/proj/b.ts",
+ "after": null,
+ "decidedAt": "2026-11-16T10:00:05.000000+00:00",
+ "expected": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [],
+  "rejected": {
+   "/ws/proj/b.ts": {
+    "id": "2026-11-16T10:00:05.000000+00:00::/ws/proj/b.ts",
+    "path": "/ws/proj/b.ts",
+    "before": "orig",
+    "after": null,
+    "decidedAt": "2026-11-16T10:00:05.000000+00:00"
+   }
+  }
+ }
+}

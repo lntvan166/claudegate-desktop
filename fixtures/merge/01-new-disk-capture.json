@@ -1,0 +1,59 @@
+{
+ "mine": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/mine.ts": {
+    "originalContent": "orig",
+    "reviewStatus": "pending",
+    "sessionId": "s1",
+    "capturedAt": "2026-11-16T10:00:00.000Z"
+   }
+  },
+  "accepted": [],
+  "rejected": {}
+ },
+ "disk": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/mine.ts": {
+    "originalContent": "disk copy ignored",
+    "reviewStatus": "pending",
+    "sessionId": "s1",
+    "capturedAt": "2026-11-16T10:00:00.000Z"
+   },
+   "/ws/proj/a.ts": {
+    "originalContent": null,
+    "reviewStatus": "pending",
+    "sessionId": "s1",
+    "capturedAt": "2026-11-16T10:00:05.000000+00:00",
+    "newFile": true
+   }
+  },
+  "accepted": [],
+  "rejected": {}
+ },
+ "guards": {},
+ "expected": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/mine.ts": {
+    "originalContent": "orig",
+    "reviewStatus": "pending",
+    "sessionId": "s1",
+    "capturedAt": "2026-11-16T10:00:00.000Z"
+   },
+   "/ws/proj/a.ts": {
+    "originalContent": null,
+    "reviewStatus": "pending",
+    "newFile": true,
+    "sessionId": "s1",
+    "capturedAt": "2026-11-16T10:00:05.000000+00:00"
+   }
+  },
+  "accepted": [],
+  "rejected": {}
+ }
+}

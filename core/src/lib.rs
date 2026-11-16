@@ -6,3 +6,4 @@ pub mod worktrees;
 pub mod project;
 pub mod textfile;
 pub mod time;
+pub mod merge;

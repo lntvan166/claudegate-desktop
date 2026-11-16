@@ -1,0 +1,36 @@
+{
+ "op": "accept",
+ "session": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/a.ts": {
+    "originalContent": null,
+    "reviewStatus": "pending",
+    "sessionId": "s2",
+    "capturedAt": "2026-11-16T10:00:01.000Z",
+    "newFile": true
+   }
+  },
+  "accepted": [],
+  "rejected": {}
+ },
+ "path": "/ws/proj/nope.ts",
+ "after": "x",
+ "decidedAt": "2026-11-16T10:00:05.000Z",
+ "expected": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/a.ts": {
+    "originalContent": null,
+    "reviewStatus": "pending",
+    "newFile": true,
+    "sessionId": "s2",
+    "capturedAt": "2026-11-16T10:00:01.000Z"
+   }
+  },
+  "accepted": [],
+  "rejected": {}
+ }
+}

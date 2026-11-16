@@ -1,0 +1,72 @@
+{
+ "mine": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/mine-no-time.ts": {
+    "originalContent": "orig",
+    "reviewStatus": "pending",
+    "sessionId": "s1"
+   }
+  },
+  "accepted": [],
+  "rejected": {}
+ },
+ "disk": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/no-time.ts": {
+    "originalContent": "orig",
+    "reviewStatus": "pending",
+    "sessionId": "s1"
+   },
+   "/ws/proj/empty-time.ts": {
+    "originalContent": "orig",
+    "reviewStatus": "pending",
+    "sessionId": "s1",
+    "capturedAt": ""
+   },
+   "/ws/proj/bad-time.ts": {
+    "originalContent": "orig",
+    "reviewStatus": "pending",
+    "sessionId": "s1",
+    "capturedAt": "yesterday"
+   }
+  },
+  "accepted": [
+   {
+    "id": "2026-11-16T10:00:09.000Z::/ws/proj/mine-no-time.ts",
+    "path": "/ws/proj/mine-no-time.ts",
+    "before": "before mine-no-time.ts",
+    "after": "after mine-no-time.ts",
+    "decidedAt": "2026-11-16T10:00:09.000Z",
+    "sessionId": "s1"
+   }
+  ],
+  "rejected": {}
+ },
+ "guards": {},
+ "expected": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/mine-no-time.ts": {
+    "originalContent": "orig",
+    "reviewStatus": "pending",
+    "sessionId": "s1"
+   }
+  },
+  "accepted": [
+   {
+    "id": "2026-11-16T10:00:09.000Z::/ws/proj/mine-no-time.ts",
+    "path": "/ws/proj/mine-no-time.ts",
+    "before": "before mine-no-time.ts",
+    "after": "after mine-no-time.ts",
+    "decidedAt": "2026-11-16T10:00:09.000Z",
+    "sessionId": "s1"
+   }
+  ],
+  "rejected": {}
+ }
+}

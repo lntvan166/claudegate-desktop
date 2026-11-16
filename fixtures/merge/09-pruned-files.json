@@ -1,0 +1,62 @@
+{
+ "mine": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {},
+  "accepted": [],
+  "rejected": {}
+ },
+ "disk": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/pruned.ts": {
+    "originalContent": "orig",
+    "reviewStatus": "pending",
+    "sessionId": "s1",
+    "capturedAt": "2026-11-16T10:00:01.000Z"
+   },
+   "/ws/proj/recaptured.ts": {
+    "originalContent": "orig",
+    "reviewStatus": "pending",
+    "sessionId": "s1",
+    "capturedAt": "2026-11-16T10:00:05.000Z"
+   },
+   "/ws/proj/pruned-no-time.ts": {
+    "originalContent": "orig",
+    "reviewStatus": "pending",
+    "sessionId": "s1",
+    "capturedAt": "2026-11-16T10:00:02.000000+00:00"
+   }
+  },
+  "accepted": [],
+  "rejected": {}
+ },
+ "guards": {
+  "prunedFiles": {
+   "/ws/proj/pruned.ts": "2026-11-16T10:00:01.000Z",
+   "/ws/proj/recaptured.ts": "2026-11-16T10:00:01.000Z",
+   "/ws/proj/pruned-no-time.ts": null
+  }
+ },
+ "expected": {
+  "sessionId": "s1",
+  "status": "active",
+  "files": {
+   "/ws/proj/recaptured.ts": {
+    "originalContent": "orig",
+    "reviewStatus": "pending",
+    "sessionId": "s1",
+    "capturedAt": "2026-11-16T10:00:05.000Z"
+   },
+   "/ws/proj/pruned-no-time.ts": {
+    "originalContent": "orig",
+    "reviewStatus": "pending",
+    "sessionId": "s1",
+    "capturedAt": "2026-11-16T10:00:02.000000+00:00"
+   }
+  },
+  "accepted": [],
+  "rejected": {}
+ }
+}
