@@ -3,7 +3,7 @@
 //! ~/.claudegate, ~/.claudegate-desktop or a real workspace.
 
 use claudegate_core::decide::{
-    decide, decide_with, Action, DecideError, DecidePaths, Target, UNKNOWN_SHAPE_MESSAGE,
+    decide, decide_with, Action, DecideError, DecidePaths, DecideReport, Target, UNKNOWN_SHAPE_MESSAGE,
 };
 use claudegate_core::model::parse_session;
 use claudegate_core::paths::session_file_for;
@@ -78,7 +78,7 @@ impl Fx {
         fs::read_dir(self.paths.desktop_home.join("backups").join(hash)).map(|d| d.count()).unwrap_or(0)
     }
 
-    fn run(&self, action: Action, target: Target) -> Result<claudegate_core::decide::DecideReport, DecideError> {
+    fn run(&self, action: Action, target: Target) -> Result<DecideReport, DecideError> {
         decide(&self.paths, &self.ws, action, target, false, NOW)
     }
 
@@ -116,6 +116,8 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, (u64, std::time::SystemTime, Strin
             let p = e.path();
             let m = fs::symlink_metadata(&p).unwrap();
             if m.is_dir() {
+                // Directories too: a created or removed entry (a lock, a tmp) changes their mtime.
+                out.insert(p.clone(), (0, m.modified().unwrap(), "<dir>".to_owned()));
                 stack.push(p);
             } else {
                 let hash = format!("{:x}", Md5::digest(fs::read(&p).unwrap_or_default()));
@@ -398,8 +400,9 @@ fn persist_failure_after_a_restore_names_the_changed_files() {
     }
     match r {
         Err(e @ DecideError::Store { .. }) => {
-            let DecideError::Store { changed, .. } = &e else { unreachable!() };
+            let DecideError::Store { changed, partial, .. } = &e else { unreachable!() };
             assert_eq!(changed, &vec![a.clone()]);
+            assert_eq!(partial, &DecideReport::default());
             assert!(e.to_string().contains(&a), "{e}");
         }
         other => panic!("expected a Store error, got {other:?}"),
@@ -715,4 +718,104 @@ fn workspace_write_refuses_a_path_the_session_does_not_hold() {
     assert!(workspace_write::restore(&s, Path::new("a.txt"), "x").is_err());
     workspace_write::restore(&s, Path::new(&a), "restored").unwrap();
     assert_eq!(fs::read_to_string(&a).unwrap(), "restored");
+}
+
+#[test]
+fn workspace_write_delete_is_limited_to_pending_keys() {
+    let fx = Fx::new();
+    let a = fx.file("a.txt", "keep");
+    let (s, _) = parse_session(
+        &session_json(json!({}), json!([]), json!({ &a: record(&a, Some("o"), Some("keep"), CAP) })).to_string(),
+    )
+    .unwrap();
+    let e = workspace_write::delete(&s, Path::new(&a)).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(Path::new(&a).exists());
+    // restore may still write a rejected key (reapply).
+    workspace_write::restore(&s, Path::new(&a), "claude").unwrap();
+}
+
+// ── Fix round 1 ─────────────────────────────────────────────────────────────
+
+/// F2: the primary persists (1 left, 1 restore error), then the worktree's persist fails. The
+/// error carries the primary's report as `partial` and names the worktree's restored file.
+#[cfg(unix)]
+#[test]
+fn a_later_scope_failing_keeps_the_earlier_scopes_report() {
+    let fx = Fx::new();
+    let wt = fx.worktree("wt1");
+    let left = fx.file("maybe.txt", "content");
+    let locked = fx.file("locked/ro.txt", "claude");
+    let d = fx.file("wt1/d.txt", "claude");
+    fx.write_session(&fx.ws, session_json(json!({ &left: pending(None), &locked: pending(Some("orig")) }), json!([]), json!({})));
+    fx.write_session(&wt, session_json(json!({ &d: pending(Some("orig")) }), json!([]), json!({})));
+    let locked_dir = fx.ws.join("locked");
+    chmod(Path::new(&locked), 0o444);
+    chmod(&locked_dir, 0o555);
+    if perms_ignored(&locked_dir) {
+        chmod(&locked_dir, 0o755);
+        eprintln!("skipping: running as root");
+        return;
+    }
+    let sessions = fx.paths.home.join("sessions");
+    let wt_file = fx.session_file(&wt);
+    let r = decide_with(&fx.paths, &fx.ws, Action::Reject, Target::All, false, NOW, &mut |f| {
+        if f == wt_file {
+            chmod(&sessions, 0o555);
+        }
+    });
+    chmod(&sessions, 0o755);
+    chmod(&locked_dir, 0o755);
+    let e = r.unwrap_err();
+    let DecideError::Store { changed, partial, .. } = &e else { panic!("expected Store, got {e:?}") };
+    assert_eq!(changed, &vec![d.clone()]);
+    assert_eq!(partial.done, 1);
+    assert_eq!(partial.left, vec![left.clone()]);
+    assert_eq!(partial.errors.len(), 1);
+    assert_eq!(partial.errors[0].0, locked);
+    let msg = e.to_string();
+    assert!(msg.contains(&d) && msg.contains("1 file"), "{msg}");
+    // The primary's decision is on disk; the worktree's log is untouched but its file restored.
+    assert!(fx.session(&fx.ws)["rejected"].get(&left).is_some());
+    assert!(keys(&fx.session(&wt)["files"]).contains(&d));
+    assert_eq!(fs::read_to_string(&d).unwrap(), "orig");
+}
+
+/// F3: a folder prefix must be absolute and strictly under the scope root.
+#[test]
+fn a_bad_folder_prefix_is_refused_and_changes_nothing() {
+    let fx = Fx::new();
+    let (..) = all_fixture(&fx);
+    let outside = fx.tmp.path().join("elsewhere").to_string_lossy().into_owned();
+    let traversal = format!("{}/excl/../..", fx.ws_str());
+    let before = snapshot(fx.tmp.path());
+    for prefix in ["/".to_owned(), String::new(), "excl".to_owned(), outside, fx.ws_str(), traversal] {
+        for action in every_action() {
+            let target = Target::Folder { scope: fx.ws_str(), prefix: prefix.clone() };
+            match fx.run(action, target) {
+                Err(DecideError::BadTarget(_)) => {}
+                other => panic!("{action:?} with prefix {prefix:?}: expected BadTarget, got {other:?}"),
+            }
+        }
+    }
+    assert_eq!(snapshot(fx.tmp.path()), before);
+}
+
+#[test]
+fn a_corrupt_session_is_refused_and_changes_nothing() {
+    for bytes in [b"{ not json".to_vec(), vec![b'{', 0xff, 0xfe, b'}']] {
+        let fx = Fx::new();
+        let a = fx.file("a.txt", "new");
+        fs::write(fx.session_file(&fx.ws), &bytes).unwrap();
+        let before = snapshot(fx.tmp.path());
+        for action in every_action() {
+            for target in [Target::All, fx.file_target(&fx.ws, &a)] {
+                match fx.run(action, target) {
+                    Err(DecideError::ReadOnly(msg)) => assert!(msg.contains("could not be read"), "{msg}"),
+                    other => panic!("{action:?}: expected ReadOnly, got {other:?}"),
+                }
+            }
+        }
+        assert_eq!(snapshot(fx.tmp.path()), before);
+    }
 }

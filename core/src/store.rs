@@ -121,7 +121,10 @@ fn tmp_name(target: &Path) -> PathBuf {
 /// With `preserve_existing` (a user's working file), a symlink is followed and written through,
 /// and the existing file's mode is kept; a new file gets the default mode. Parent dirs are
 /// created. On error the tmp is removed.
-pub fn atomic_write(target: &Path, content: &str, preserve_existing: bool) -> io::Result<()> {
+///
+/// Crate-private: the only callers are `persist` (session files) and `workspace_write` (which
+/// checks the path is a key of the session being decided). `no_writes` forbids it elsewhere.
+pub(crate) fn atomic_write(target: &Path, content: &str, preserve_existing: bool) -> io::Result<()> {
     let mut target = target.to_path_buf();
     let mut perms = None;
     if preserve_existing {
@@ -306,5 +309,48 @@ mod tests {
         v.sort_by_key(|n| backup_key(n).unwrap());
         assert_eq!(v, ["20261116T000000.000Z.json", "20261116T000000.000Z-9.json", "20261116T000000.000Z-10.json"]);
         assert!(backup_key("notes.json").is_none());
+    }
+
+    // Moved from tests/store.rs when atomic_write became crate-private.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_mode_and_follows_symlink() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real.sh");
+        fs::write(&real, "old").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = tmp.path().join("link.sh");
+        symlink(&real, &link).unwrap();
+
+        atomic_write(&link, "new", true).unwrap();
+
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "link survives");
+        assert_eq!(fs::read_to_string(&real).unwrap(), "new");
+        assert_eq!(fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o755);
+
+        // A new file gets its parent dirs and the default mode.
+        let fresh = tmp.path().join("a/b/new.txt");
+        atomic_write(&fresh, "x", true).unwrap();
+        assert_eq!(fs::read_to_string(&fresh).unwrap(), "x");
+        let names: Vec<_> = fs::read_dir(tmp.path()).unwrap().flatten().map(|d| d.file_name()).collect();
+        assert!(names.iter().all(|n| !n.to_string_lossy().ends_with(".tmp")), "{names:?}");
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_tmp_on_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The target is a non-empty directory: the rename onto it fails after the tmp is written.
+        let target = tmp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("keep"), "k").unwrap();
+        assert!(atomic_write(&target, "content", false).is_err());
+        let left: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|d| d.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(left.is_empty(), "tmp left behind: {left:?}");
     }
 }

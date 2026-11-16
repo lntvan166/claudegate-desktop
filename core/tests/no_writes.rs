@@ -26,6 +26,8 @@ const FORBIDDEN: &[&str] = &[
     "symlink(",
     "set_len",
     "write_all",
+    // The crate's own write helper: only store.rs and workspace_write.rs may call it.
+    "atomic_write(",
 ];
 
 const ALLOWED: &[&str] = &["src-tauri/src/config.rs", "core/src/store.rs", "core/src/workspace_write.rs"];

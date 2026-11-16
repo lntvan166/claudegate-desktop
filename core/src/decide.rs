@@ -16,7 +16,7 @@ use crate::project::{project_matcher, project_scopes, read_disk};
 use crate::store::{persist, StoreError, StorePaths};
 use crate::workspace_write;
 use serde::Serialize;
-use std::path::{Path, PathBuf, MAIN_SEPARATOR};
+use std::path::{Component, Path, PathBuf, MAIN_SEPARATOR};
 
 /// Spec, "Protecting production" rule 1.
 pub const UNKNOWN_SHAPE_MESSAGE: &str =
@@ -65,9 +65,14 @@ pub struct DecideReport {
 pub enum DecideError {
     ReadOnly(String),
     NotFound,
-    /// The session write failed. `changed` lists the workspace files already restored, deleted
-    /// or rewritten in that scope, which the review log therefore does not reflect.
-    Store { error: StoreError, changed: Vec<String> },
+    /// The target cannot be acted on safely, e.g. a folder prefix that is not strictly inside
+    /// the scope root. Nothing was changed.
+    BadTarget(String),
+    /// A scope's session write failed. `changed` lists the workspace files already restored,
+    /// deleted or rewritten in that scope, which its review log therefore does not reflect.
+    /// `partial` aggregates the scopes that completed before it (persisted, or with nothing to
+    /// persist); scopes after it were not touched.
+    Store { error: StoreError, changed: Vec<String>, partial: DecideReport },
 }
 
 impl std::fmt::Display for DecideError {
@@ -75,12 +80,27 @@ impl std::fmt::Display for DecideError {
         match self {
             DecideError::ReadOnly(msg) => f.write_str(msg),
             DecideError::NotFound => f.write_str("nothing to decide: the file or record is no longer there"),
-            DecideError::Store { error, changed } if changed.is_empty() => write!(f, "{error}"),
-            DecideError::Store { error, changed } => write!(
-                f,
-                "{error}. These files were changed on disk but the review log was not updated — retry: {}",
-                changed.join(", ")
-            ),
+            DecideError::BadTarget(msg) => f.write_str(msg),
+            DecideError::Store { error, changed, partial } => {
+                write!(f, "{error}")?;
+                if partial.done > 0 || !partial.left.is_empty() || !partial.errors.is_empty() {
+                    write!(
+                        f,
+                        ". Earlier scopes completed: {} file(s) decided, {} left on disk, {} error(s)",
+                        partial.done,
+                        partial.left.len(),
+                        partial.errors.len()
+                    )?;
+                }
+                if !changed.is_empty() {
+                    write!(
+                        f,
+                        ". These files were changed on disk but the review log was not updated — retry: {}",
+                        changed.join(", ")
+                    )?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -124,6 +144,9 @@ pub fn decide_with(
             vec![scopes.into_iter().find(|s| s.to_string_lossy() == scope.as_str()).ok_or(DecideError::NotFound)?]
         }
     };
+    if let Target::Folder { prefix, .. } = &target {
+        check_prefix(prefix, &targets[0])?;
+    }
 
     // Load and check every target scope before anything is written.
     let mut loaded: Vec<(PathBuf, PathBuf, Session)> = Vec::new();
@@ -138,28 +161,49 @@ pub fn decide_with(
     }
 
     let matcher = project_matcher(&paths.home, &primary);
+    // `report` holds only completed scopes; each scope works on its own and is folded in once
+    // it is persisted (or had nothing to persist).
     let mut report = DecideReport::default();
     for (scope, file, mut session) in loaded {
         let mut guards = MergeGuards::default();
         let mut changed = Vec::new();
+        let mut scope_report = DecideReport::default();
         let ctx = Ctx { scope: &scope, matcher: &matcher, now_iso };
+        let r = &mut scope_report;
         let mutated = match action {
-            Action::Accept => accept(&ctx, &target, &mut session, &mut guards, &mut report)?,
-            Action::Reject => reject(&ctx, &target, &mut session, &mut report, &mut changed)?,
-            Action::Revert => revert(&ctx, &target, &mut session, &mut guards, &mut report)?,
-            Action::Reapply => reapply(&ctx, &target, &mut session, &mut guards, &mut report, &mut changed)?,
-            Action::ClearAccepted => clear_accepted(&target, &mut session, &mut guards, &mut report)?,
-            Action::ClearRejected => clear_rejected(&target, &mut session, &mut guards, &mut report)?,
+            Action::Accept => accept(&ctx, &target, &mut session, &mut guards, r)?,
+            Action::Reject => reject(&ctx, &target, &mut session, r, &mut changed)?,
+            Action::Revert => revert(&ctx, &target, &mut session, &mut guards, r)?,
+            Action::Reapply => reapply(&ctx, &target, &mut session, &mut guards, r, &mut changed)?,
+            Action::ClearAccepted => clear_accepted(&target, &mut session, &mut guards, r)?,
+            Action::ClearRejected => clear_rejected(&target, &mut session, &mut guards, r)?,
         };
         // The TS returns early when nothing was decided; a scope with no change is not written.
-        if !mutated {
-            continue;
+        if mutated {
+            before_persist(&file);
+            let sp =
+                StorePaths { home: paths.home.clone(), desktop_home: paths.desktop_home.clone(), session_file: file };
+            if let Err(error) = persist(&sp, session, &guards) {
+                return Err(DecideError::Store { error, changed, partial: report });
+            }
         }
-        before_persist(&file);
-        let sp = StorePaths { home: paths.home.clone(), desktop_home: paths.desktop_home.clone(), session_file: file };
-        persist(&sp, session, &guards).map_err(|error| DecideError::Store { error, changed })?;
+        report.done += scope_report.done;
+        report.left.extend(scope_report.left);
+        report.errors.extend(scope_report.errors);
     }
     Ok(report)
+}
+
+/// A folder prefix must be absolute, free of `.`/`..` segments, and strictly inside the scope
+/// root. Otherwise `"/"` or `""` would act as an All that does not stay inside the scope.
+fn check_prefix(prefix: &str, scope: &Path) -> Result<(), DecideError> {
+    let p = Path::new(prefix);
+    let lexical = p.components().all(|c| matches!(c, Component::RootDir | Component::Prefix(_) | Component::Normal(_)));
+    if p.is_absolute() && lexical && is_under(prefix, &scope.to_string_lossy()) {
+        Ok(())
+    } else {
+        Err(DecideError::BadTarget(format!("folder {prefix:?} is not inside {}", scope.display())))
+    }
 }
 
 /// The scope's session, or `None` when it has no session file. Refuses an Unknown shape and a
