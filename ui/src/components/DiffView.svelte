@@ -4,7 +4,7 @@
   import { editorLabel, type EditorConfig } from "../lib/editors";
   import { iconFor, type IconTheme } from "../lib/icons";
   import { languageFor } from "../lib/language";
-  import { themeColors } from "../lib/monacoTheme";
+  import { buildTheme, themeName } from "../lib/monacoTheme";
   import type { Row } from "../lib/rows";
   import OpenWith from "./OpenWith.svelte";
 
@@ -94,22 +94,18 @@
     untrack(() => (firstLine = 1));
   });
 
-  function readToken(name: string): string {
-    return getComputedStyle(document.documentElement).getPropertyValue(name);
-  }
-
   function applyTheme(m: Monaco, t: IconTheme) {
     const dark = t === "dark";
-    const name = dark ? "claudegate-dark" : "claudegate-light";
-    m.editor.defineTheme(name, { base: dark ? "vs-dark" : "vs", inherit: true, rules: [], colors: themeColors(readToken, dark) });
-    m.editor.setTheme(name);
+    m.editor.defineTheme(themeName(dark), buildTheme(dark));
+    m.editor.setTheme(themeName(dark));
   }
 
   async function ensureEditor() {
     if (editor || !host) return;
     const [{ monaco: m }] = await Promise.all([
       import("../lib/monaco"),
-      document.fonts?.load('13px "IBM Plex Mono"').catch(() => undefined),
+      document.fonts?.load('13px "JetBrains Mono"').catch(() => undefined),
+      document.fonts?.load('italic 13px "JetBrains Mono"').catch(() => undefined),
     ]);
     if (editor || !host) return;
     monaco = m;
@@ -125,30 +121,23 @@
       renderSideBySideInlineBreakpoint: 560,
       enableSplitViewResizing: true,
       renderMarginRevertIcon: false,
-      renderOverviewRuler: false,
+      // VS Code's diff editor: +/- indicators, the overview ruler, word-level highlights.
+      renderIndicators: true,
+      renderOverviewRuler: true,
       ignoreTrimWhitespace: false,
       hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 5, revealLineCount: 20 },
       minimap: { enabled: false },
       scrollBeyondLastLine: false,
       stickyScroll: { enabled: false },
-      renderLineHighlight: "none",
-      guides: { indentation: false, bracketPairs: false },
-      bracketPairColorization: { enabled: false },
-      matchBrackets: "never",
+      bracketPairColorization: { enabled: true },
       folding: false,
       glyphMargin: false,
-      lineNumbersMinChars: 3,
-      lineDecorationsWidth: 8,
-      overviewRulerLanes: 0,
-      fontFamily: '"IBM Plex Mono", ui-monospace, "SF Mono", "DejaVu Sans Mono", monospace',
+      fontFamily: '"JetBrains Mono", ui-monospace, monospace',
       fontSize: 13,
       lineHeight: 20,
-      // Each side is narrow next to the tree: wrap rather than hide the end of a changed line.
-      wordWrap: "on",
-      diffWordWrap: "inherit",
-      wrappingIndent: "same",
-      padding: { top: 10, bottom: 10 },
-      scrollbar: { useShadows: false, verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
+      fontLigatures: false,
+      wordWrap: "off",
+      diffWordWrap: "off",
       fixedOverflowWidgets: true,
       ariaLabel: "Diff",
     });
