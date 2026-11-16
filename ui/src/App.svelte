@@ -1,12 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
+  import ActionBar from "./components/ActionBar.svelte";
   import DiffView from "./components/DiffView.svelte";
   import FileTree from "./components/FileTree.svelte";
   import ProjectList from "./components/ProjectList.svelte";
+  import ResultBar from "./components/ResultBar.svelte";
   import ReviewTabs from "./components/ReviewTabs.svelte";
   import Splitter from "./components/Splitter.svelte";
   import {
+    decide,
     getConfig,
     getProject,
     listProjects,
@@ -14,15 +17,31 @@
     openInEditor,
     setEditor,
     setPendingCount,
+    setReadOnly,
     usingMock,
     type DiffKind,
     type EditorConfig,
     type ProjectSummary,
     type ProjectView,
   } from "./lib/api";
+  import {
+    actionableCount,
+    nextAfterDecision,
+    parseDecideError,
+    recordIdFor,
+    summarize,
+    undoFor,
+    type BulkAction,
+    type DecideAction,
+    type DecideError,
+    type DecideReport,
+    type DecideTarget,
+    type ResultMessage,
+    type Undo,
+  } from "./lib/decide";
   import { editorLabel, ZED } from "./lib/editors";
   import type { IconTheme } from "./lib/icons";
-  import { actionFor, isTypingTarget, nextIndex } from "./lib/keys";
+  import { actionFor, decisionFor, isTypingTarget, nextIndex } from "./lib/keys";
   import { basename, groupsFor, scopeLabel, selectionAfterList, sortProjects, type Row } from "./lib/rows";
   import { Rechecks } from "./lib/recheck";
   import {
@@ -61,6 +80,13 @@
   let openError = $state<string | null>(null);
   /** Bumped on every reload of the selected project so the open diff refreshes. */
   let viewVersion = $state(0);
+  /** A decision is in flight. The UI runs one at a time; every action is disabled meanwhile. */
+  let busy = $state(false);
+  /** The result bar under the diff. */
+  let result = $state<ResultMessage | null>(null);
+  let resultSeq = 0;
+  /** The backend refused for a reason the config does not show (its settings file is unreadable). */
+  let settingsBlocked = $state<string | null>(null);
 
   /** The widths the user chose; `panes` is what fits the window right now. */
   let preferred = $state<Widths>(readPanes());
@@ -131,7 +157,31 @@
     const unwritten = w > 0 ? ` · ${w} not written yet` : "";
     return `${n} waiting${where}${age}${unwritten}`;
   });
-  const troubled = $derived(view ? view.scopes.filter((s) => s.error || s.shapeUnknown.length > 0) : []);
+  const troubled = $derived(view ? view.scopes.filter((s) => s.error) : []);
+  /** Fields this version does not know, from every scope written by a newer ClaudeGate. */
+  const unknownFields = $derived(view ? [...new Set(view.scopes.flatMap((s) => s.shapeUnknown))] : []);
+  const readOnly = $derived(config.readOnly === true);
+  /** Why decisions are off for this project, or null when they are on. */
+  const lock = $derived.by((): { text: string; detail?: string; action?: "turnOff" | "retry" } | null => {
+    if (unknownFields.length > 0) {
+      return {
+        text: "This project was written by a newer ClaudeGate. Update the app to make decisions here.",
+        detail: `Unknown session fields: ${unknownFields.join(", ")}`,
+      };
+    }
+    if (settingsBlocked) return { text: settingsBlocked, action: "retry" };
+    if (readOnly) return { text: "Read-only mode is on", action: "turnOff" };
+    return null;
+  });
+  const canDecide = $derived(!!view && !view.missing && !lock);
+  /** Undo and Retry are decisions too: not offered while decisions are off. */
+  const shownResult = $derived(
+    result && !canDecide ? { ...result, undo: undefined, retry: undefined } : result,
+  );
+  /** What the tab's bulk actions touch: pending rows whose write has landed, or every record. */
+  const bulkCount = $derived(
+    !view ? 0 : tab === "pending" ? actionableCount(view.pending) : view[tab].length,
+  );
 
   // Responses can arrive out of order when events land in quick succession.
   let viewSeq = 0;
@@ -211,6 +261,7 @@
       selected = root;
       view = null;
       selectedRow = null;
+      result = null;
       try {
         localStorage.setItem(STORE_KEY, root);
       } catch {}
@@ -251,11 +302,151 @@
     }
   }
 
+  /** Selects the pending row with `key`, unfolding whatever hides it. */
+  function selectPending(key: string) {
+    if (!view || tab !== "pending") return;
+    const row = groupsFor(view, "pending").flatMap((g) => g.rows).find((r) => r.key === key);
+    if (!row) return;
+    for (const k of collapseKeysToReveal(row, "pending", collapsed)) collapsed.delete(k);
+    selectedRow = row;
+  }
+
+  function show(r: Omit<ResultMessage, "id">) {
+    result = { ...r, id: ++resultSeq };
+  }
+
+  function report(root: string, action: DecideAction, target: DecideTarget, rep: DecideReport) {
+    const s = summarize(action, target, rep);
+    const u = undoFor(action, target, rep);
+    show({
+      text: s.text,
+      tone: !s.failed ? "ok" : rep.done === 0 ? "error" : "warn",
+      details: rep.errors.length > 0 ? rep.errors : undefined,
+      undo: u ? () => void runUndo(root, u) : undefined,
+    });
+  }
+
+  async function failed(root: string, err: DecideError, retry: () => void) {
+    if (err.kind === "store") {
+      show({
+        text: err.message,
+        tone: "error",
+        note: "Files changed but the review log was not updated — retry",
+        retry,
+      });
+      return;
+    }
+    if (err.kind === "readOnly") {
+      // Refused for read-only: find out why, and let the banner say it instead of the bar.
+      try {
+        config = await getConfig();
+      } catch {}
+      if (root === selected) await loadView(root);
+      if (!config.readOnly && unknownFields.length === 0) settingsBlocked = err.message;
+      result = null;
+      return;
+    }
+    show({ text: err.message, tone: "error" });
+  }
+
+  /**
+   * Runs one decision. `row` is the file decided from the row or the keyboard; when it is the
+   * selected pending row, the next pending row is selected afterwards (auto-advance).
+   * `reselect` selects that pending path afterwards (after an Undo brings it back).
+   */
+  async function runDecide(
+    action: DecideAction,
+    target: DecideTarget,
+    opts: { row?: Row | null; reselect?: string } = {},
+  ) {
+    const root = selected;
+    if (busy || !root || !view) return;
+    const advanceFrom =
+      target.kind === "file" && tab === "pending" && opts.row && opts.row.key === selectedRow?.key ? opts.row.key : null;
+    const nextKey = advanceFrom ? nextAfterDecision(fileOrder(groupsFor(view, "pending"), mode), advanceFrom) : null;
+    busy = true;
+    try {
+      const rep = await decide(root, action, target);
+      if (root !== selected) return;
+      await loadView(root);
+      if (nextKey) selectPending(nextKey);
+      else if (opts.reselect) selectPending(opts.reselect);
+      report(root, action, target, rep);
+    } catch (e) {
+      const err = parseDecideError(e);
+      if (root !== selected) return;
+      if (err.kind === "store") await loadView(root);
+      await failed(root, err, () => void runDecide(action, target, opts));
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function runUndo(root: string, u: Undo) {
+    if (root !== selected || !view) return;
+    let key = u.target.key;
+    if (u.byPath) {
+      // The accept made a new record; its id is `<decidedAt>::<path>`, newest for this path.
+      const id = recordIdFor(view.accepted, u.target.scope, key);
+      if (!id) {
+        show({ text: "Couldn't find the accepted record to undo. It may already be reverted.", tone: "error" });
+        return;
+      }
+      key = id;
+    }
+    await runDecide(u.action, { ...u.target, key }, { reselect: u.target.key });
+  }
+
+  function runBulk(a: BulkAction) {
+    const all: DecideTarget = { kind: "all" };
+    const action: DecideAction =
+      a === "acceptAll"
+        ? "accept"
+        : a === "rejectAll"
+          ? "reject"
+          : a === "revertAll"
+            ? "revert"
+            : a === "reapplyAll"
+              ? "reapply"
+              : tab === "accepted"
+                ? "clearAccepted"
+                : "clearRejected";
+    void runDecide(action, all);
+  }
+
+  async function changeReadOnly(on: boolean) {
+    try {
+      config = await setReadOnly(on);
+      if (!on) settingsBlocked = null;
+    } catch (e) {
+      show({ text: `Couldn't change read-only mode: ${e}`, tone: "error" });
+    }
+  }
+
+  async function onLock(action: "turnOff" | "retry") {
+    if (action === "turnOff") await changeReadOnly(false);
+    else settingsBlocked = null;
+  }
+
   const lineFor = (row: Row) => (row.key === selectedRow?.key ? firstLine : 1);
 
   function onKey(e: KeyboardEvent) {
     if (e.defaultPrevented || e.repeat && e.key === "o") return;
     if (isTypingTarget(e.target as HTMLElement | null)) return;
+    const d = decisionFor(e, {
+      tab,
+      typing: false,
+      menuOpen: !!document.querySelector('[role="menu"], [data-confirm]'),
+      readOnly: !canDecide,
+      busy: busy || e.repeat,
+      selectedKey: selectedRow?.key ?? null,
+    });
+    if (d && selectedRow) {
+      e.preventDefault();
+      const row = selectedRow;
+      void runDecide(d.action, { kind: "file", scope: row.scope, key: row.path }, { row });
+      return;
+    }
     const a = actionFor(e);
     if (a?.type === "projects") {
       // Not while the Open-with menu is up, wherever focus is.
@@ -352,13 +543,23 @@
     </div>
     <div class="status">
       {#if usingMock}<span class="hint">Fixture data</span>{/if}
-      <span class="hint" title="This version shows changes. Accept and reject them in VS Code.">
+      <button
+        class="chip"
+        class:on={readOnly}
+        aria-pressed={readOnly}
+        title={readOnly ? "Read-only mode is on: decisions are blocked. Click to turn it off." : "Turn on read-only mode to block every decision."}
+        onclick={() => void changeReadOnly(!readOnly)}
+      >
         <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
           <rect x="3.5" y="7" width="9" height="6.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3" />
-          <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.3" />
+          {#if readOnly}
+            <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.3" />
+          {:else}
+            <path d="M5.5 7V5a2.5 2.5 0 0 1 4.9-.7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          {/if}
         </svg>
         Read-only
-      </span>
+      </button>
       <span class="total" class:none={totalPending === 0}>
         <span class="num">{totalPending}</span> pending
       </span>
@@ -417,15 +618,31 @@
         </div>
         <ReviewTabs {tab} {counts} {mode} ontab={setTab} onmode={(m) => (mode = m)} />
         {#each troubled as s (s.root)}
-          <div class="notice" class:error={!!s.error}>
-            {#if s.error}
-              Couldn't read the session for <b>{scopeLabel(view!, s)}</b>: {s.error}
-            {:else}
-              <b>{scopeLabel(view!, s)}</b> has session fields this version doesn't know:
-              <span class="path">{s.shapeUnknown.join(", ")}</span>
-            {/if}
+          <div class="notice error">
+            Couldn't read the session for <b>{scopeLabel(view!, s)}</b>: {s.error}
           </div>
         {/each}
+        {#if view && lock}
+          <div class="banner" role="status">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <rect x="3.5" y="7" width="9" height="6.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3" />
+              <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.3" />
+            </svg>
+            <div class="banner-text">
+              <p>{lock.text}</p>
+              {#if lock.detail}<p class="banner-detail path">{lock.detail}</p>{/if}
+            </div>
+            {#if lock.action}
+              <button class="banner-btn" onclick={() => void onLock(lock!.action!)}>
+                {lock.action === "turnOff" ? "Turn off" : "Try again"}
+              </button>
+            {/if}
+          </div>
+        {:else if view && canDecide && bulkCount > 0}
+          {#key tab}
+            <ActionBar {tab} count={bulkCount} {busy} onaction={runBulk} />
+          {/key}
+        {/if}
         <div class="scroll">
           {#if viewError}
             <div class="state small">
@@ -445,7 +662,7 @@
                 <p class="state-body">Claude's next edits to this project will show up here.</p>
               {:else}
                 <p class="state-title">Nothing {tab} yet</p>
-                <p class="state-body">Files you {tab === "accepted" ? "accept" : "reject"} in VS Code are listed here.</p>
+                <p class="state-body">Files you {tab === "accepted" ? "accept" : "reject"} are listed here.</p>
               {/if}
             </div>
           {:else}
@@ -460,6 +677,9 @@
               selectedKey={selectedRow?.key ?? null}
               onselect={(r) => (selectedRow = r)}
               onopen={(r) => void open(r, lineFor(r))}
+              {canDecide}
+              {busy}
+              ondecide={(action, target, row) => void runDecide(action, target, { row })}
             />
           {/if}
         </div>
@@ -491,7 +711,11 @@
       onopen={() => selectedRow && void open(selectedRow, firstLine)}
       onpick={(t) => void pickEditor(t)}
       ondismiss={() => (openError = null)}
-    />
+    >
+      {#snippet footer()}
+        <ResultBar result={shownResult} {busy} ondismiss={() => (result = null)} />
+      {/snippet}
+    </DiffView>
   </div>
 </div>
 
@@ -567,6 +791,29 @@
     gap: 5px;
     color: var(--muted);
   }
+  /* The read-only switch: a quiet chip, filled when on. */
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 24px;
+    padding: 0 8px;
+    border-radius: var(--radius-control);
+    color: var(--muted);
+    transition:
+      color 120ms var(--ease),
+      background 120ms var(--ease);
+  }
+  .chip:hover {
+    color: var(--text);
+    background: var(--hover);
+  }
+  .chip.on {
+    color: var(--warning-ink);
+    background: var(--warning-bg);
+    font-weight: 500;
+  }
+
   .total {
     font-weight: 500;
     color: var(--pending);
@@ -639,6 +886,49 @@
     color: var(--error-ink);
     background: var(--error-bg);
   }
+  .banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 44px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--rule);
+    font-size: var(--fs-small);
+    line-height: 1.45;
+    color: var(--warning-ink);
+    background: var(--warning-bg);
+    flex: none;
+  }
+  .banner > svg {
+    flex: none;
+  }
+  .banner-text {
+    flex: 1;
+    min-width: 0;
+  }
+  .banner-text p:first-child {
+    font-weight: 500;
+  }
+  .banner-detail {
+    font-size: var(--fs-meta);
+    opacity: 0.85;
+    user-select: text;
+    overflow-wrap: anywhere;
+  }
+  .banner-btn {
+    flex: none;
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+    border-radius: var(--radius-control);
+    font-weight: 600;
+    white-space: nowrap;
+    transition: background 120ms var(--ease);
+  }
+  .banner-btn:hover {
+    background: color-mix(in srgb, currentColor 10%, transparent);
+  }
+
   .notice b {
     font-weight: 600;
   }

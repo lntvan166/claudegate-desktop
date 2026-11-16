@@ -6,9 +6,10 @@
 // builds drop the branch and never emit the mock chunk.
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { DecideAction, DecideReport, DecideTarget } from "./decide";
 import type { EditorConfig } from "./editors";
 
-export type { EditorConfig };
+export type { DecideAction, DecideReport, DecideTarget, EditorConfig };
 
 export type ProjectSummary = {
   root: string;
@@ -82,6 +83,13 @@ export interface Api {
   openInEditor(path: string, line: number, template: string | null): Promise<void>;
   /** The tray tooltip's total. */
   setPendingCount(count: number): Promise<void>;
+  /**
+   * Accepts, rejects, reverts, reapplies or clears. Rejects with a JSON string (see
+   * `parseDecideError`). The backend emits the change event itself on success and store errors.
+   */
+  decide(root: string, action: DecideAction, target: DecideTarget): Promise<DecideReport>;
+  /** The global read-only switch in ~/.claudegate-desktop/config.json. */
+  setReadOnly(on: boolean): Promise<EditorConfig>;
 }
 
 const tauriApi: Api = {
@@ -93,6 +101,8 @@ const tauriApi: Api = {
   setEditor: (template) => invoke<EditorConfig>("set_editor", { template }),
   openInEditor: (path, line, template) => invoke<void>("open_in_editor", { path, line, template }),
   setPendingCount: (count) => invoke<void>("set_pending_count", { count }),
+  decide: (root, action, target) => invoke<DecideReport>("decide", { root, action, target }),
+  setReadOnly: (on) => invoke<EditorConfig>("set_read_only", { on }),
 };
 
 let chosen: Promise<Api> | undefined;
@@ -122,3 +132,6 @@ export const setEditor = async (template: string) => (await api()).setEditor(tem
 export const openInEditor = async (path: string, line: number, template: string | null = null) =>
   (await api()).openInEditor(path, line, template);
 export const setPendingCount = async (count: number) => (await api()).setPendingCount(count);
+export const decide = async (root: string, action: DecideAction, target: DecideTarget) =>
+  (await api()).decide(root, action, target);
+export const setReadOnly = async (on: boolean) => (await api()).setReadOnly(on);

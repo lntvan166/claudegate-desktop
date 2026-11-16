@@ -45,9 +45,35 @@ type ElementLike = { tagName: string; isContentEditable?: boolean; closest?: (se
 
 /** True when keys belong to what has focus: a field, an editable region (Monaco), or a menu. */
 export function isTypingTarget(el: ElementLike | null | undefined): boolean {
-  if (!el) return false;
+  // A key sent to the window or the document has no tag: nothing is being typed into.
+  if (!el || typeof el.tagName !== "string") return false;
   const tag = el.tagName.toUpperCase();
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
   if (el.isContentEditable) return true;
   return !!el.closest?.('[role="menu"], [role="menubar"], [role="listbox"]');
+}
+
+export type DecisionContext = {
+  tab: DiffKind;
+  /** Focus is in a field, an editable region or a menu. */
+  typing: boolean;
+  /** The Open-with menu or an inline confirmation is up. */
+  menuOpen: boolean;
+  readOnly: boolean;
+  /** A decision is already in flight; the UI runs one at a time. */
+  busy: boolean;
+  /** The selected row's key on the current tab. */
+  selectedKey: string | null;
+};
+
+/** `a` accepts and `r` rejects the selected pending row; null when the key does not apply now. */
+export function decisionFor(
+  e: KeyLike,
+  c: DecisionContext,
+): { action: "accept" | "reject"; key: string } | null {
+  if (e.ctrlKey || e.metaKey || e.altKey) return null;
+  const action = e.key === "a" ? "accept" : e.key === "r" ? "reject" : null;
+  if (!action) return null;
+  if (c.tab !== "pending" || c.typing || c.menuOpen || c.readOnly || c.busy || !c.selectedKey) return null;
+  return { action, key: c.selectedKey };
 }

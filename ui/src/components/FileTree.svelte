@@ -2,6 +2,7 @@
   import { tick } from "svelte";
   import type { SvelteSet } from "svelte/reactivity";
   import type { DiffKind } from "../lib/api";
+  import { folderPrefix, type DecideAction, type DecideTarget } from "../lib/decide";
   import { iconFor, type IconTheme } from "../lib/icons";
   import { nodeKey, type Group, type Row } from "../lib/rows";
   import { relTime } from "../lib/time";
@@ -27,6 +28,9 @@
     editorName,
     onselect,
     onopen,
+    canDecide = false,
+    busy = false,
+    ondecide = () => {},
   }: {
     groups: Group[];
     showGroups: boolean;
@@ -39,6 +43,12 @@
     editorName: string;
     onselect: (row: Row) => void;
     onopen: (row: Row) => void;
+    /** Show the accept/reject (revert, reapply) actions; false in read-only mode. */
+    canDecide?: boolean;
+    /** A decision is in flight: every action is disabled. */
+    busy?: boolean;
+    /** `row` is the file decided, or null for a folder. */
+    ondecide?: (action: DecideAction, target: DecideTarget, row: Row | null) => void;
   } = $props();
 
   let treeEl: HTMLDivElement | undefined = $state();
@@ -155,6 +165,24 @@
   </svg>
 {/snippet}
 
+{#snippet check()}
+  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+    <path d="M3.5 8.5 6.5 11.5 12.5 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+  </svg>
+{/snippet}
+
+{#snippet cross()}
+  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+    <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+  </svg>
+{/snippet}
+
+{#snippet back()}
+  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+    <path d="M5.5 3.5 2.5 6.5l3 3M2.5 6.5h7a3.5 3.5 0 0 1 0 7H7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+  </svg>
+{/snippet}
+
 {#snippet stats(row: Row)}
   {#if row.added > 0 || row.removed > 0}
     <span class="stats num">
@@ -169,6 +197,8 @@
     {@const key = folderCollapseKey(tab, scope, n.rel)}
     {@const open = !collapsed.has(key)}
     {@const id = folderId(scope, n.rel)}
+    {@const folderActs = canDecide && tab === "pending"}
+    <div class={folderActs ? "item" : "plain"} role="none">
     <button
       class="row folder"
       role="treeitem"
@@ -186,6 +216,28 @@
       <span class="name">{n.name}</span>
       {#if !open}<span class="meta num">{countFiles(n)}</span>{/if}
     </button>
+    {#if folderActs}
+      {@const prefix = folderPrefix(scope, n.rel)}
+      <div class="actions">
+        <button
+          class="act accept"
+          tabindex="-1"
+          disabled={busy}
+          aria-label="Accept folder {n.rel}"
+          title="Accept folder"
+          onclick={() => ondecide("accept", { kind: "folder", scope, prefix }, null)}
+        >{@render check()}</button>
+        <button
+          class="act reject"
+          tabindex="-1"
+          disabled={busy}
+          aria-label="Reject folder {n.rel}"
+          title="Reject folder"
+          onclick={() => ondecide("reject", { kind: "folder", scope, prefix }, null)}
+        >{@render cross()}</button>
+      </div>
+    {/if}
+    </div>
     {#if open}
       <div role="group">
         {#each n.children ?? [] as child (nodeKey(child))}
@@ -196,7 +248,7 @@
   {:else if n.item}
     {@const row = n.item}
     {@const id = fileId(row)}
-    <div class="item" role="none">
+    <div class="item" class:selected={row.key === selectedKey} role="none">
       <button
         class="row file"
         class:selected={row.key === selectedKey}
@@ -219,8 +271,45 @@
         {#if row.waiting}<span class="meta waiting" title="Captured before Claude wrote it; the write hasn't landed yet">waiting for write…</span>{/if}
         {@render stats(row)}
       </button>
-      <!-- Mouse shortcut; the keyboard equivalent is O on the selected row. -->
-      <button class="open" tabindex="-1" aria-label="Open {n.name} in {editorName}" title="Open in {editorName}" onclick={() => onopen(row)}>
+      <!-- Mouse shortcuts; the keyboard equivalents are A, R and O on the selected row. -->
+      <div class="actions">
+        {#if canDecide && tab === "pending"}
+          <button
+            class="act accept"
+            tabindex="-1"
+            disabled={busy}
+            aria-label="Accept {n.name}"
+            title="Accept (A)"
+            onclick={() => ondecide("accept", { kind: "file", scope: row.scope, key: row.path }, row)}
+          >{@render check()}</button>
+          <button
+            class="act reject"
+            tabindex="-1"
+            disabled={busy}
+            aria-label="Reject {n.name}"
+            title="Reject (R)"
+            onclick={() => ondecide("reject", { kind: "file", scope: row.scope, key: row.path }, row)}
+          >{@render cross()}</button>
+        {:else if canDecide && tab === "accepted"}
+          <button
+            class="act"
+            tabindex="-1"
+            disabled={busy}
+            aria-label="Revert {n.name}"
+            title="Revert: back to pending"
+            onclick={() => ondecide("revert", { kind: "file", scope: row.scope, key: row.key }, row)}
+          >{@render back()}</button>
+        {:else if canDecide && tab === "rejected"}
+          <button
+            class="act"
+            tabindex="-1"
+            disabled={busy}
+            aria-label="Reapply {n.name}"
+            title="Reapply Claude's version"
+            onclick={() => ondecide("reapply", { kind: "file", scope: row.scope, key: row.path }, row)}
+          >{@render back()}</button>
+        {/if}
+      <button class="act open" tabindex="-1" aria-label="Open {n.name} in {editorName}" title="Open in {editorName}" onclick={() => onopen(row)}>
         <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
           <path
             d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M12 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3"
@@ -232,6 +321,7 @@
           />
         </svg>
       </button>
+      </div>
     </div>
   {/if}
 {/snippet}
@@ -296,31 +386,64 @@
   .item {
     position: relative;
   }
-  .open {
+  /* Row actions: on hover or focus, and always on the selected row (the extension's inline actions). */
+  .actions {
     position: absolute;
-    top: 50%;
-    right: 8px;
-    display: grid;
-    place-items: center;
-    width: 22px;
-    height: 22px;
-    margin-top: -11px;
-    border-radius: var(--radius-chip);
-    color: var(--muted);
+    top: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0 8px 0 6px;
     opacity: 0;
     pointer-events: none;
     transition: opacity 120ms var(--ease);
   }
-  .item:hover .open {
+  .item:hover .actions,
+  .item:focus-within .actions,
+  .item.selected .actions {
     opacity: 1;
     pointer-events: auto;
   }
-  .open:hover {
+  /* Opaque on the row's own tone, so a long name runs under the buttons, not through them. */
+  .item:hover .actions,
+  .item:focus-within .actions {
+    background: var(--hover);
+  }
+  .item.selected .actions {
+    background: var(--active);
+  }
+  .act {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border-radius: var(--radius-chip);
+    color: var(--muted);
+    transition:
+      color 120ms var(--ease),
+      background 120ms var(--ease);
+  }
+  .act:hover:not(:disabled) {
     color: var(--text);
     background: color-mix(in srgb, var(--text) 9%, transparent);
   }
+  .act.accept:hover:not(:disabled) {
+    color: var(--positive);
+  }
+  .act.reject:hover:not(:disabled) {
+    color: var(--negative);
+  }
+  .act:disabled {
+    opacity: 0.45;
+  }
   .item:hover .stats,
-  .item:hover .meta {
+  .item:hover .meta,
+  .item:focus-within .stats,
+  .item:focus-within .meta,
+  .item.selected .stats,
+  .item.selected .meta {
     visibility: hidden;
   }
 

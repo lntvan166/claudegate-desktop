@@ -1,0 +1,183 @@
+// Pure helpers for decisions: what to undo, where to go next, what to say. The decide command
+// itself lives in api.ts; its shapes mirror src-tauri/src/commands.rs and core/src/decide.rs.
+
+/** The ActionBar's buttons; App maps each to a `decide` call with an `all` target. */
+export type BulkAction = "acceptAll" | "rejectAll" | "revertAll" | "reapplyAll" | "clear";
+
+export type DecideAction = "accept" | "reject" | "revert" | "reapply" | "clearAccepted" | "clearRejected";
+
+/** For accept/reject/reapply `key` is the path; for revert it is the record id. */
+export type DecideTarget =
+  | { kind: "file"; scope: string; key: string }
+  | { kind: "folder"; scope: string; prefix: string }
+  | { kind: "all" };
+
+export type DecideReport = {
+  done: number;
+  /** Rejected files left on disk (a null baseline not known to be Claude's new file). */
+  left: string[];
+  /** `[path, message]` of files whose workspace write failed; they were not decided. */
+  errors: [string, string][];
+};
+
+export type DecideErrorKind = "store" | "readOnly" | "notFound" | "badTarget" | "invalid";
+
+export type DecideError = {
+  kind: DecideErrorKind;
+  message: string;
+  /** Store errors: files changed on disk whose review log was not updated. */
+  changed?: string[];
+  /** Store errors: what earlier scopes completed. */
+  partial?: DecideReport;
+};
+
+const KINDS: readonly string[] = ["store", "readOnly", "notFound", "badTarget", "invalid"];
+
+/** The backend rejects with a JSON string; anything else is reported as-is under "invalid". */
+export function parseDecideError(raw: unknown): DecideError {
+  const text = typeof raw === "string" ? raw : String(raw);
+  if (typeof raw !== "string") return { kind: "invalid", message: text };
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return { kind: "invalid", message: raw };
+  }
+  if (!v || typeof v !== "object" || Array.isArray(v)) return { kind: "invalid", message: raw };
+  const o = v as Record<string, unknown>;
+  if (typeof o.kind !== "string" || !KINDS.includes(o.kind) || typeof o.message !== "string") {
+    return { kind: "invalid", message: raw };
+  }
+  const out: DecideError = { kind: o.kind as DecideErrorKind, message: o.message };
+  if (o.kind === "store") {
+    out.changed = Array.isArray(o.changed) ? o.changed.filter((c): c is string => typeof c === "string") : [];
+    const p = o.partial as Partial<DecideReport> | undefined;
+    out.partial = {
+      done: typeof p?.done === "number" ? p.done : 0,
+      left: Array.isArray(p?.left) ? p.left : [],
+      errors: Array.isArray(p?.errors) ? p.errors : [],
+    };
+  }
+  return out;
+}
+
+export type Undo = {
+  action: DecideAction;
+  target: { kind: "file"; scope: string; key: string };
+  /**
+   * The key is a path that must be resolved to the new record's id (in the refreshed Accepted
+   * list, see `recordIdFor`) before the call.
+   */
+  byPath: boolean;
+};
+
+/**
+ * The decision that undoes `action` on `target`: an accept by reverting its new record, a reject by
+ * reapplying the same path, both in the same scope. Only a single file that was decided can be
+ * undone; bulk and folder actions, revert, reapply and clear have none.
+ */
+export function undoFor(action: DecideAction, target: DecideTarget, report: DecideReport): Undo | null {
+  if (target.kind !== "file" || report.done !== 1 || report.errors.length > 0) return null;
+  const t = { kind: "file" as const, scope: target.scope, key: target.key };
+  if (action === "accept") return { action: "revert", target: t, byPath: true };
+  if (action === "reject") return { action: "reapply", target: t, byPath: false };
+  return null;
+}
+
+const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+
+/** The newest accepted record for `path` in `scope` (the backend's id is `<decidedAt>::<path>`). */
+export function recordIdFor(
+  accepted: { id: string; path: string; scope: string; decidedAt: string }[],
+  scope: string,
+  path: string,
+): string | null {
+  let best: { id: string; decidedAt: string } | null = null;
+  for (const r of accepted) {
+    if (r.path !== path || norm(r.scope) !== norm(scope)) continue;
+    if (!best || r.decidedAt > best.decidedAt) best = r;
+  }
+  return best?.id ?? null;
+}
+
+/** The row to select once `decidedKey` leaves the list: the next one, else the previous, else none. */
+export function nextAfterDecision(rows: { key: string }[], decidedKey: string): string | null {
+  const i = rows.findIndex((r) => r.key === decidedKey);
+  if (i === -1) return null;
+  return rows[i + 1]?.key ?? rows[i - 1]?.key ?? null;
+}
+
+/**
+ * How many rows a bulk accept or reject touches. Excluded entries never reach the view; rows still
+ * waiting for Claude's write are skipped by the backend, so they are not counted.
+ */
+export function actionableCount(rows: { waiting: boolean }[]): number {
+  return rows.filter((r) => !r.waiting).length;
+}
+
+/** The absolute folder path a folder row stands for: its scope root plus its relative path. */
+export function folderPrefix(scope: string, rel: string): string {
+  return `${scope.replace(/[\\/]+$/, "")}/${rel}`;
+}
+
+const PAST: Record<DecideAction, string> = {
+  accept: "Accepted",
+  reject: "Rejected",
+  revert: "Reverted",
+  reapply: "Reapplied",
+  clearAccepted: "Cleared",
+  clearRejected: "Cleared",
+};
+const VERB: Record<DecideAction, string> = {
+  accept: "accept",
+  reject: "reject",
+  revert: "revert",
+  reapply: "reapply",
+  clearAccepted: "clear",
+  clearRejected: "clear",
+};
+
+function nameOf(key: string): string {
+  const path = key.includes("::") ? key.slice(key.indexOf("::") + 2) : key;
+  return norm(path).split("/").pop() || path;
+}
+
+/** The result bar's sentence. `failed` is true when anything was not decided. */
+export function summarize(
+  action: DecideAction,
+  target: DecideTarget,
+  report: DecideReport,
+): { text: string; failed: boolean } {
+  const failed = report.errors.length > 0;
+  if (target.kind === "file") {
+    const name = nameOf(target.key);
+    if (report.done === 0 && failed) return { text: `Couldn't ${VERB[action]} ${name}`, failed };
+    return { text: `${PAST[action]} ${name}`, failed };
+  }
+  const clearing = action === "clearAccepted" || action === "clearRejected";
+  const noun = clearing ? (report.done === 1 ? "record" : "records") : report.done === 1 ? "file" : "files";
+  const extra: string[] = [];
+  if (report.left.length > 0) extra.push(`${report.left.length} left on disk`);
+  if (failed) extra.push(`${report.errors.length} failed`);
+  const text = extra.length
+    ? [`${PAST[action]} ${report.done}`, ...extra].join(" · ")
+    : `${PAST[action]} ${report.done} ${noun}`;
+  return { text, failed };
+}
+
+/** What the result bar shows after a decision. `id` changes on every new result. */
+export type ResultMessage = {
+  id: number;
+  text: string;
+  /** "error" never auto-hides. */
+  tone: "ok" | "warn" | "error";
+  /** A second line, e.g. the store error's "Files changed but…". */
+  note?: string;
+  undo?: () => void;
+  retry?: () => void;
+  /** Per-file failures, listed under [Details]. */
+  details?: [string, string][];
+};
+
+/** The result bar hides itself after this long, unless hovered, focused or showing an error. */
+export const RESULT_HIDE_MS = 6000;

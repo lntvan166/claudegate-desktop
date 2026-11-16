@@ -3,6 +3,9 @@
 import type {
   Api,
   ChangedPayload,
+  DecideAction,
+  DecideReport,
+  DecideTarget,
   DiffKind,
   DiffPayload,
   EditorConfig,
@@ -16,12 +19,18 @@ const SHOP = "/home/dev/src/shop-api";
 const WT = `${SHOP}/.worktrees/checkout-v2`;
 const HERDR = "/home/dev/src/herdr-pokemon";
 const BILLING = "/home/dev/src/legacy-billing";
+const NOTES = "/home/dev/src/field-notes";
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
 
 function pending(scope: string, rel: string, added: number, removed: number, newFile = false): PendingItem {
   const path = `${scope}/${rel}`;
   return { path, rel: path.slice(SHOP.length + 1), scope, newFile, capturedAt: ago(added), added, removed, waiting: false };
+}
+
+function pendingIn(root: string, rel: string, added: number, removed: number): PendingItem {
+  const path = `${root}/${rel}`;
+  return { path, rel, scope: root, newFile: false, capturedAt: ago(added), added, removed, waiting: false };
 }
 
 function record(root: string, rel: string, min: number, added: number, removed: number): RecordItem {
@@ -69,6 +78,16 @@ const views: Record<string, ProjectView> = {
       record(HERDR, "assets/sprites/pikachu.png", 1440, 0, 0),
     ],
     rejected: [record(HERDR, "crates/dex/src/lib.rs", 50, 140, 2), record(HERDR, "Makefile", 2900, 3, 3)],
+    nextRecheckAt: null,
+  },
+  // Written by a newer ClaudeGate: shown, never decided.
+  [NOTES]: {
+    root: NOTES,
+    missing: false,
+    scopes: [{ root: NOTES, isWorktree: false, shapeUnknown: ["reviewNotes"], error: null }],
+    pending: [pendingIn(NOTES, "src/sync.ts", 14, 5), pendingIn(NOTES, "README.md", 3, 0)],
+    accepted: [],
+    rejected: [],
     nextRecheckAt: null,
   },
   [BILLING]: { root: BILLING, missing: true, scopes: [], pending: [], accepted: [], rejected: [], nextRecheckAt: null },
@@ -261,7 +280,7 @@ function sample(path: string, isNew: boolean): { before: string | null; after: s
   return { before: CLIENT_BEFORE, after: CLIENT_AFTER };
 }
 
-let config: EditorConfig = { editor: "zed {path}:{line}", customEditor: "nvim +{line} {path}" };
+let config: EditorConfig = { editor: "zed {path}:{line}", customEditor: "nvim +{line} {path}", readOnly: false };
 
 const delay = <T>(v: T) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), 120));
 
@@ -272,6 +291,8 @@ const handlers = new Set<(p: ChangedPayload) => void>();
  * the path a real accept in VS Code takes, so a selected row disappears under the diff pane.
  */
 (globalThis as Record<string, unknown>).__mock = {
+  /** The next decide fails as a store error after "changing" the files. */
+  failStore: false,
   drop(suffix: string) {
     for (const v of Object.values(views)) {
       const before = v.pending.length;
@@ -284,7 +305,7 @@ const handlers = new Set<(p: ChangedPayload) => void>();
 export const mockApi: Api = {
   listProjects: () =>
     delay<ProjectSummary[]>(
-      [SHOP, BILLING, HERDR].map((root) => ({
+      [SHOP, NOTES, BILLING, HERDR].map((root) => ({
         root,
         name: root.split("/").pop()!,
         missing: views[root].missing,
@@ -322,4 +343,108 @@ export const mockApi: Api = {
     }
   },
   setPendingCount: async () => {},
+  decide: async (root, action, target) => {
+    await new Promise((r) => setTimeout(r, 220));
+    const r = mockDecide(root, action, target);
+    for (const h of handlers) h({ roots: [root] });
+    return r;
+  },
+  setReadOnly: (on) => {
+    config = { ...config, readOnly: on };
+    return delay(config);
+  },
 };
+
+const UNKNOWN = "This project was written by a newer ClaudeGate. Update the app to make decisions here.";
+const fail = (kind: string, message: string) => JSON.stringify({ kind, message });
+
+/**
+ * An in-memory `decide` over the fixtures, close enough to core/src/decide.rs to exercise every
+ * control: bulk and folder actions skip waiting rows; a reject of `scripts/seed.py` leaves it on
+ * disk and one of `refund.go` fails, so the bulk summary and its Details have something to show.
+ */
+function mockDecide(root: string, action: DecideAction, target: DecideTarget): DecideReport {
+  const v = views[root];
+  if (!v) throw fail("notFound", "nothing to decide: the file or record is no longer there");
+  if (config.readOnly) throw fail("readOnly", "ClaudeGate Desktop is in read-only mode. Turn it off to make decisions.");
+  if (v.scopes.some((s) => s.shapeUnknown.length > 0)) throw fail("readOnly", UNKNOWN);
+  const m = (globalThis as unknown as Record<string, { failStore?: boolean }>).__mock;
+  const report: DecideReport = { done: 0, left: [], errors: [] };
+  const now = new Date().toISOString();
+  const inScope = (scope: string, path: string) => {
+    if (target.kind === "all") return true;
+    if (target.scope !== scope) return false;
+    return target.kind === "folder" ? path.startsWith(`${target.prefix}/`) : true;
+  };
+  // A store failure leaves the log as it was, so Retry has the same work to do.
+  const snapshot = { pending: v.pending, accepted: v.accepted, rejected: v.rejected };
+  const changed: string[] = [];
+  switch (action) {
+    case "accept":
+    case "reject": {
+      const picked = v.pending.filter(
+        (p) => inScope(p.scope, p.path) && (target.kind === "file" ? p.path === target.key : !p.waiting),
+      );
+      if (picked.length === 0) throw fail("notFound", "nothing to decide: the file or record is no longer there");
+      for (const p of picked) {
+        if (action === "reject" && p.path.endsWith("refund.go")) {
+          report.errors.push([p.path, "permission denied (os error 13)"]);
+          continue;
+        }
+        if (action === "reject" && p.path.endsWith("seed.py")) report.left.push(p.path);
+        v.pending = v.pending.filter((x) => x !== p);
+        const rec: RecordItem = {
+          id: `${now}::${p.path}`,
+          path: p.path,
+          rel: p.rel,
+          scope: p.scope,
+          decidedAt: now,
+          added: p.added,
+          removed: p.removed,
+        };
+        if (action === "accept") v.accepted = [rec, ...v.accepted];
+        else v.rejected = [rec, ...v.rejected.filter((x) => x.path !== p.path)];
+        changed.push(p.path);
+        report.done++;
+      }
+      break;
+    }
+    case "revert":
+    case "reapply": {
+      const list = action === "revert" ? v.accepted : v.rejected;
+      const picked = list.filter(
+        (r) => inScope(r.scope, r.path) && (target.kind !== "file" || (action === "revert" ? r.id : r.path) === target.key),
+      );
+      if (picked.length === 0) throw fail("notFound", "nothing to decide: the file or record is no longer there");
+      for (const r of picked) {
+        if (action === "revert") v.accepted = v.accepted.filter((x) => x !== r);
+        else v.rejected = v.rejected.filter((x) => x !== r);
+        if (!v.pending.some((p) => p.path === r.path)) {
+          v.pending.push({ path: r.path, rel: r.rel, scope: r.scope, newFile: false, capturedAt: now, added: r.added, removed: r.removed, waiting: false });
+        }
+        changed.push(r.path);
+        report.done++;
+      }
+      break;
+    }
+    case "clearAccepted":
+      report.done = v.accepted.length;
+      v.accepted = [];
+      break;
+    case "clearRejected":
+      report.done = v.rejected.length;
+      v.rejected = [];
+      break;
+  }
+  if (m?.failStore) {
+    m.failStore = false;
+    Object.assign(v, snapshot);
+    throw JSON.stringify({
+      kind: "store",
+      message: "cannot write the session file: No space left on device (os error 28)",
+      changed,
+      partial: { done: 0, left: [], errors: [] },
+    });
+  }
+  return report;
+}

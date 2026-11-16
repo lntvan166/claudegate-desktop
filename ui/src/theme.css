@@ -64,6 +64,9 @@
   --error-bg: #ffedea;
   --error-ink: #831c1e;
   --focus-ring: #1b6c80;
+  /* The one destructive control (Reject N in the confirmation); white text on it. */
+  --danger: #c4242a;
+  --danger-hover: #a81e23;
   --scrollbar: rgba(19, 20, 22, 0.16);
   /* Only what floats (the Open-with menu) casts a shadow. */
   --menu-shadow: 0 10px 28px rgba(19, 20, 22, 0.12), 0 2px 6px rgba(19, 20, 22, 0.06);
@@ -93,6 +96,8 @@
     --error-bg: #2c1a1d;
     --error-ink: #f0868c;
     --focus-ring: #5fb3c6;
+    --danger: #c0353d;
+    --danger-hover: #a92e35;
     --scrollbar: rgba(255, 255, 255, 0.14);
     --menu-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
   }

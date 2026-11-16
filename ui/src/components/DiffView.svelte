@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount, untrack } from "svelte";
+  import { onDestroy, onMount, untrack, type Snippet } from "svelte";
   import { getDiff, type DiffKind, type DiffPayload } from "../lib/api";
   import { editorLabel, type EditorConfig } from "../lib/editors";
   import { iconFor, type IconTheme } from "../lib/icons";
@@ -24,6 +24,7 @@
     onopen,
     onpick,
     ondismiss,
+    footer,
   }: {
     row: Row | null;
     kind: DiffKind;
@@ -38,6 +39,8 @@
     onopen: () => void;
     onpick: (template: string) => void;
     ondismiss: () => void;
+    /** A slim bar under the diff (the decision result). */
+    footer?: Snippet;
   } = $props();
 
   const SIDE_KEY = "claudegate.diffSideBySide";
@@ -292,6 +295,7 @@
         <dl class="keys">
           <div><dt><kbd>J</kbd> <kbd>K</kbd></dt><dd>Next and previous file</dd></div>
           <div><dt><kbd>N</kbd> <kbd>P</kbd></dt><dd>Next and previous pending, across worktrees</dd></div>
+          <div><dt><kbd>A</kbd> <kbd>R</kbd></dt><dd>Accept or reject the selected pending file</dd></div>
           <div><dt><kbd>O</kbd></dt><dd>Open in {label} at the first change</dd></div>
           <div><dt><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></dt><dd>Pending, accepted, rejected</dd></div>
           <div><dt><kbd>[</kbd></dt><dd>Collapse or expand projects</dd></div>
@@ -312,6 +316,7 @@
       </div>
     {/if}
   </div>
+  {@render footer?.()}
 </main>
 
 <style>

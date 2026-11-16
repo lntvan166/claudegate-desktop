@@ -2,7 +2,8 @@
 export const ZED = "zed {path}:{line}";
 export const VSCODE = "code -g {path}:{line}";
 
-export type EditorConfig = { editor: string; customEditor?: string | null };
+/** The app's settings (src-tauri/src/config.rs `Config`). */
+export type EditorConfig = { editor: string; customEditor?: string | null; readOnly?: boolean };
 
 const norm = (t: string) => t.trim().split(/\s+/).join(" ");
 

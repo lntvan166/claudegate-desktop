@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionFor, isTypingTarget, nextIndex } from "./keys";
+import { actionFor, decisionFor, isTypingTarget, nextIndex } from "./keys";
 
 describe("nextIndex", () => {
   it("clamps without wrapping", () => {
@@ -69,5 +69,42 @@ describe("isTypingTarget", () => {
     expect(isTypingTarget(el("BUTTON"))).toBe(false);
     expect(isTypingTarget(el("BODY"))).toBe(false);
     expect(isTypingTarget(null)).toBe(false);
+    // A key sent to the window has no tag.
+    expect(isTypingTarget({} as unknown as El)).toBe(false);
+  });
+});
+
+describe("decisionFor", () => {
+  const ctx = {
+    tab: "pending" as const,
+    typing: false,
+    menuOpen: false,
+    readOnly: false,
+    busy: false,
+    selectedKey: "/w/a.ts" as string | null,
+  };
+
+  it("a accepts and r rejects the selected pending row", () => {
+    expect(decisionFor(k("a"), ctx)).toEqual({ action: "accept", key: "/w/a.ts" });
+    expect(decisionFor(k("r"), ctx)).toEqual({ action: "reject", key: "/w/a.ts" });
+  });
+
+  it("is ignored on the Accepted and Rejected tabs", () => {
+    expect(decisionFor(k("a"), { ...ctx, tab: "accepted" })).toBeNull();
+    expect(decisionFor(k("r"), { ...ctx, tab: "rejected" })).toBeNull();
+  });
+
+  it("is ignored while typing, with the menu open, in read-only mode, or mid-decision", () => {
+    expect(decisionFor(k("a"), { ...ctx, typing: true })).toBeNull();
+    expect(decisionFor(k("a"), { ...ctx, menuOpen: true })).toBeNull();
+    expect(decisionFor(k("r"), { ...ctx, readOnly: true })).toBeNull();
+    expect(decisionFor(k("r"), { ...ctx, busy: true })).toBeNull();
+  });
+
+  it("needs a selected row and an unmodified key", () => {
+    expect(decisionFor(k("a"), { ...ctx, selectedKey: null })).toBeNull();
+    expect(decisionFor(k("a", { ctrlKey: true }), ctx)).toBeNull();
+    expect(decisionFor(k("A"), ctx)).toBeNull();
+    expect(decisionFor(k("x"), ctx)).toBeNull();
   });
 });
