@@ -39,11 +39,12 @@ Folder and project-wide accept and reject skip excluded files and files with no 
 
 **Backups.** Before every write to a session file, the app copies the current one to `~/.claudegate-desktop/backups/<session hash>/<UTC timestamp>.json` and keeps the newest 50 per project. If the backup fails, the write is refused.
 
-**Read-only mode.** Decisions are refused, with a message, in three cases:
+**Read-only mode.** Decisions are refused in these cases, and the app hides the actions and shows a banner:
 
-- the read-only switch is on (`readOnly` in `~/.claudegate-desktop/config.json`, off by default);
-- a project's session was written in a format this version doesn't know (a newer ClaudeGate), so the app won't risk rewriting it;
-- the settings file or a session file is unreadable or invalid. Fix or delete it.
+- the read-only switch is on (`readOnly` in `~/.claudegate-desktop/config.json`, off by default). The banner reads "Read-only mode is on" with a Turn off button; a refused write says "ClaudeGate Desktop is in read-only mode. Turn it off to make decisions."
+- a project's session was written in a format this version doesn't know, so the app won't risk rewriting it: "This project was written by a newer ClaudeGate. Update the app to make decisions here."
+- the settings file is unreadable or invalid: "ClaudeGate Desktop couldn't read its settings file (~/.claudegate-desktop/config.json), so decisions are paused. Fix or delete that file."
+- a project's session file is unreadable or invalid: "This project's review log couldn't be read, so decisions are paused."
 
 **Alongside VS Code.** The app and the extension can run at once. Both take the same `<session>.lock`, re-read the file just before writing and merge in what the other (and the Claude hook) wrote in between, so a capture made while you decide is kept. `scripts/decide-e2e.sh` checks this headless in a temp sandbox: it runs the extension's hook during an accept and asserts the capture survives (it prints `E2E OK`).
 

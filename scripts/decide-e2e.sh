@@ -33,7 +33,7 @@ py() { python3 -I -c "import json,sys; s=json.load(open('$(session)')); $1"; }
 
 (cd "$REPO" && cargo build -q -p claudegate-desktop --example decide_e2e) || fail "build"
 BIN="$REPO/target/debug/examples/decide_e2e"
-[ -x "$BIN" ] || BIN="$(ls "$REPO"/target/debug/examples/decide_e2e 2>/dev/null)" || fail "example binary not found"
+[ -x "$BIN" ] || fail "example binary not found"
 
 # 1. Claude edits a.txt: hook snapshots a0, then the file changes.
 hook "$WS/a.txt"; printf 'a1\n' > "$WS/a.txt"

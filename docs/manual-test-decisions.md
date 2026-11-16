@@ -18,7 +18,8 @@ You run this on the real machine. It checks that ClaudeGate Desktop and the VS C
    export PATH=$HOME/.cargo/bin:$PATH && npm run tauri dev
    ```
    Expected: the window opens. Read-only is off (the switch in settings is not set).
-3. Note the backups before you start: `ls ~/.claudegate-desktop/backups/ 2>&1; find ~/.claudegate-desktop/backups -name '*.json' 2>/dev/null | wc -l`.
+3. Record the backup count before you start: `find ~/.claudegate-desktop/backups -name '*.json' 2>/dev/null | wc -l`. Write the number down as B0.
+   Expected: a number (0 if you have never decided in the app, otherwise the files already kept, at most 50 per project). `find` printing nothing else is fine if the folder does not exist yet.
 
 ## Steps
 
@@ -33,13 +34,21 @@ You run this on the real machine. It checks that ClaudeGate Desktop and the VS C
 5. In the app, use Undo on the `b.txt` reject (or Reapply from its Rejected row).
    Expected: `b.txt` holds Claude's version again (`cat` shows the edited text) and is pending in the app and in VS Code.
 6. Check backups: `find ~/.claudegate-desktop/backups -name '*.json' | wc -l`.
-   Expected: about one backup per decision you made in the app (steps 2, 3 and 5 are three writes, so three new files). Writes made by VS Code in step 4 are not backed up by the app. Each file is under `backups/<hash>/`, named like `20261116T093012.345Z.json`.
-7. While Claude edits, decide at the same time: ask Claude to edit `a.txt` again, and as soon as it lands, accept something in the app.
+   Expected: B0 (Setup 3) plus 3, one new file per decision you made in the app (steps 2, 3 and 5), unless a project already holds 50 (the newest 50 are kept, so the total stops growing). VS Code's write in step 4 is not backed up by the app. New files sit under `backups/<hash>/`, named like `20261116T093012.345Z.json`.
+7. Reject all. Make sure at least 3 changes are pending, one of them a file Claude created (ask Claude to create `new.txt` and edit two others, then Reapply or re-edit as needed).
+   - Click Reject all.
+     Expected: an inline confirmation reads "Reject N files? Originals are restored and files Claude created are deleted.", where N is the number of real pending changes. Cancel is focused.
+   - Press Esc.
+     Expected: the confirmation closes and nothing changes on disk or in the panels.
+   - Click Reject all again and confirm.
+     Expected: edited files are back to their originals, `new.txt` is deleted, and the result bar reads "Rejected N files" (or shows "left on disk" counts if some file had no original).
+8. While Claude edits, decide at the same time: ask Claude to edit `a.txt` again, and as soon as it lands, accept something in the app.
    Expected: the new pending `a.txt` is still there afterwards. Nothing Claude captured is lost.
-8. Read-only switch: turn read-only on in the app.
-   Expected: accept and reject are disabled or refused with a read-only message. Turn it off again and they work.
-9. Edit the config by hand to break it: `echo '{' > ~/.claudegate-desktop/config.json`, then try a decision.
-   Expected: decisions are paused with the settings-unreadable message. Restore the file (`{"readOnly": false}`) afterwards.
+9. Read-only switch: click the read-only toggle in the app (its tooltip is "Turn on read-only mode to block every decision.").
+   Expected: the accept, reject and other decision actions are hidden, and a banner reads "Read-only mode is on" with a [Turn off] button. A refused write would say: "ClaudeGate Desktop is in read-only mode. Turn it off to make decisions." Click [Turn off]: the banner goes and the actions return.
+10. Break the settings file: `echo '{' > ~/.claudegate-desktop/config.json`, then look at the app.
+   Expected: the banner reads "ClaudeGate Desktop couldn't read its settings file (~/.claudegate-desktop/config.json), so decisions are paused. Fix or delete that file." with a [Try again] button. Restore the file (`echo '{"readOnly": false}' > ~/.claudegate-desktop/config.json`), click [Try again], and decisions return.
+11. Optional, only if you have a session file to spare: a project whose session cannot be read shows "This project's review log couldn't be read, so decisions are paused." and a session from a newer ClaudeGate shows "This project was written by a newer ClaudeGate. Update the app to make decisions here.". In both cases decisions stay off for that project.
 
 ## Cleanup
 
