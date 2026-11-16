@@ -5,6 +5,7 @@
   import FileTree from "./components/FileTree.svelte";
   import ProjectList from "./components/ProjectList.svelte";
   import ReviewTabs from "./components/ReviewTabs.svelte";
+  import Splitter from "./components/Splitter.svelte";
   import {
     getConfig,
     getProject,
@@ -24,6 +25,7 @@
   import { actionFor, isTypingTarget, nextIndex } from "./lib/keys";
   import { basename, groupsFor, scopeLabel, selectionAfterList, sortProjects, type Row } from "./lib/rows";
   import { Rechecks } from "./lib/recheck";
+  import { MIN, STORE_KEY as PANES_KEY, fit, load as loadPanes, maxFor, reset as resetPane, save as savePanes, type Pane, type Widths } from "./lib/panes";
   import { relTime } from "./lib/time";
   import { collapseKeysToReveal, fileOrder, visibleItems } from "./lib/visible";
 
@@ -46,6 +48,32 @@
   let openError = $state<string | null>(null);
   /** Bumped on every reload of the selected project so the open diff refreshes. */
   let viewVersion = $state(0);
+
+  /** The widths the user chose; `panes` is what fits the window right now. */
+  let preferred = $state<Widths>(readPanes());
+  let innerWidth = $state(typeof window === "undefined" ? 1200 : window.innerWidth);
+  const panes = $derived(fit(preferred, innerWidth));
+
+  function readPanes(): Widths {
+    try {
+      return loadPanes(localStorage.getItem(PANES_KEY));
+    } catch {
+      return loadPanes(null);
+    }
+  }
+  function setPane(pane: Pane, width: number) {
+    const max = maxFor(panes, pane, innerWidth);
+    preferred = fit({ ...panes, [pane]: Math.min(max, Math.max(MIN[pane], width)) }, innerWidth);
+  }
+  function storePanes() {
+    try {
+      localStorage.setItem(PANES_KEY, savePanes(preferred));
+    } catch {}
+  }
+  function resetPaneWidth(pane: Pane) {
+    preferred = resetPane(preferred, pane, innerWidth);
+    storePanes();
+  }
 
   const current = $derived(projects.find((p) => p.root === selected) ?? null);
   const totalPending = $derived(projects.reduce((s, p) => s + p.pending, 0));
@@ -266,7 +294,9 @@
   });
 </script>
 
-<div class="app">
+<svelte:window bind:innerWidth />
+
+<div class="app" style:--sidebar-w="{panes.projects}px" style:--tree-w="{panes.tree}px">
   <header class="toolbar">
     <div class="brand">
       <svg class="mark" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
@@ -297,6 +327,19 @@
   </header>
 
   <ProjectList {projects} {selected} loading={loadingList} onselect={select} />
+
+  <div class="split split-projects">
+    <Splitter
+      label="Resize projects"
+      value={panes.projects}
+      min={MIN.projects}
+      max={maxFor(panes, "projects", innerWidth)}
+      left={panes.projects}
+      onresize={(w) => setPane("projects", w)}
+      oncommit={storePanes}
+      onreset={() => resetPaneWidth("projects")}
+    />
+  </div>
 
   <div class="sheet">
     <section class="review" aria-label="Changes">
@@ -375,6 +418,19 @@
       {/if}
     </section>
 
+    <div class="split">
+      <Splitter
+        label="Resize file list"
+        value={panes.tree}
+        min={MIN.tree}
+        max={maxFor(panes, "tree", innerWidth)}
+        left={panes.tree - 1}
+        onresize={(w) => setPane("tree", w)}
+        oncommit={storePanes}
+        onreset={() => resetPaneWidth("tree")}
+      />
+    </div>
+
     <DiffView
       row={selectedRow}
       kind={tab}
@@ -396,8 +452,25 @@
     display: grid;
     grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
     grid-template-rows: var(--toolbar-h) minmax(0, 1fr);
+    position: relative;
     height: 100vh;
     background: var(--frame);
+  }
+
+  /* Splitters float over the edges they move; the wrapper takes no grid cell of its own. */
+  .split {
+    position: absolute;
+    inset: 0;
+    width: 0;
+    pointer-events: none;
+  }
+  .split > :global(.splitter) {
+    pointer-events: auto;
+  }
+  /* Clear of the sheet's rounded corners, where its edge is no longer a straight line. */
+  .split-projects {
+    top: calc(var(--toolbar-h) + var(--radius-sheet));
+    bottom: calc(var(--sheet-inset) + var(--radius-sheet));
   }
 
   /* Toolbar and project list share the frame tint with no rule between them (the L). */
@@ -444,6 +517,7 @@
 
   /* The sheet: inset from the window's right and bottom edges, 1px edge, no shadow. */
   .sheet {
+    position: relative;
     display: grid;
     grid-template-columns: var(--tree-w) minmax(0, 1fr);
     min-height: 0;
@@ -561,13 +635,6 @@
   }
 
 
-  @media (max-width: 1000px) {
-    .app {
-      --sidebar-w: 184px;
-      --tree-w: 340px;
-    }
-  }
-
   /* Narrow windows (a browser preview, a tiled window): one column, projects on top. */
   @media (max-width: 720px) {
     .app {
@@ -590,7 +657,8 @@
     .review {
       border-right: 0;
     }
-    .sheet > :global(.diff) {
+    .sheet > :global(.diff),
+    .split {
       display: none;
     }
   }
