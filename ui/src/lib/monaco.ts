@@ -1,5 +1,6 @@
 // The Monaco build the diff view uses: the core editor API, the diff editor and a few editor
-// features, the languages in LANGUAGES (language.ts), and the editor worker. Everything is bundled by
+// features, and the editor worker. Colours come from Shiki (grammars.ts), not Monaco's Monarch
+// grammars: each language's TextMate grammar loads on the first diff in it. Everything is bundled by
 // Vite; nothing is fetched at runtime. Loaded lazily by DiffView, so it stays out of the first paint.
 import * as monaco from "monaco-editor/editor/editor.api.js";
 import "monaco-editor/features/diffEditor/register.js";
@@ -9,35 +10,11 @@ import "monaco-editor/features/folding/register.js";
 import "monaco-editor/features/clipboard/register.js";
 import "monaco-editor/features/contextmenu/register.js";
 import "monaco-editor/features/bracketMatching/register.js";
-import "monaco-editor/languages/definitions/typescript/register.js";
-import "monaco-editor/languages/definitions/javascript/register.js";
-import "monaco-editor/languages/definitions/css/register.js";
-import "monaco-editor/languages/definitions/scss/register.js";
-import "monaco-editor/languages/definitions/less/register.js";
-import "monaco-editor/languages/definitions/html/register.js";
-import "monaco-editor/languages/definitions/xml/register.js";
-import "monaco-editor/languages/definitions/markdown/register.js";
-import "monaco-editor/languages/definitions/yaml/register.js";
-import "monaco-editor/languages/definitions/go/register.js";
-import "monaco-editor/languages/definitions/rust/register.js";
-import "monaco-editor/languages/definitions/python/register.js";
-import "monaco-editor/languages/definitions/shell/register.js";
-import "monaco-editor/languages/definitions/sql/register.js";
-import "monaco-editor/languages/definitions/dockerfile/register.js";
-import "monaco-editor/languages/definitions/java/register.js";
-import "monaco-editor/languages/definitions/kotlin/register.js";
-import "monaco-editor/languages/definitions/swift/register.js";
-import "monaco-editor/languages/definitions/cpp/register.js";
-import "monaco-editor/languages/definitions/csharp/register.js";
-import "monaco-editor/languages/definitions/ruby/register.js";
-import "monaco-editor/languages/definitions/php/register.js";
-import "monaco-editor/languages/definitions/ini/register.js";
-import "monaco-editor/languages/definitions/graphql/register.js";
-import "monaco-editor/languages/definitions/lua/register.js";
-import "monaco-editor/languages/definitions/hcl/register.js";
-import "monaco-editor/languages/definitions/protobuf/register.js";
-import "monaco-editor/languages/definitions/powershell/register.js";
 import EditorWorker from "monaco-editor/editor/editor.worker.js?worker";
+import { EncodedTokenMetadata, INITIAL, type StateStack } from "@shikijs/vscode-textmate";
+import { GRAMMARS, SHIKI_THEME, createDiffHighlighter } from "./grammars";
+import { LANGUAGES } from "./language";
+import { buildTheme, fromTextmate, themeName } from "./monacoTheme";
 
 // The diff runs in the editor worker. No language service runs at all: a read-only diff needs
 // colours, not completions or validation.
@@ -47,14 +24,103 @@ self.MonacoEnvironment = {
   },
 };
 
-// JSON: highlighting only, from the JavaScript grammar. The JSON language service would add about
-// 1.8 MB (its mode and worker) for validation and hovers a read-only diff never shows.
-monaco.languages.register({ id: "json", extensions: [".json", ".jsonc", ".json5"], aliases: ["JSON"] });
-monaco.languages.onLanguage("json", () => {
-  void import("monaco-editor/languages/definitions/javascript/javascript.js").then((js) => {
-    monaco.languages.setMonarchTokensProvider("json", js.language);
-    monaco.languages.setLanguageConfiguration("json", js.conf);
+const highlighter = await createDiffHighlighter();
+
+// Our two themes: the TextMate theme's token rules, our chrome and diff tints.
+const monacoThemes = {
+  dark: buildTheme(true, fromTextmate(highlighter.getTheme(SHIKI_THEME.dark))),
+  light: buildTheme(false, fromTextmate(highlighter.getTheme(SHIKI_THEME.light))),
+};
+monaco.editor.defineTheme(themeName(true), monacoThemes.dark);
+monaco.editor.defineTheme(themeName(false), monacoThemes.light);
+
+// Shiki tokenizes to colours from its own colour map; Monaco wants token names it resolves against
+// the theme. As @shikijs/monaco does, each colour+style is mapped back to the first theme rule that
+// produces it, so Monaco paints the same colour. Rebuilt whenever the theme changes.
+let colorMap: string[] = [];
+const scopeFor = new Map<string, string>();
+
+// vscode-textmate's FontStyle bits (a const enum, which isolated modules cannot read).
+const FontStyle = { Italic: 1, Bold: 2, Underline: 4, Strikethrough: 8 } as const;
+
+const norm = (c: string | undefined) => (c ? c.replace(/^#/, "").toLowerCase() : "");
+function styleKey(color: string, bits: number): string {
+  const s = [
+    bits & FontStyle.Italic ? "italic" : "",
+    bits > 0 && bits & FontStyle.Bold ? "bold" : "",
+    bits > 0 && bits & FontStyle.Underline ? "underline" : "",
+    bits > 0 && bits & FontStyle.Strikethrough ? "strikethrough" : "",
+  ].filter(Boolean);
+  return bits > 0 && s.length ? `${color}|${s.join(" ")}` : color;
+}
+function ruleStyleBits(fontStyle: string | undefined): number {
+  let b = 0;
+  for (const w of (fontStyle ?? "").split(/[\s,]+/)) {
+    if (w === "italic") b |= FontStyle.Italic;
+    else if (w === "bold") b |= FontStyle.Bold;
+    else if (w === "underline") b |= FontStyle.Underline;
+    else if (w === "strikethrough" || w === "line-through") b |= FontStyle.Strikethrough;
+  }
+  return b;
+}
+
+/** Switch the diff to the dark or light theme: Shiki's colour map first, then Monaco's theme. */
+export function setDiffTheme(dark: boolean) {
+  const ret = highlighter.setTheme(dark ? SHIKI_THEME.dark : SHIKI_THEME.light);
+  colorMap = ret.colorMap.map(norm);
+  scopeFor.clear();
+  for (const r of (dark ? monacoThemes.dark : monacoThemes.light).rules) {
+    const c = norm(r.foreground);
+    if (!c) continue;
+    const key = styleKey(c, ruleStyleBits(r.fontStyle));
+    if (!scopeFor.has(key)) scopeFor.set(key, r.token);
+  }
+  monaco.editor.setTheme(themeName(dark));
+}
+
+class State implements monaco.languages.IState {
+  constructor(readonly stack: StateStack) {}
+  clone() {
+    return new State(this.stack);
+  }
+  equals(other: monaco.languages.IState) {
+    return other instanceof State && other.stack === this.stack;
+  }
+}
+
+const MAX_LINE = 20_000;
+const TIME_LIMIT_MS = 500;
+
+function provider(lang: string): monaco.languages.TokensProvider {
+  const grammar = highlighter.getLanguage(lang);
+  return {
+    getInitialState: () => new State(INITIAL),
+    tokenize(line, state) {
+      const s = state as State;
+      if (line.length >= MAX_LINE) return { endState: s, tokens: [{ startIndex: 0, scopes: "" }] };
+      const r = grammar.tokenizeLine2(line, s.stack, TIME_LIMIT_MS);
+      const tokens: monaco.languages.IToken[] = [];
+      for (let i = 0; i < r.tokens.length; i += 2) {
+        const meta = r.tokens[i + 1];
+        const color = colorMap[EncodedTokenMetadata.getForeground(meta)] ?? "";
+        const scope = color ? (scopeFor.get(styleKey(color, EncodedTokenMetadata.getFontStyle(meta))) ?? "") : "";
+        tokens.push({ startIndex: r.tokens[i], scopes: scope });
+      }
+      return { endState: new State(r.ruleStack), tokens };
+    },
+  };
+}
+
+// Every language is registered up front; its grammar loads only when a model first uses it.
+for (const id of LANGUAGES) {
+  if (id === "plaintext") continue;
+  monaco.languages.register({ id });
+  monaco.languages.registerTokensProviderFactory(id, {
+    async create() {
+      await highlighter.loadLanguage((await GRAMMARS[id]()).default);
+      return provider(id);
+    },
   });
-});
+}
 
 export { monaco };

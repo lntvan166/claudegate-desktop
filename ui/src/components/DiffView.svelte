@@ -4,12 +4,12 @@
   import { editorLabel, type EditorConfig } from "../lib/editors";
   import { iconFor, type IconTheme } from "../lib/icons";
   import { languageFor } from "../lib/language";
-  import { buildTheme, themeName } from "../lib/monacoTheme";
   import { paneState } from "../lib/paneState";
   import type { Row } from "../lib/rows";
   import OpenWith from "./OpenWith.svelte";
 
-  type Monaco = typeof import("../lib/monaco").monaco;
+  type MonacoModule = typeof import("../lib/monaco");
+  type Monaco = MonacoModule["monaco"];
   type DiffEditor = import("monaco-editor/editor/editor.api.js").editor.IStandaloneDiffEditor;
 
   let {
@@ -106,22 +106,19 @@
     untrack(() => (firstLine = 1));
   });
 
-  function applyTheme(m: Monaco, t: IconTheme) {
-    const dark = t === "dark";
-    m.editor.defineTheme(themeName(dark), buildTheme(dark));
-    m.editor.setTheme(themeName(dark));
-  }
+  let setDiffTheme: MonacoModule["setDiffTheme"] | null = null;
 
   async function ensureEditor() {
     if (editor || !host) return;
-    const [{ monaco: m }] = await Promise.all([
+    const [{ monaco: m, setDiffTheme: setT }] = await Promise.all([
       import("../lib/monaco"),
       document.fonts?.load('13px "JetBrains Mono"').catch(() => undefined),
       document.fonts?.load('italic 13px "JetBrains Mono"').catch(() => undefined),
     ]);
     if (editor || !host) return;
     monaco = m;
-    applyTheme(m, theme);
+    setDiffTheme = setT;
+    setT(theme === "dark");
     const ed = m.editor.createDiffEditor(host, {
       readOnly: true,
       originalEditable: false,
@@ -210,7 +207,7 @@
 
   $effect(() => {
     const t = theme;
-    if (editor && monaco) untrack(() => applyTheme(monaco!, t));
+    if (editor && setDiffTheme) untrack(() => setDiffTheme!(t === "dark"));
   });
 
   function setSide(v: boolean) {

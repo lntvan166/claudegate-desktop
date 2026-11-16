@@ -1,11 +1,15 @@
-// Monaco themes for the diff: Dracula in dark mode and Alucard (Dracula's light variant) in light,
-// with Dracula's VS Code diff tints, so a diff reads the way it does in the maintainer's editor.
+// Monaco themes for the diff. Token colours come from Shiki's TextMate themes (Dracula in dark,
+// GitHub Light in light), scope for scope as VS Code applies them; the editor chrome and the diff
+// tints are ours and win over the TextMate theme's: Dracula's in dark, Alucard's ground in light.
 // Plain data and one pure builder; the DiffView only picks the mode.
+
+import { textmateThemeToMonacoTheme } from "@shikijs/monaco";
 
 export interface ThemeRule {
   token: string;
   /** Monaco wants `rrggbb`, no `#`. */
   foreground?: string;
+  background?: string;
   fontStyle?: string;
 }
 
@@ -110,52 +114,6 @@ export const ALUCARD: Palette = {
   },
 };
 
-const hex = (c: string) => c.slice(1, 7);
-
-/** Token roles as the Dracula VS Code theme assigns them, keyed by Monarch token prefixes. */
-function rules(p: Palette): ThemeRule[] {
-  const r = (token: string, color: string, fontStyle?: string): ThemeRule =>
-    fontStyle ? { token, foreground: hex(color), fontStyle } : { token, foreground: hex(color) };
-  return [
-    r("", p.foreground),
-    r("comment", p.comment),
-    r("comment.doc", p.comment),
-    r("keyword", p.pink),
-    r("keyword.flow", p.pink),
-    r("storage", p.pink),
-    r("operator", p.pink),
-    r("string", p.yellow),
-    r("string.escape", p.pink),
-    r("string.key", p.cyan),
-    r("key", p.cyan),
-    r("regexp", p.red),
-    r("number", p.purple),
-    r("constant", p.purple),
-    r("variable.predefined", p.purple, "italic"),
-    r("predefined", p.cyan),
-    r("type", p.cyan, "italic"),
-    r("type.identifier", p.cyan, "italic"),
-    r("class", p.cyan, "italic"),
-    r("namespace", p.cyan, "italic"),
-    r("function", p.green),
-    r("entity.name.function", p.green),
-    r("parameter", p.orange, "italic"),
-    r("variable.parameter", p.orange, "italic"),
-    r("annotation", p.green),
-    r("tag", p.pink),
-    r("metatag", p.pink),
-    r("attribute.name", p.green),
-    r("attribute.value", p.yellow),
-    r("delimiter", p.foreground),
-    r("identifier", p.foreground),
-    r("variable", p.foreground),
-    r("invalid", p.red),
-    r("emphasis", p.yellow, "italic"),
-    r("strong", p.orange, "bold"),
-    r("markup.heading", p.purple, "bold"),
-  ];
-}
-
 function colors(p: Palette): Record<string, string> {
   const brackets = [p.foreground, p.pink, p.cyan, p.green, p.purple, p.orange];
   return {
@@ -197,10 +155,23 @@ function colors(p: Palette): Record<string, string> {
   };
 }
 
-/** The Monaco theme for one mode: Dracula when `dark`, Alucard otherwise. */
-export function buildTheme(dark: boolean): Theme {
-  const p = dark ? DRACULA : ALUCARD;
-  return { base: dark ? "vs-dark" : "vs", inherit: true, rules: rules(p), colors: colors(p) };
+/** A TextMate theme's rules and colours, as @shikijs/monaco converts them for Monaco. */
+export interface TextmateTheme {
+  rules: ThemeRule[];
+  colors: Record<string, string>;
 }
 
-export const themeName = (dark: boolean) => (dark ? "claudegate-dracula" : "claudegate-alucard");
+/** @shikijs/monaco's conversion, typed here: its declarations point at `monaco-editor-core`. */
+export function fromTextmate(theme: unknown): TextmateTheme {
+  return textmateThemeToMonacoTheme(theme as Parameters<typeof textmateThemeToMonacoTheme>[0]) as unknown as TextmateTheme;
+}
+
+/** The Monaco theme for one mode: `shiki` (a TextMate theme converted by @shikijs/monaco) for the
+ *  tokens, with our chrome and diff colours laid over its own. */
+export function buildTheme(dark: boolean, shiki: TextmateTheme): Theme {
+  const p = dark ? DRACULA : ALUCARD;
+  // Not inherited: every token colour is the TextMate theme's, none leaks in from Monaco's vs/vs-dark.
+  return { base: dark ? "vs-dark" : "vs", inherit: false, rules: shiki.rules, colors: { ...shiki.colors, ...colors(p) } };
+}
+
+export const themeName = (dark: boolean) => (dark ? "claudegate-dracula" : "claudegate-light");

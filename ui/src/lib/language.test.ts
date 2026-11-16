@@ -9,38 +9,87 @@ describe("languageFor", () => {
   });
 
   it("uses the base name of a full path, any case", () => {
-    expect(languageFor("/w/src/App.TSX")).toBe("typescript");
+    expect(languageFor("/w/src/App.TSX")).toBe("tsx");
     expect(languageFor("C:\\w\\main.RS")).toBe("rust");
     expect(languageFor("/w/docker/Dockerfile.dev")).toBe("dockerfile");
     expect(languageFor("/w/api.dockerfile")).toBe("dockerfile");
   });
 
-  it("covers the common set", () => {
+  it("maps extensions to Shiki's grammars", () => {
     const cases: [string, string][] = [
       ["a.ts", "typescript"],
+      ["a.mts", "typescript"],
+      ["a.tsx", "tsx"],
+      ["a.js", "javascript"],
       ["a.mjs", "javascript"],
+      ["a.jsx", "jsx"],
       ["package.json", "json"],
-      ["tsconfig.jsonc", "json"],
-      ["a.svelte", "html"],
-      ["a.yml", "yaml"],
-      ["Cargo.toml", "ini"],
-      ["run.sh", "shell"],
-      [".zshrc", "shell"],
-      ["q.sql", "sql"],
+      ["tsconfig.jsonc", "jsonc"],
+      ["a.go", "go"],
       ["main.py", "python"],
+      ["lib.rs", "rust"],
+      ["A.java", "java"],
+      ["b.kt", "kotlin"],
+      ["build.gradle.kts", "kotlin"],
+      ["x.c", "c"],
+      ["x.h", "c"],
+      ["x.cpp", "cpp"],
+      ["x.hpp", "cpp"],
+      ["x.cs", "csharp"],
+      ["x.swift", "swift"],
+      ["x.php", "php"],
+      ["x.rb", "ruby"],
+      ["x.lua", "lua"],
+      ["q.sql", "sql"],
+      ["a.yml", "yaml"],
+      ["Cargo.toml", "toml"],
       ["README.md", "markdown"],
-      ["x.h", "cpp"],
-      ["Gemfile", "ruby"],
-      ["main.tf", "hcl"],
-      [".env", "ini"],
-      ["Makefile", "plaintext"],
+      ["index.html", "html"],
+      ["a.css", "css"],
+      ["a.scss", "scss"],
+      ["a.svelte", "svelte"],
+      ["a.vue", "vue"],
+      ["run.sh", "shellscript"],
+      ["a.bash", "shellscript"],
+      ["a.ini", "ini"],
+      ["a.proto", "proto"],
+      ["s.graphql", "graphql"],
+      ["s.gql", "graphql"],
+      ["main.tf", "terraform"],
+      ["prod.tfvars", "terraform"],
+      ["x.hcl", "hcl"],
+      ["login.feature", "gherkin"],
+      ["a.svg", "xml"],
+      ["a.ps1", "powershell"],
       ["noext", "plaintext"],
+      ["a.zzz", "plaintext"],
     ];
     for (const [f, want] of cases) expect(languageFor(f), f).toBe(want);
   });
 
-  it("only returns ids the editor registers", () => {
-    const names = ["a.ts", "a.js", "a.json", "a.css", "a.scss", "a.less", "a.html", "a.xml", "a.md", "a.yaml", "a.go", "a.rs", "a.py", "a.sh", "a.sql", "Dockerfile", "a.java", "a.kt", "a.swift", "a.cpp", "a.cs", "a.rb", "a.php", "a.ini", "a.graphql", "a.lua", "a.tf", "a.proto", "a.ps1", "a.zzz"];
+  it("knows special file names", () => {
+    const cases: [string, string][] = [
+      ["Dockerfile", "dockerfile"],
+      ["Containerfile", "dockerfile"],
+      ["Makefile", "make"],
+      ["GNUmakefile", "make"],
+      ["rules.mk", "make"],
+      [".env", "dotenv"],
+      [".env.local", "dotenv"],
+      [".env.production", "dotenv"],
+      ["go.mod", "go"],
+      ["go.sum", "plaintext"],
+      ["Gemfile", "ruby"],
+      [".zshrc", "shellscript"],
+      [".bashrc", "shellscript"],
+      [".gitconfig", "ini"],
+      [".editorconfig", "ini"],
+    ];
+    for (const [f, want] of cases) expect(languageFor(f), f).toBe(want);
+  });
+
+  it("only returns ids it lists", () => {
+    const names = ["a.ts", "a.tsx", "a.feature", "Makefile", ".env.x", "a.tf", "go.mod", "a.zzz", "a.robot"];
     for (const n of names) expect(LANGUAGES, n).toContain(languageFor(n));
   });
 });

@@ -46,6 +46,8 @@ const views: Record<string, ProjectView> = {
       pending(SHOP, "src/utils.ts", 9, 4),
       pending(SHOP, "src/db/migrations/0007_refunds.sql", 23, 0, true),
       pending(SHOP, "docker-compose.yml", 5, 2),
+      pending(SHOP, "internal/refunds/refund.go", 19, 6),
+      pending(SHOP, "scripts/seed.py", 11, 3),
       pending(WT, "src/checkout/cart.svelte", 88, 31),
       pending(WT, "src/checkout/stripe.test.ts", 54, 0, true),
       pending(WT, ".github/workflows/ci.yml", 7, 3),
@@ -175,8 +177,82 @@ pub fn damage(level: u32, attack: u32, defense: u32, power: u32, stab: bool) -> 
 }
 `;
 
+const GO_BEFORE = `package refunds
+
+import "errors"
+
+// Refund returns money for one order line.
+func Refund(lineID int64, cents int) error {
+	if cents <= 0 {
+		return errors.New("amount must be positive")
+	}
+	return nil
+}
+`;
+const GO_AFTER = `package refunds
+
+import (
+	"context"
+	"fmt"
+)
+
+// Store persists refunds.
+type Store interface {
+	Insert(ctx context.Context, lineID int64, cents int, reason string) error
+}
+
+// Refund returns money for one order line and records why.
+func Refund(ctx context.Context, store Store, lineID int64, cents int, reason string) error {
+	if cents <= 0 {
+		return fmt.Errorf("refund %d: amount must be positive, got %d", lineID, cents)
+	}
+	return store.Insert(ctx, lineID, cents, reason)
+}
+`;
+const PY_BEFORE = `import json
+
+
+def seed(path):
+    with open(path) as f:
+        return json.load(f)
+`;
+const PY_AFTER = `import json
+from pathlib import Path
+
+
+def seed(path: Path, *, limit: int = 100) -> list[dict]:
+    """Load fixture orders, at most \`limit\` of them."""
+    with path.open(encoding="utf-8") as f:
+        return json.load(f)[:limit]
+
+
+if __name__ == "__main__":
+    print(len(seed(Path("fixtures/orders.json"))))
+`;
+const YAML_BEFORE = `services:
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+`;
+const YAML_AFTER = `services:
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    depends_on: [db]
+    environment:
+      DATABASE_URL: postgres://shop:shop@db:5432/shop
+  db:
+    image: postgres:16
+    restart: unless-stopped
+`;
+
 function sample(path: string, isNew: boolean): { before: string | null; after: string } {
   const name = path.split("/").pop() ?? path;
+  if (name.endsWith(".go")) return { before: GO_BEFORE, after: GO_AFTER };
+  if (name.endsWith(".py")) return { before: PY_BEFORE, after: PY_AFTER };
+  if (name.endsWith(".yml")) return { before: YAML_BEFORE, after: YAML_AFTER };
   if (name.endsWith(".sql")) return { before: isNew ? null : SQL, after: SQL };
   if (name === "README.md") return { before: README_BEFORE, after: README_AFTER };
   if (name === "package.json") return { before: PKG_BEFORE, after: PKG_AFTER };
