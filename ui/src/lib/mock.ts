@@ -57,6 +57,8 @@ const views: Record<string, ProjectView> = {
       pending(SHOP, "docker-compose.yml", 5, 2),
       pending(SHOP, "internal/refunds/refund.go", 19, 6),
       pending(SHOP, "scripts/seed.py", 11, 3),
+      // Captured, but Claude's write has not landed: bulk actions skip it.
+      { ...pending(SHOP, "src/api/types.ts", 0, 0), capturedAt: ago(0), waiting: true },
       pending(WT, "src/checkout/cart.svelte", 88, 31),
       pending(WT, "src/checkout/stripe.test.ts", 54, 0, true),
       pending(WT, ".github/workflows/ci.yml", 7, 3),
@@ -293,6 +295,14 @@ const handlers = new Set<(p: ChangedPayload) => void>();
 (globalThis as Record<string, unknown>).__mock = {
   /** The next decide fails as a store error after "changing" the files. */
   failStore: false,
+  /** Marks a project's primary session unreadable, as a permission error would. */
+  breakScope(name: string) {
+    for (const v of Object.values(views)) {
+      if (!v.root.endsWith(`/${name}`) || !v.scopes[0]) continue;
+      v.scopes[0] = { ...v.scopes[0], error: "cannot read session file: Permission denied (os error 13)" };
+      for (const h of handlers) h({ roots: [v.root] });
+    }
+  },
   drop(suffix: string) {
     for (const v of Object.values(views)) {
       const before = v.pending.length;

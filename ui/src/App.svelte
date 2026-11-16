@@ -27,6 +27,7 @@
   import {
     actionableCount,
     nextAfterDecision,
+    isSettingsUnreadable,
     parseDecideError,
     recordIdFor,
     summarize,
@@ -169,6 +170,8 @@
         detail: `Unknown session fields: ${unknownFields.join(", ")}`,
       };
     }
+    // The scope's own notice below says which session and why.
+    if (troubled.length > 0) return { text: "This project's review log couldn't be read, so decisions are paused." };
     if (settingsBlocked) return { text: settingsBlocked, action: "retry" };
     if (readOnly) return { text: "Read-only mode is on", action: "turnOff" };
     return null;
@@ -194,11 +197,15 @@
     else void getProject(root).then(patchSummary, () => {});
   }
 
-  async function loadView(root: string) {
+  /**
+   * Fetches and shows a project. Returns what it fetched even when a newer load superseded it, so a
+   * caller acting on the result never reads the older `view`; null when the fetch failed.
+   */
+  async function loadView(root: string): Promise<ProjectView | null> {
     const seq = ++viewSeq;
     try {
       const v = await getProject(root);
-      if (seq !== viewSeq || root !== selected) return;
+      if (seq !== viewSeq || root !== selected) return v;
       view = v;
       viewError = null;
       viewVersion++;
@@ -208,8 +215,10 @@
         const key = selectedRow.key;
         selectedRow = groupsFor(v, tab).flatMap((g) => g.rows).find((r) => r.key === key) ?? null;
       }
+      return v;
     } catch (e) {
       if (seq === viewSeq) viewError = String(e);
+      return null;
     }
   }
 
@@ -262,6 +271,7 @@
       view = null;
       selectedRow = null;
       result = null;
+      settingsBlocked = null;
       try {
         localStorage.setItem(STORE_KEY, root);
       } catch {}
@@ -302,10 +312,10 @@
     }
   }
 
-  /** Selects the pending row with `key`, unfolding whatever hides it. */
-  function selectPending(key: string) {
-    if (!view || tab !== "pending") return;
-    const row = groupsFor(view, "pending").flatMap((g) => g.rows).find((r) => r.key === key);
+  /** Selects the pending row with `key` in `v` (a fresh fetch), unfolding whatever hides it. */
+  function selectPending(v: ProjectView | null, key: string) {
+    if (!v || tab !== "pending") return;
+    const row = groupsFor(v, "pending").flatMap((g) => g.rows).find((r) => r.key === key);
     if (!row) return;
     for (const k of collapseKeysToReveal(row, "pending", collapsed)) collapsed.delete(k);
     selectedRow = row;
@@ -315,14 +325,14 @@
     result = { ...r, id: ++resultSeq };
   }
 
-  function report(root: string, action: DecideAction, target: DecideTarget, rep: DecideReport) {
+  function report(root: string, action: DecideAction, target: DecideTarget, rep: DecideReport, since: string) {
     const s = summarize(action, target, rep);
     const u = undoFor(action, target, rep);
     show({
       text: s.text,
-      tone: !s.failed ? "ok" : rep.done === 0 ? "error" : "warn",
+      tone: s.tone,
       details: rep.errors.length > 0 ? rep.errors : undefined,
-      undo: u ? () => void runUndo(root, u) : undefined,
+      undo: u ? () => void runUndo(root, u, since) : undefined,
     });
   }
 
@@ -337,14 +347,20 @@
       return;
     }
     if (err.kind === "readOnly") {
-      // Refused for read-only: find out why, and let the banner say it instead of the bar.
+      // Refused for read-only. The settings file is the one cause the view cannot show; the switch,
+      // a newer session shape and an unreadable session show in the banner once reloaded.
+      if (isSettingsUnreadable(err)) {
+        settingsBlocked = err.message;
+        result = null;
+        return;
+      }
       try {
         config = await getConfig();
       } catch {}
-      if (root === selected) await loadView(root);
-      if (!config.readOnly && unknownFields.length === 0) settingsBlocked = err.message;
-      result = null;
-      return;
+      if (lock) {
+        result = null;
+        return;
+      }
     }
     show({ text: err.message, tone: "error" });
   }
@@ -364,32 +380,43 @@
     const advanceFrom =
       target.kind === "file" && tab === "pending" && opts.row && opts.row.key === selectedRow?.key ? opts.row.key : null;
     const nextKey = advanceFrom ? nextAfterDecision(fileOrder(groupsFor(view, "pending"), mode), advanceFrom) : null;
+    // Undo of an accept looks for a record stamped at or after this moment, never an older one.
+    const since = new Date().toISOString();
     busy = true;
     try {
       const rep = await decide(root, action, target);
       if (root !== selected) return;
-      await loadView(root);
-      if (nextKey) selectPending(nextKey);
-      else if (opts.reselect) selectPending(opts.reselect);
-      report(root, action, target, rep);
+      const fresh = await loadView(root);
+      // A failed decision leaves the row where it was: stay on it.
+      if (nextKey && rep.done > 0) selectPending(fresh, nextKey);
+      else if (opts.reselect && rep.done > 0) selectPending(fresh, opts.reselect);
+      report(root, action, target, rep, since);
     } catch (e) {
       const err = parseDecideError(e);
       if (root !== selected) return;
-      if (err.kind === "store") await loadView(root);
+      // Whatever the refusal, the list may be out of date (that is often why it was refused).
+      await loadView(root);
       await failed(root, err, () => void runDecide(action, target, opts));
     } finally {
       busy = false;
     }
   }
 
-  async function runUndo(root: string, u: Undo) {
-    if (root !== selected || !view) return;
+  async function runUndo(root: string, u: Undo, since: string) {
+    if (busy || root !== selected) return;
     let key = u.target.key;
     if (u.byPath) {
-      // The accept made a new record; its id is `<decidedAt>::<path>`, newest for this path.
-      const id = recordIdFor(view.accepted, u.target.scope, key);
+      // Resolve against a fresh fetch, never `view`: a superseded reload can leave it a step behind.
+      busy = true;
+      let fresh: ProjectView | null = null;
+      try {
+        fresh = await getProject(root);
+      } catch {}
+      busy = false;
+      if (root !== selected) return;
+      const id = fresh ? recordIdFor(fresh.accepted, u.target.scope, key, since) : null;
       if (!id) {
-        show({ text: "Couldn't find the accepted record to undo. It may already be reverted.", tone: "error" });
+        show({ text: "Couldn't find that accept to undo — use Revert in the Accepted tab", tone: "error" });
         return;
       }
       key = id;

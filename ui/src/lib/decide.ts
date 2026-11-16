@@ -86,18 +86,35 @@ export function undoFor(action: DecideAction, target: DecideTarget, report: Deci
 
 const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
 
-/** The newest accepted record for `path` in `scope` (the backend's id is `<decidedAt>::<path>`). */
+/**
+ * The accepted record a decision made: the newest for `path` in `scope` stamped at or after
+ * `sinceIso`, the moment just before the call (the backend's id is `<decidedAt>::<path>`). An
+ * older accept of the same path is never returned: undoing it would revert the wrong history entry.
+ */
 export function recordIdFor(
   accepted: { id: string; path: string; scope: string; decidedAt: string }[],
   scope: string,
   path: string,
+  sinceIso: string,
 ): string | null {
-  let best: { id: string; decidedAt: string } | null = null;
+  const since = Date.parse(sinceIso);
+  let best: { id: string; at: number } | null = null;
   for (const r of accepted) {
     if (r.path !== path || norm(r.scope) !== norm(scope)) continue;
-    if (!best || r.decidedAt > best.decidedAt) best = r;
+    const at = Date.parse(r.decidedAt);
+    if (!(at >= since)) continue;
+    if (!best || at > best.at) best = { id: r.id, at };
   }
   return best?.id ?? null;
+}
+
+/** Must match `SETTINGS_UNREADABLE_MESSAGE` in src-tauri/src/commands.rs. */
+export const SETTINGS_UNREADABLE_MESSAGE =
+  "ClaudeGate Desktop couldn't read its settings file (~/.claudegate-desktop/config.json), so decisions are paused. Fix or delete that file.";
+
+/** The read-only refusal caused by an unreadable settings file, and no other. */
+export function isSettingsUnreadable(err: DecideError): boolean {
+  return err.kind === "readOnly" && err.message === SETTINGS_UNREADABLE_MESSAGE;
 }
 
 /** The row to select once `decidedKey` leaves the list: the next one, else the previous, else none. */
@@ -142,17 +159,24 @@ function nameOf(key: string): string {
   return norm(path).split("/").pop() || path;
 }
 
-/** The result bar's sentence. `failed` is true when anything was not decided. */
+export type Tone = "ok" | "warn" | "error";
+
+/**
+ * The result bar's sentence and tone: "error" when nothing was decided because it failed, "warn"
+ * when something failed or a rejected file was left on disk, else "ok".
+ */
 export function summarize(
   action: DecideAction,
   target: DecideTarget,
   report: DecideReport,
-): { text: string; failed: boolean } {
+): { text: string; tone: Tone } {
   const failed = report.errors.length > 0;
+  const tone: Tone = failed && report.done === 0 ? "error" : failed || report.left.length > 0 ? "warn" : "ok";
   if (target.kind === "file") {
     const name = nameOf(target.key);
-    if (report.done === 0 && failed) return { text: `Couldn't ${VERB[action]} ${name}`, failed };
-    return { text: `${PAST[action]} ${name}`, failed };
+    if (report.done === 0 && failed) return { text: `Couldn't ${VERB[action]} ${name}`, tone };
+    if (report.left.length > 0) return { text: `${PAST[action]} ${name} · left on disk (no original to restore)`, tone };
+    return { text: `${PAST[action]} ${name}`, tone };
   }
   const clearing = action === "clearAccepted" || action === "clearRejected";
   const noun = clearing ? (report.done === 1 ? "record" : "records") : report.done === 1 ? "file" : "files";
@@ -162,15 +186,15 @@ export function summarize(
   const text = extra.length
     ? [`${PAST[action]} ${report.done}`, ...extra].join(" · ")
     : `${PAST[action]} ${report.done} ${noun}`;
-  return { text, failed };
+  return { text, tone };
 }
 
 /** What the result bar shows after a decision. `id` changes on every new result. */
 export type ResultMessage = {
   id: number;
   text: string;
-  /** "error" never auto-hides. */
-  tone: "ok" | "warn" | "error";
+  /** Only "ok" auto-hides. */
+  tone: Tone;
   /** A second line, e.g. the store error's "Files changed but…". */
   note?: string;
   undo?: () => void;

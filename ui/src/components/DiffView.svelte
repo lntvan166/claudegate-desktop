@@ -247,6 +247,10 @@
         {#if row.rel.includes("/")}<span class="diff-dir">{row.rel.slice(0, row.rel.lastIndexOf("/") + 1)}</span>{/if}<span class="diff-file">{fileName(row.rel)}</span>
       </span>
       {#if row.newFile}<span class="tag new">New file</span>{/if}
+      {#if row.waiting}
+        <!-- The row's own "waiting for write…" is under its actions while it is selected. -->
+        <span class="tag waiting" title="Captured before Claude wrote it; the write hasn't landed yet">Waiting for Claude's write…</span>
+      {/if}
       <span class="diff-stats num">
         <span class="add">+{row.added}</span>
         <span class="del">−{row.removed}</span>
@@ -358,6 +362,17 @@
     font-size: var(--fs-meta);
     line-height: 18px;
     color: var(--untracked);
+    background: var(--raised);
+  }
+  .tag.waiting {
+    flex: none;
+    padding: 0 6px;
+    border-radius: var(--radius-chip);
+    font-size: var(--fs-meta);
+    font-style: italic;
+    line-height: 18px;
+    white-space: nowrap;
+    color: var(--muted);
     background: var(--raised);
   }
   .diff-stats {

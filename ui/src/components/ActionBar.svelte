@@ -61,6 +61,14 @@
     if (count === 0) confirming = null;
   });
 
+  /** Esc answers no from anywhere, unless the Open-with menu is up (Esc is the menu's first). */
+  function escAnywhere(e: KeyboardEvent) {
+    if (!confirming || e.key !== "Escape" || e.defaultPrevented) return;
+    if (document.querySelector('[role="menu"]')) return;
+    e.preventDefault();
+    cancel();
+  }
+
   /** Focus stays inside the question until it is answered; Esc answers no. */
   function trap(e: KeyboardEvent) {
     if (e.key === "Escape") {
@@ -94,6 +102,8 @@
     <path d="M5.5 3.5 2.5 6.5l3 3M2.5 6.5h7a3.5 3.5 0 0 1 0 7H7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
   </svg>
 {/snippet}
+
+<svelte:window onkeydown={escAnywhere} />
 
 {#if confirming && prompt}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->

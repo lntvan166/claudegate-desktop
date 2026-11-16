@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   actionableCount,
   folderPrefix,
+  isSettingsUnreadable,
   nextAfterDecision,
   parseDecideError,
   recordIdFor,
+  SETTINGS_UNREADABLE_MESSAGE,
   summarize,
   undoFor,
   type DecideReport,
@@ -54,17 +56,34 @@ describe("undoFor", () => {
 
 describe("recordIdFor", () => {
   const rec = (path: string, decidedAt: string, scope = "/w") => ({ id: `${decidedAt}::${path}`, path, scope, decidedAt });
-  it("picks the newest record for the path in the scope", () => {
+  const since = "2026-11-16T11:00:00.000Z";
+  it("picks the record this decision made: same scope and path, decided at or after it started", () => {
     const list = [
       rec("/w/a.ts", "2026-11-16T10:00:00.000Z"),
       rec("/w/a.ts", "2026-11-16T12:00:00.000Z"),
       rec("/w/a.ts", "2026-11-16T13:00:00.000Z", "/other"),
       rec("/w/b.ts", "2026-11-16T14:00:00.000Z"),
     ];
-    expect(recordIdFor(list, "/w", "/w/a.ts")).toBe("2026-11-16T12:00:00.000Z::/w/a.ts");
+    expect(recordIdFor(list, "/w", "/w/a.ts", since)).toBe("2026-11-16T12:00:00.000Z::/w/a.ts");
+  });
+  it("never falls back to an older accept of the same path", () => {
+    const list = [rec("/w/a.ts", "2026-11-16T10:00:00.000Z"), rec("/w/a.ts", "2026-11-16T10:30:00.000Z")];
+    expect(recordIdFor(list, "/w", "/w/a.ts", since)).toBeNull();
+  });
+  it("counts a record stamped at the very start", () => {
+    expect(recordIdFor([rec("/w/a.ts", since)], "/w", "/w/a.ts", since)).toBe(`${since}::/w/a.ts`);
   });
   it("is null when there is none", () => {
-    expect(recordIdFor([], "/w", "/w/a.ts")).toBeNull();
+    expect(recordIdFor([], "/w", "/w/a.ts", since)).toBeNull();
+  });
+});
+
+describe("isSettingsUnreadable", () => {
+  it("is true only for the settings-file refusal", () => {
+    expect(isSettingsUnreadable({ kind: "readOnly", message: SETTINGS_UNREADABLE_MESSAGE })).toBe(true);
+    expect(isSettingsUnreadable({ kind: "readOnly", message: "ClaudeGate Desktop is in read-only mode. Turn it off to make decisions." })).toBe(false);
+    expect(isSettingsUnreadable({ kind: "readOnly", message: "cannot read session file: permission denied" })).toBe(false);
+    expect(isSettingsUnreadable({ kind: "invalid", message: SETTINGS_UNREADABLE_MESSAGE })).toBe(false);
   });
 });
 
@@ -121,26 +140,33 @@ describe("parseDecideError", () => {
 
 describe("summarize", () => {
   it("names a single file", () => {
-    expect(summarize("accept", file("/w/src/client.ts"), ok(1))).toEqual({ text: "Accepted client.ts", failed: false });
-    expect(summarize("reject", file("/w/src/client.ts"), ok(1))).toEqual({ text: "Rejected client.ts", failed: false });
-    expect(summarize("reapply", file("/w/src/client.ts"), ok(1))).toEqual({ text: "Reapplied client.ts", failed: false });
+    expect(summarize("accept", file("/w/src/client.ts"), ok(1))).toEqual({ text: "Accepted client.ts", tone: "ok" });
+    expect(summarize("reject", file("/w/src/client.ts"), ok(1))).toEqual({ text: "Rejected client.ts", tone: "ok" });
+    expect(summarize("reapply", file("/w/src/client.ts"), ok(1))).toEqual({ text: "Reapplied client.ts", tone: "ok" });
   });
   it("names a reverted record by its path, not its id", () => {
     expect(summarize("revert", file("2026-11-16T10:00:00.000Z::/w/src/client.ts"), ok(1)).text).toBe("Reverted client.ts");
+  });
+  it("a single reject that left the file on disk says so, as a warning", () => {
+    expect(summarize("reject", file("/w/scripts/seed.py"), ok(1, ["/w/scripts/seed.py"]))).toEqual({
+      text: "Rejected seed.py · left on disk (no original to restore)",
+      tone: "warn",
+    });
   });
   it("counts a bulk decision, with what was left and what failed", () => {
     expect(summarize("accept", { kind: "all" }, ok(12)).text).toBe("Accepted 12 files");
     expect(summarize("accept", { kind: "all" }, ok(1)).text).toBe("Accepted 1 file");
     expect(summarize("reject", { kind: "all" }, ok(12, ["a", "b"], [["c", "x"]]))).toEqual({
       text: "Rejected 12 · 2 left on disk · 1 failed",
-      failed: true,
+      tone: "warn",
     });
+    expect(summarize("reject", { kind: "all" }, ok(3, ["a"])).tone).toBe("warn");
     expect(summarize("clearAccepted", { kind: "all" }, ok(3)).text).toBe("Cleared 3 records");
   });
-  it("a single file that failed says so", () => {
+  it("a single file that failed says so, as an error", () => {
     expect(summarize("reject", file("/w/a.ts"), ok(0, [], [["/w/a.ts", "EACCES"]]))).toEqual({
       text: "Couldn't reject a.ts",
-      failed: true,
+      tone: "error",
     });
   });
 });
