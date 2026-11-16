@@ -76,7 +76,6 @@ fn unknown_action_is_an_error_before_anything_is_loaded() {
     let out = fx.run(&Mutex::new(()), "obliterate", &file(&fx.root(), &keys[0]));
     let e: Value = serde_json::from_str(&out.result.unwrap_err()).unwrap();
     assert_eq!(e["kind"], "invalid");
-    assert!(!out.changed);
     assert_eq!(fs::read_to_string(fx.session_file()).unwrap(), before);
     assert!(!fx.paths.desktop_home.join("backups").exists());
 }
@@ -94,7 +93,6 @@ fn malformed_targets_are_errors() {
         let out = fx.run(&lock, "accept", &t);
         let e: Value = serde_json::from_str(&out.result.unwrap_err()).unwrap();
         assert_eq!(e["kind"], "invalid");
-        assert!(!out.changed);
     }
     assert_eq!(fx.session()["files"].as_object().unwrap().len(), 1);
 }
@@ -116,7 +114,6 @@ fn read_only_config_refuses_and_leaves_the_sandbox_alone() {
     save_read_only(&fx.cfg, false, None).unwrap();
     let out = fx.run(&Mutex::new(()), "accept", &file(&fx.root(), &keys[0]));
     assert_eq!(out.result.unwrap().done, 1);
-    assert!(out.changed);
 }
 
 #[test]
@@ -236,7 +233,6 @@ fn run_decide_refuses_an_unsafe_desktop_home_before_touching_anything() {
         let out = fx.run(&Mutex::new(()), "accept", &file(&fx.root(), &keys[0]));
         let e: Value = serde_json::from_str(&out.result.unwrap_err()).unwrap();
         assert_eq!(e["kind"], "invalid");
-        assert!(!out.changed);
         assert_eq!(fs::read_to_string(fx.session_file()).unwrap(), before);
     }
     assert!(!std::path::Path::new("rel").exists());
@@ -254,7 +250,6 @@ fn malformed_config_pauses_decisions_and_a_missing_one_does_not() {
         let e: Value = serde_json::from_str(&out.result.unwrap_err()).unwrap();
         assert_eq!(e["kind"], "readOnly");
         assert!(e["message"].as_str().unwrap().contains("couldn't read its settings file"));
-        assert!(!out.changed);
         assert_eq!(fs::read_to_string(fx.session_file()).unwrap(), before);
         assert_eq!(fs::read_to_string(&fx.cfg).unwrap(), bad, "config must be left alone");
     }
@@ -279,4 +274,15 @@ fn bulk_keys_limit_the_action_to_what_was_confirmed() {
     assert_eq!(dto.keys, Some(vec!["/w/src/a".to_owned()]));
     let dto: TargetDto = serde_json::from_value(json!({ "kind": "all" })).unwrap();
     assert_eq!(dto.keys, None);
+}
+
+/// M7: one guaranteed refresh per decision. The UI reloads the project after every decide (and
+/// the watcher sees the session rename), so the command itself must not emit `changed` too.
+#[test]
+fn the_decide_command_does_not_emit_a_change_event() {
+    let src = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands.rs")).unwrap();
+    let start = src.find("pub async fn decide(").expect("decide command");
+    let body = &src[start..];
+    let end = body.find("\n}\n").expect("end of decide");
+    assert!(!body[..end].contains(".emit("), "decide emits a change event:\n{}", &body[..end]);
 }

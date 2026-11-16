@@ -85,7 +85,7 @@ export interface Api {
   setPendingCount(count: number): Promise<void>;
   /**
    * Accepts, rejects, reverts, reapplies or clears. Rejects with a JSON string (see
-   * `parseDecideError`). The backend emits the change event itself on success and store errors.
+   * `parseDecideError`). Emits no change event: the caller reloads the project afterwards.
    */
   decide(root: string, action: DecideAction, target: DecideTarget): Promise<DecideReport>;
   /** The global read-only switch in ~/.claudegate-desktop/config.json. */

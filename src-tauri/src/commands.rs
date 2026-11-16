@@ -11,7 +11,7 @@ use claudegate_core::textfile::{read_text, TextFile};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::{Emitter, Manager, State};
+use tauri::{Manager, State};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -265,11 +265,11 @@ fn check_desktop_home(dh: &Path, cg_home: &Path) -> Result<(), String> {
 
 pub struct DecideOutcome {
     pub result: Result<DecideReport, String>,
-    /// Files may have changed (Ok, or a `Store` error): the caller should emit `changed` now.
-    pub changed: bool,
 }
 
-/// The whole `decide` command minus Tauri. Validates, then takes `lock`, reads `readOnly` from
+/// The whole `decide` command minus Tauri. It emits no change event: the UI reloads the project
+/// after every decision (success or failure), which is the one guaranteed refresh, and the
+/// watcher also sees the session file's rename. Validates, then takes `lock`, reads `readOnly` from
 /// the config file afresh and runs the core decision.
 pub fn run_decide(
     lock: &Mutex<()>,
@@ -284,10 +284,10 @@ pub fn run_decide(
     let parsed = parse_action(action).and_then(|a| parse_target(target_dto).map(|t| (a, t)));
     let (action, target) = match parsed {
         Ok(p) => p,
-        Err(m) => return DecideOutcome { result: Err(invalid_json(&m)), changed: false },
+        Err(m) => return DecideOutcome { result: Err(invalid_json(&m)) },
     };
     if let Err(m) = check_desktop_home(&paths.desktop_home, &paths.home) {
-        return DecideOutcome { result: Err(invalid_json(&m)), changed: false };
+        return DecideOutcome { result: Err(invalid_json(&m)) };
     }
     let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
     let read_only = match crate::config::read_only_strict(config_path) {
@@ -296,16 +296,13 @@ pub fn run_decide(
             eprintln!("claudegate: {}: {e}", config_path.display());
             let message = SETTINGS_UNREADABLE_MESSAGE;
             let j = serde_json::json!({ "kind": "readOnly", "message": message }).to_string();
-            return DecideOutcome { result: Err(j), changed: false };
+            return DecideOutcome { result: Err(j) };
         }
     };
     let keys = target_dto.keys.as_deref();
     match decide_confirmed(paths, &resolve_root(Path::new(root)), action, target, keys, read_only, now_iso) {
-        Ok(r) => DecideOutcome { result: Ok(r), changed: true },
-        Err(e) => {
-            let changed = matches!(e, DecideError::Store { .. });
-            DecideOutcome { result: Err(error_json(&e)), changed }
-        }
+        Ok(r) => DecideOutcome { result: Ok(r) },
+        Err(e) => DecideOutcome { result: Err(error_json(&e)) },
     }
 }
 
@@ -317,16 +314,15 @@ pub async fn decide(
     app: tauri::AppHandle,
 ) -> Result<DecideReport, String> {
     // The blocking task needs an owned handle; the lock is reached through it.
-    let handle = app.clone();
+    let handle = app;
     let out = blocking({
-        let root = root.clone();
         move || {
             let lock = handle.state::<WriteLock>();
             let home = claudegate_home();
             let cfg = crate::config::config_path();
             let desktop_home = match desktop_home_for(&cfg, &home) {
                 Ok(d) => d,
-                Err(m) => return DecideOutcome { result: Err(invalid_json(&m)), changed: false },
+                Err(m) => return DecideOutcome { result: Err(invalid_json(&m)) },
             };
             let paths = DecidePaths { home, desktop_home };
             run_decide(
@@ -341,8 +337,5 @@ pub async fn decide(
         }
     })
     .await?;
-    if out.changed {
-        let _ = app.emit(crate::watch::CHANGED_EVENT, crate::watch::ChangedPayload { roots: vec![root] });
-    }
     out.result
 }
