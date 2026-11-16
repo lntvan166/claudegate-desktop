@@ -35,7 +35,7 @@ You run this on the real machine. It checks that ClaudeGate Desktop and the VS C
    Expected: `b.txt` holds Claude's version again (`cat` shows the edited text) and is pending in the app and in VS Code.
 6. Check backups: `find ~/.claudegate-desktop/backups -name '*.json' | wc -l`.
    Expected: B0 (Setup 3) plus 3, one new file per decision you made in the app (steps 2, 3 and 5), unless a project already holds 50 (the newest 50 are kept, so the total stops growing). VS Code's write in step 4 is not backed up by the app. New files sit under `backups/<hash>/`, named like `20261116T093012.345Z.json`.
-7. Reject all. Make sure at least 3 changes are pending, one of them a file Claude created (ask Claude to create `new.txt` and edit two others, then Reapply or re-edit as needed).
+7. Reject all. Make sure at least 3 changes are pending, one of them a file Claude created (ask Claude to edit `a.txt` and `c.txt` again and to create `new.txt`; by now steps 2 to 5 have left nothing else pending).
    - Click Reject all.
      Expected: an inline confirmation reads "Reject N files? Originals are restored and files Claude created are deleted.", where N is the number of real pending changes. Cancel is focused.
    - Press Esc.
@@ -46,8 +46,8 @@ You run this on the real machine. It checks that ClaudeGate Desktop and the VS C
    Expected: the new pending `a.txt` is still there afterwards. Nothing Claude captured is lost.
 9. Read-only switch: click the read-only toggle in the app (its tooltip is "Turn on read-only mode to block every decision.").
    Expected: the accept, reject and other decision actions are hidden, and a banner reads "Read-only mode is on" with a [Turn off] button. A refused write would say: "ClaudeGate Desktop is in read-only mode. Turn it off to make decisions." Click [Turn off]: the banner goes and the actions return.
-10. Break the settings file: `echo '{' > ~/.claudegate-desktop/config.json`, then look at the app.
-   Expected: the banner reads "ClaudeGate Desktop couldn't read its settings file (~/.claudegate-desktop/config.json), so decisions are paused. Fix or delete that file." with a [Try again] button. Restore the file (`echo '{"readOnly": false}' > ~/.claudegate-desktop/config.json`), click [Try again], and decisions return.
+10. Break the settings file: `echo '{' > ~/.claudegate-desktop/config.json`. Before any decision the app still looks normal and the actions stay enabled, because it only finds out when a decision is attempted. Now try one, for example accept a pending file.
+   Expected: the decision is refused and the banner reads "ClaudeGate Desktop couldn't read its settings file (~/.claudegate-desktop/config.json), so decisions are paused. Fix or delete that file." with a [Try again] button. Restore the file (`echo '{"readOnly": false}' > ~/.claudegate-desktop/config.json`), click [Try again], and decisions return.
 11. Optional, only if you have a session file to spare: a project whose session cannot be read shows "This project's review log couldn't be read, so decisions are paused." and a session from a newer ClaudeGate shows "This project was written by a newer ClaudeGate. Update the app to make decisions here.". In both cases decisions stay off for that project.
 
 ## Cleanup
