@@ -2,6 +2,7 @@
 // Loaded through a DEV-guarded dynamic import in api.ts, so it never ships.
 import type {
   Api,
+  ChangedPayload,
   DiffKind,
   DiffPayload,
   EditorConfig,
@@ -188,6 +189,22 @@ let config: EditorConfig = { editor: "zed {path}:{line}", customEditor: "nvim +{
 
 const delay = <T>(v: T) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), 120));
 
+const handlers = new Set<(p: ChangedPayload) => void>();
+
+/**
+ * Dev preview only: `__mock.drop("client.ts")` removes a pending row and fires the change event,
+ * the path a real accept in VS Code takes, so a selected row disappears under the diff pane.
+ */
+(globalThis as Record<string, unknown>).__mock = {
+  drop(suffix: string) {
+    for (const v of Object.values(views)) {
+      const before = v.pending.length;
+      v.pending = v.pending.filter((p) => !p.path.endsWith(suffix));
+      if (v.pending.length !== before) for (const h of handlers) h({ roots: [v.root] });
+    }
+  },
+};
+
 export const mockApi: Api = {
   listProjects: () =>
     delay<ProjectSummary[]>(
@@ -212,7 +229,10 @@ export const mockApi: Api = {
       after: { kind: "text", text: after },
     });
   },
-  onChanged: async () => () => {},
+  onChanged: async (handler) => {
+    handlers.add(handler);
+    return () => void handlers.delete(handler);
+  },
   getConfig: () => delay(config),
   setEditor: (template) => {
     config = { ...config, editor: template };

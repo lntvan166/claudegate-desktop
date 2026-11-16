@@ -5,6 +5,7 @@
   import { iconFor, type IconTheme } from "../lib/icons";
   import { languageFor } from "../lib/language";
   import { buildTheme, themeName } from "../lib/monacoTheme";
+  import { paneState } from "../lib/paneState";
   import type { Row } from "../lib/rows";
   import OpenWith from "./OpenWith.svelte";
 
@@ -47,8 +48,9 @@
 
   let payload = $state<DiffPayload | null>(null);
   /** The row `payload` was fetched for; models are keyed on it, never on the current selection. */
-  let payloadIdent = "";
+  let payloadIdent = $state("");
   let loadError = $state<string | null>(null);
+  let loading = $state(false);
   let host: HTMLDivElement | undefined = $state();
   let monaco: Monaco | null = null;
   let editor: DiffEditor | null = $state(null);
@@ -56,8 +58,11 @@
   let shownIdent = "";
   let seq = 0;
 
-  const binary = $derived(payload?.before.kind === "binary" || payload?.after.kind === "binary");
-  const isText = $derived(!!payload && !binary);
+  const rowIdent = $derived(row ? `${kind}\u0000${row.key}` : "");
+  /** The payload only when it belongs to the selected row: never another row's text under this one. */
+  const shown = $derived(row && payloadIdent === rowIdent ? payload : null);
+  /** Exactly one of empty / loading / error / binary / editor is on screen. */
+  const pane = $derived(paneState(row, shown, loading, loadError));
 
   // Fetch the selected row's diff; `version` re-runs it when the project reloads.
   $effect(() => {
@@ -67,30 +72,37 @@
     const s = ++seq;
     if (!r) {
       payload = null;
+      payloadIdent = "";
       loadError = null;
+      loading = false;
       return;
     }
     const ident = `${k}\u0000${r.key}`;
+    loading = true;
+    // A different row drops the last one's error; a refresh of the same row keeps what it shows.
+    if (untrack(() => payloadIdent) !== ident) loadError = null;
     getDiff(root, r.scope, k, r.key).then(
       (p) => {
         if (s !== seq) return;
         payloadIdent = ident;
         payload = p;
         loadError = null;
+        loading = false;
       },
       (e) => {
         if (s !== seq) return;
         payload = null;
+        payloadIdent = "";
         loadError = String(e);
+        loading = false;
       },
     );
   });
 
   // A different row starts at line 1 until its diff is computed. Keyed on the row's key, not the
   // object: a refresh hands in a fresh object for the same row and must keep the computed line.
-  const rowKey = $derived(row ? `${kind}\u0000${row.key}` : "");
   $effect(() => {
-    void rowKey;
+    void rowIdent;
     untrack(() => (firstLine = 1));
   });
 
@@ -154,11 +166,25 @@
     return s.kind === "text" ? s.text : "";
   }
 
+  /** Detach and dispose the models, so a hidden editor holds no file. */
+  function clearModels(ed: DiffEditor) {
+    const cur = ed.getModel();
+    if (!cur) return;
+    ed.setModel(null);
+    cur.original.dispose();
+    cur.modified.dispose();
+    shownIdent = "";
+  }
+
   // Push the payload into the editor: new models for a new row, in-place text for a refresh.
   $effect(() => {
-    const p = payload;
+    const p = shown;
     const ed = editor;
-    if (!p || !row || !isText) return;
+    const state = pane;
+    if (state !== "editor" || !p) {
+      if (ed) untrack(() => clearModels(ed));
+      return;
+    }
     if (!ed) {
       void ensureEditor();
       return;
@@ -260,8 +286,10 @@
   {/if}
 
   <div class="body">
-    <div class="editor" class:hidden={!row || !isText} bind:this={host}></div>
-    {#if !row}
+    <!-- display:none, not visibility:hidden: Monaco sets an inline `visibility: visible` on both
+         sides of the diff, which beat the inherited hidden and drew code under the empty state. -->
+    <div class="editor" hidden={pane !== "editor"} bind:this={host}></div>
+    {#if pane === "empty"}
       <div class="placeholder">
         <p class="ph-title">Select a file to see its changes</p>
         <dl class="keys">
@@ -271,12 +299,16 @@
           <div><dt><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></dt><dd>Pending, accepted, rejected</dd></div>
         </dl>
       </div>
-    {:else if loadError}
+    {:else if pane === "loading"}
+      <div class="placeholder loading" aria-busy="true">
+        <p class="ph-body">Loading diff…</p>
+      </div>
+    {:else if pane === "error"}
       <div class="placeholder">
         <p class="ph-title">Couldn't load this diff</p>
         <p class="ph-body path">{loadError}</p>
       </div>
-    {:else if binary}
+    {:else if pane === "binary"}
       <div class="placeholder">
         <p class="ph-title">Binary file, not shown</p>
       </div>
@@ -412,8 +444,22 @@
     position: absolute;
     inset: 0;
   }
-  .editor.hidden {
-    visibility: hidden;
+  .editor[hidden] {
+    display: none;
+  }
+  /* Quick fetches never show it; only a slow one fades in. */
+  .loading {
+    animation: appear 120ms var(--ease) 250ms both;
+  }
+  @keyframes appear {
+    from {
+      opacity: 0;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .loading {
+      animation: none;
+    }
   }
 
   .placeholder {
