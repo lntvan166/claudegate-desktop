@@ -135,7 +135,8 @@
     return i === -1 ? "" : rel.slice(0, i);
   }
 
-  const pad = (depth: number) => 10 + depth * 14;
+  /** The sheet's inner padding (12px) holds at depth 0, in every pane width and rail state. */
+  const pad = (depth: number) => 12 + depth * 14;
 
   function rowEl(id: string): HTMLElement | null {
     return treeEl?.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`) ?? null;
@@ -615,6 +616,8 @@
     height: var(--row-h);
     padding-right: 14px;
     white-space: nowrap;
+    /* A row never paints past its own width, so the list never gains a sideways scroll. */
+    overflow: hidden;
     color: var(--text);
   }
   .row:hover,
@@ -699,7 +702,7 @@
 
   .group {
     height: 30px;
-    padding-left: 8px;
+    padding-left: 12px;
     margin-top: 6px;
     font-weight: 500;
     color: var(--muted);

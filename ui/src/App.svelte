@@ -542,7 +542,23 @@
     void setPendingCount(totalPending).catch(() => {});
   });
 
+  /**
+   * Nothing in the window scrolls sideways except inside Monaco. A WebView without `overflow: clip`
+   * still lets focus() and scrollIntoView() scroll a clipped box, which slid the review column
+   * under the window's left edge; undo any such scroll as it happens.
+   */
+  function pinScroll(e: Event) {
+    const el = e.target;
+    if (!(el instanceof HTMLElement) || el.closest(".monaco-editor")) return;
+    if (el.scrollLeft !== 0) el.scrollLeft = 0;
+  }
+  function pinWindow() {
+    if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0);
+  }
+
   onMount(() => {
+    document.addEventListener("scroll", pinScroll, true);
+    window.addEventListener("scroll", pinWindow);
     const mq = matchMedia("(prefers-color-scheme: light)");
     const sync = () => (theme = mq.matches ? "light" : "dark");
     sync();
@@ -564,6 +580,8 @@
 
     return () => {
       mq.removeEventListener("change", sync);
+      document.removeEventListener("scroll", pinScroll, true);
+      window.removeEventListener("scroll", pinWindow);
       window.removeEventListener("keydown", onKey);
       rechecks.clear();
       void off.then((f) => f());
@@ -788,6 +806,8 @@
     position: relative;
     height: 100vh;
     background: var(--frame);
+    overflow: hidden;
+    overflow: clip;
   }
 
   /* Collapsing or expanding the projects slides the columns, briefly; a drag never animates. */
@@ -894,6 +914,9 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-sheet);
     overflow: hidden;
+    /* clip, where supported: content can never be scrolled sideways, not even by focus() or
+       scrollIntoView, which can scroll an overflow:hidden box and slide the tree off its edge. */
+    overflow: clip;
   }
 
   .review {
@@ -901,6 +924,8 @@
     flex-direction: column;
     min-height: 0;
     min-width: 0;
+    overflow: hidden;
+    overflow: clip;
     border-right: 1px solid var(--rule);
   }
 
@@ -930,7 +955,8 @@
   .scroll {
     flex: 1;
     min-height: 0;
-    overflow: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
   }
 
   .notice {

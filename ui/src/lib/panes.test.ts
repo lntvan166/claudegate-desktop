@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CHROME, DEFAULTS, MIN, RAIL, fit, keyStep, layout, load, loadCollapsed, maxFor, resize, reset, save, toggleCollapsed, withWidth } from "./panes";
+import { CHROME, DEFAULTS, MIN, RAIL, STACK_MAX, fit, keyStep, layout, load, loadCollapsed, maxFor, resize, reset, save, toggleCollapsed, withWidth } from "./panes";
 
 const WIDE = 1600;
 
@@ -118,5 +118,28 @@ describe("stacked", () => {
     expect(stacked(720)).toBe(true);
     expect(stacked(480)).toBe(true);
     expect(stacked(721)).toBe(false);
+  });
+});
+
+describe("layout never pushes a pane past the sheet (UX wave 8)", () => {
+  it("in every rail state and window width, the panes fit and the diff keeps its minimum once it can", () => {
+    for (const collapsed of [false, true]) {
+      for (let total = STACK_MAX + 1; total <= 2600; total += 7) {
+        for (const tree of [1, 240, 372, 900, 5000]) {
+          for (const projects of [1, 228, 600, 5000]) {
+            const w = layout({ projects, tree }, total, collapsed);
+            const diff = total - CHROME - w.projects - w.tree;
+            expect(w.tree).toBeGreaterThanOrEqual(MIN.tree);
+            expect(w.projects).toBeGreaterThanOrEqual(collapsed ? RAIL : MIN.projects);
+            if (total >= CHROME + MIN.projects + MIN.tree + MIN.diff) expect(diff).toBeGreaterThanOrEqual(MIN.diff);
+            expect(diff).toBeGreaterThan(0);
+            // A drag to the splitter's own max lands inside the same bounds.
+            const max = maxFor(w, "tree", total);
+            const after = layout(withWidth({ projects, tree }, "tree", max + 500, total, collapsed), total, collapsed);
+            expect(total - CHROME - after.projects - after.tree).toBeGreaterThanOrEqual(Math.min(MIN.diff, diff));
+          }
+        }
+      }
+    }
   });
 });
