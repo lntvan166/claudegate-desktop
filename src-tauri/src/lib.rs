@@ -24,6 +24,7 @@ pub fn run() {
             config::get_config,
             config::set_editor,
             config::set_read_only,
+            config::set_hidden_projects,
             editor::open_in_editor,
             tray::set_pending_count
         ])

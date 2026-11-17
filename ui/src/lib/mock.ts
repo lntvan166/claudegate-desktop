@@ -366,6 +366,10 @@ export const mockApi: Api = {
     config = { ...config, readOnly: on };
     return delay(config);
   },
+  setHiddenProjects: (roots) => {
+    config = { ...config, hiddenProjects: [...new Set(roots.map((r) => r.trim()).filter(Boolean))] };
+    return delay(config);
+  },
 };
 
 const UNKNOWN = "This project was written by a newer ClaudeGate. Update the app to make decisions here.";

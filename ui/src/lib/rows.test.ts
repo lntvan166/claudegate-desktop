@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProjectSummary, ProjectView } from "./api";
-import { groupsFor, initials, nodeKey, selectionAfterList, sortProjects } from "./rows";
+import { groupsFor, initials, nodeKey, selectionAfterList, sortProjects, splitHidden } from "./rows";
 import { buildTree } from "./tree";
 
 const view: ProjectView = {
@@ -122,5 +122,25 @@ describe("initials", () => {
     expect(initials("-x-")).toBe("X");
     expect(initials("")).toBe("?");
     expect(initials("ổn-định")).toBe("ỔĐ");
+  });
+});
+
+describe("splitHidden (UX wave 7)", () => {
+  const p = (root: string, pending = 1): ProjectSummary => ({ root, name: root.split("/").pop()!, missing: false, pending, nextRecheckAt: null });
+  const list = [p("/w/a"), p("/w/b", 4), p("/w/c", 0)];
+
+  it("moves hidden roots out of the list, keeping the order of both", () => {
+    const s = splitHidden(list, ["/w/c", "/w/a"]);
+    expect(s.visible.map((x) => x.root)).toEqual(["/w/b"]);
+    expect(s.hidden.map((x) => x.root)).toEqual(["/w/a", "/w/c"]);
+  });
+
+  it("ignores hidden roots that are not listed, and hides nothing by default", () => {
+    expect(splitHidden(list, ["/gone"]).hidden).toEqual([]);
+    expect(splitHidden(list, undefined).visible).toHaveLength(3);
+  });
+
+  it("matches a root written with a trailing slash", () => {
+    expect(splitHidden(list, ["/w/b/"]).hidden.map((x) => x.root)).toEqual(["/w/b"]);
   });
 });

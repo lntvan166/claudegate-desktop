@@ -17,6 +17,7 @@
     openInEditor,
     setEditor,
     setPendingCount,
+    setHiddenProjects,
     setReadOnly,
     usingMock,
     type DiffKind,
@@ -45,7 +46,7 @@
   import { editorLabel, ZED } from "./lib/editors";
   import type { IconTheme } from "./lib/icons";
   import { actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL } from "./lib/keys";
-  import { basename, groupsFor, scopeLabel, selectionAfterList, sortProjects, type Row } from "./lib/rows";
+  import { basename, groupsFor, scopeLabel, selectionAfterList, sortProjects, splitHidden, type Row } from "./lib/rows";
   import { Rechecks } from "./lib/recheck";
   import {
     MIN,
@@ -161,7 +162,9 @@
   }
 
   const current = $derived(projects.find((p) => p.root === selected) ?? null);
-  const totalPending = $derived(projects.reduce((s, p) => s + p.pending, 0));
+  /** Hidden projects are out of the way: off the rail, out of the header total and the tray. */
+  const split = $derived(splitHidden(projects, config.hiddenProjects));
+  const totalPending = $derived(split.visible.reduce((s, p) => s + p.pending, 0));
   const counts = $derived({
     pending: view?.pending.length ?? 0,
     accepted: view?.accepted.length ?? 0,
@@ -273,7 +276,10 @@
     try {
       remembered = localStorage.getItem(STORE_KEY);
     } catch {}
-    const next = selectionAfterList(projects, selected, remembered);
+    // A hidden project stays open while it is the one on screen; otherwise pick among the shown.
+    const shown = splitHidden(projects, config.hiddenProjects).visible;
+    const keep = selected && projects.some((p) => p.root === selected) ? selected : null;
+    const next = keep ? ({ kind: "keep", root: keep } as const) : selectionAfterList(shown, null, remembered);
     switch (next.kind) {
       case "keep":
         await loadView(next.root);
@@ -499,6 +505,18 @@
     void runDecide(action, all);
   }
 
+  async function setHidden(root: string, hide: boolean) {
+    const now = config.hiddenProjects ?? [];
+    const roots = hide ? [...now, root] : now.filter((r) => r !== root);
+    try {
+      config = await setHiddenProjects(roots);
+      const name = projects.find((p) => p.root === root)?.name ?? basename(root);
+      announce(hide ? `${name} hidden` : `${name} shown`);
+    } catch (e) {
+      show({ text: `Couldn't ${hide ? "hide" : "show"} the project: ${e}`, tone: "error" });
+    }
+  }
+
   async function changeReadOnly(on: boolean) {
     try {
       config = await setReadOnly(on);
@@ -616,11 +634,13 @@
     sync();
     mq.addEventListener("change", sync);
 
-    void loadProjects();
-    getConfig().then(
-      (c) => (config = c),
-      () => {},
-    );
+    // The config first: it says which projects are hidden, so the first pick is a shown one.
+    getConfig()
+      .then(
+        (c) => (config = c),
+        () => {},
+      )
+      .finally(() => void loadProjects());
     window.addEventListener("keydown", onKey);
     const off = onChanged(({ roots }) => {
       if (roots.length === 0) {
@@ -691,7 +711,10 @@
   </header>
 
   <ProjectList
-    {projects}
+    projects={split.visible}
+    hidden={split.hidden}
+    onhide={(r) => void setHidden(r, true)}
+    onshow={(r) => void setHidden(r, false)}
     {selected}
     loading={loadingList}
     collapsed={railed}

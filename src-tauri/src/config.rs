@@ -28,11 +28,15 @@ pub struct Config {
     /// When true every decision is refused. Read from disk on each call, never cached.
     #[serde(default)]
     pub read_only: bool,
+    /// Project roots the user hid from the rail, the header total and the tray. Only this file
+    /// records it; `~/.claudegate/workspace-roots.json` is never touched.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_projects: Vec<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { editor: DEFAULT_EDITOR.into(), custom_editor: None, read_only: false }
+        Self { editor: DEFAULT_EDITOR.into(), custom_editor: None, read_only: false, hidden_projects: vec![] }
     }
 }
 
@@ -60,7 +64,23 @@ fn from_value(v: &serde_json::Value) -> Config {
         editor: upgraded(non_empty(v.get("editor").and_then(|e| e.as_str())).unwrap_or_else(|| DEFAULT_EDITOR.into())),
         custom_editor: non_empty(v.get("customEditor").and_then(|e| e.as_str())),
         read_only: v.get("readOnly").and_then(|e| e.as_bool()).unwrap_or(false),
+        hidden_projects: v
+            .get("hiddenProjects")
+            .and_then(|h| h.as_array())
+            .map(|a| clean_roots(a.iter().filter_map(|r| r.as_str())))
+            .unwrap_or_default(),
     }
+}
+
+/// Trimmed, without blanks or repeats, in the order given.
+fn clean_roots<'a>(roots: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for r in roots.map(str::trim).filter(|r| !r.is_empty()) {
+        if !out.iter().any(|o| o == r) {
+            out.push(r.to_string());
+        }
+    }
+    out
 }
 
 /// Reads the config. A missing file is created with the defaults (best effort); an unreadable or
@@ -178,6 +198,15 @@ pub fn save_editor(path: &Path, template: &str, guard: Option<&Path>) -> Result<
     })
 }
 
+/// Persists the hidden project roots, keeping every other key in the file.
+pub fn save_hidden_projects(path: &Path, roots: &[String], guard: Option<&Path>) -> Result<Config, String> {
+    let roots = clean_roots(roots.iter().map(String::as_str));
+    update_config(path, guard, |obj, _| {
+        obj.insert("hiddenProjects".into(), serde_json::json!(roots));
+        Ok(())
+    })
+}
+
 /// Persists the read-only switch, keeping every other key in the file.
 pub fn save_read_only(path: &Path, on: bool, guard: Option<&Path>) -> Result<Config, String> {
     update_config(path, guard, |obj, _| {
@@ -211,6 +240,15 @@ pub async fn set_read_only(on: bool) -> Result<Config, String> {
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+pub async fn set_hidden_projects(roots: Vec<String>) -> Result<Config, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_hidden_projects(&config_path(), &roots, Some(&claudegate_core::paths::claudegate_home()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,7 +266,7 @@ mod tests {
     fn serializes_camel_case_without_absent_custom() {
         let v = serde_json::to_value(Config::default()).unwrap();
         assert_eq!(v, serde_json::json!({ "editor": "zed {path}:{line}:{col}", "readOnly": false }));
-        let c = Config { editor: VSCODE.into(), custom_editor: Some("x".into()), read_only: false };
+        let c = Config { editor: VSCODE.into(), custom_editor: Some("x".into()), read_only: false, hidden_projects: vec![] };
         assert_eq!(serde_json::to_value(c).unwrap()["customEditor"], "x");
     }
 }

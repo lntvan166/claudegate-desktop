@@ -92,6 +92,8 @@ export interface Api {
   decide(root: string, action: DecideAction, target: DecideTarget): Promise<DecideReport>;
   /** The global read-only switch in ~/.claudegate-desktop/config.json. */
   setReadOnly(on: boolean): Promise<EditorConfig>;
+  /** The hidden project roots in ~/.claudegate-desktop/config.json (never workspace-roots.json). */
+  setHiddenProjects(roots: string[]): Promise<EditorConfig>;
 }
 
 const tauriApi: Api = {
@@ -105,6 +107,7 @@ const tauriApi: Api = {
   setPendingCount: (count) => invoke<void>("set_pending_count", { count }),
   decide: (root, action, target) => invoke<DecideReport>("decide", { root, action, target }),
   setReadOnly: (on) => invoke<EditorConfig>("set_read_only", { on }),
+  setHiddenProjects: (roots) => invoke<EditorConfig>("set_hidden_projects", { roots }),
 };
 
 let chosen: Promise<Api> | undefined;
@@ -137,3 +140,4 @@ export const setPendingCount = async (count: number) => (await api()).setPending
 export const decide = async (root: string, action: DecideAction, target: DecideTarget) =>
   (await api()).decide(root, action, target);
 export const setReadOnly = async (on: boolean) => (await api()).setReadOnly(on);
+export const setHiddenProjects = async (roots: string[]) => (await api()).setHiddenProjects(roots);

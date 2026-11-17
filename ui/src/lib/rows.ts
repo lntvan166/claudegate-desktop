@@ -121,3 +121,18 @@ export function initials(name: string): string {
     .map((w) => [...w][0].toLocaleUpperCase())
     .join("");
 }
+
+/**
+ * The project list split by the config's `hiddenProjects`: hidden projects leave the rail and count
+ * toward nothing; they wait in the "Hidden projects" disclosure. Both keep the list's order.
+ */
+export function splitHidden(
+  projects: ProjectSummary[],
+  hiddenRoots: string[] | undefined,
+): { visible: ProjectSummary[]; hidden: ProjectSummary[] } {
+  const hidden = new Set((hiddenRoots ?? []).map(norm));
+  return {
+    visible: projects.filter((p) => !hidden.has(norm(p.root))),
+    hidden: projects.filter((p) => hidden.has(norm(p.root))),
+  };
+}

@@ -9,6 +9,9 @@
     collapsed = false,
     onselect,
     ontoggle,
+    hidden = [],
+    onhide = () => {},
+    onshow = () => {},
   }: {
     projects: ProjectSummary[];
     selected: string | null;
@@ -17,7 +20,21 @@
     collapsed?: boolean;
     onselect: (root: string) => void;
     ontoggle: () => void;
+    /** Projects the user hid: listed only in the "Hidden projects" disclosure. */
+    hidden?: ProjectSummary[];
+    onhide?: (root: string) => void;
+    onshow?: (root: string) => void;
   } = $props();
+
+  let showHidden = $state(false);
+
+  /** `h` hides the focused project, as its Hide button does. */
+  function onProjectKey(e: KeyboardEvent, root: string) {
+    if (e.key !== "h" || e.ctrlKey || e.metaKey || e.altKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onhide(root);
+  }
 
   function railName(p: ProjectSummary): string {
     if (p.missing) return `${p.name}, folder missing`;
@@ -85,31 +102,62 @@
       </div>
     {:else}
       {#each projects as p (p.root)}
-        <button
-          class="project"
-          class:active={p.root === selected}
-          class:missing={p.missing}
-          title={p.root}
-          aria-current={p.root === selected ? "true" : undefined}
-          onclick={() => onselect(p.root)}
-        >
-          <span class="text">
-            <span class="name">{p.name}</span>
-            {#if p.missing}
-              <span class="sub warn">Folder missing</span>
-            {:else}
-              <span class="sub path">{tidy(p.root)}</span>
+        <div class="item">
+          <button
+            class="project"
+            class:active={p.root === selected}
+            class:missing={p.missing}
+            title={p.root}
+            aria-current={p.root === selected ? "true" : undefined}
+            aria-keyshortcuts="h"
+            onclick={() => onselect(p.root)}
+            onkeydown={(e) => onProjectKey(e, p.root)}
+          >
+            <span class="text">
+              <span class="name">{p.name}</span>
+              {#if p.missing}
+                <span class="sub warn">Folder missing</span>
+              {:else}
+                <span class="sub path">{tidy(p.root)}</span>
+              {/if}
+            </span>
+            {#if p.pending > 0}
+              <span class="count num" aria-label="{p.pending} pending">{p.pending}</span>
+            {:else if !p.missing}
+              <span class="count num zero" aria-label="nothing pending">0</span>
             {/if}
-          </span>
-          {#if p.pending > 0}
-            <span class="count num" aria-label="{p.pending} pending">{p.pending}</span>
-          {:else if !p.missing}
-            <span class="count num zero" aria-label="nothing pending">0</span>
-          {/if}
-        </button>
+          </button>
+          <button class="hide" tabindex="-1" aria-label="Hide {p.name}" title="Hide this project (H)" onclick={() => onhide(p.root)}>
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <path d="M2 8s2.2-4 6-4 6 4 6 4-2.2 4-6 4-6-4-6-4Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+              <circle cx="8" cy="8" r="1.8" fill="none" stroke="currentColor" stroke-width="1.3" />
+              <path d="M3 13 13 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
       {/each}
     {/if}
   </div>
+  {#if hidden.length > 0}
+    <div class="hidden-box">
+      <button class="disclosure" aria-expanded={showHidden} onclick={() => (showHidden = !showHidden)}>
+        <svg class="chev" class:open={showHidden} viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path d="M6 4.5 9.5 8 6 11.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        Hidden projects ({hidden.length})
+      </button>
+      {#if showHidden}
+        <ul class="hidden-list">
+          {#each hidden as p (p.root)}
+            <li>
+              <button class="hidden-name" class:active={p.root === selected} title={p.root} onclick={() => onselect(p.root)}>{p.name}</button>
+              <button class="show" aria-label="Show {p.name}" title="Show this project again" onclick={() => onshow(p.root)}>Show</button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+  {/if}
   {/if}
 </nav>
 
@@ -212,6 +260,110 @@
     padding: 0 10px 12px;
   }
 
+  .item {
+    position: relative;
+  }
+  .item + .item {
+    margin-top: 2px;
+  }
+  /* Hide: on hover or focus, over the count. */
+  .hide {
+    position: absolute;
+    top: 50%;
+    right: 6px;
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    margin-top: -13px;
+    border-radius: var(--radius-chip);
+    color: var(--muted);
+    background: var(--hover);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms var(--ease);
+  }
+  .item:hover .hide,
+  .item:focus-within .hide {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .item:has(.project.active) .hide {
+    background: var(--active);
+  }
+  .hide:hover {
+    color: var(--text);
+  }
+  .item:hover .count,
+  .item:focus-within .count {
+    visibility: hidden;
+  }
+
+  .hidden-box {
+    flex: none;
+    padding: 6px 10px 12px;
+    border-top: 1px solid var(--rule);
+  }
+  .disclosure {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    width: 100%;
+    height: 28px;
+    padding: 0 6px;
+    border-radius: var(--radius-control);
+    font-size: var(--fs-small);
+    font-weight: 500;
+    color: var(--muted);
+  }
+  .disclosure:hover {
+    color: var(--text);
+    background: var(--hover);
+  }
+  .chev {
+    transition: transform 120ms var(--ease);
+  }
+  .chev.open {
+    transform: rotate(90deg);
+  }
+  .hidden-list {
+    margin: 2px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  .hidden-list li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding-left: 24px;
+  }
+  .hidden-name {
+    flex: 1;
+    min-width: 0;
+    height: 28px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--fs-small);
+    color: var(--muted);
+  }
+  .hidden-name.active {
+    color: var(--text);
+    font-weight: 500;
+  }
+  .show {
+    flex: none;
+    height: 24px;
+    padding: 0 8px;
+    border-radius: var(--radius-chip);
+    font-size: var(--fs-small);
+    font-weight: 500;
+    color: var(--text);
+  }
+  .show:hover {
+    background: var(--hover);
+  }
+
   .project {
     display: flex;
     align-items: center;
@@ -221,9 +373,6 @@
     padding: 5px 10px;
     border-radius: var(--radius-control);
     transition: background 120ms var(--ease);
-  }
-  .project + .project {
-    margin-top: 2px;
   }
   .project:hover {
     background: var(--hover);

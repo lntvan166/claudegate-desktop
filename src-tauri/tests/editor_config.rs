@@ -1,7 +1,7 @@
 //! Config and editor tests. Every file touched lives in a temp dir; the real
 //! ~/.claudegate and ~/.claudegate-desktop are never read or written.
 use claudegate_desktop_lib::config::{
-    allowed_template, config_path_in, load_or_create, save_editor, Config, DEFAULT_EDITOR, VSCODE, ZED,
+    allowed_template, config_path_in, load_or_create, save_editor, save_hidden_projects, Config, DEFAULT_EDITOR, VSCODE, ZED,
 };
 use claudegate_desktop_lib::editor::{
     check_target, render_editor_command, resolve_program, resolve_with_bundles,
@@ -43,7 +43,7 @@ fn missing_config_gives_default_and_creates_it() {
     let p = config_path_in(home.path());
     assert_eq!(p, home.path().join(".claudegate-desktop").join("config.json"));
     let c = load_or_create(&p);
-    assert_eq!(c, Config { editor: DEFAULT_EDITOR.into(), custom_editor: None, read_only: false });
+    assert_eq!(c, Config { editor: DEFAULT_EDITOR.into(), custom_editor: None, read_only: false, hidden_projects: vec![] });
     assert_eq!(DEFAULT_EDITOR, "zed {path}:{line}:{col}");
     assert!(p.is_file(), "defaults written to the app's own dir");
     assert_eq!(load_or_create(&p), c);
@@ -142,7 +142,7 @@ fn resolver_falls_back_to_an_app_bundled_cli() {
 
 #[test]
 fn only_presets_the_custom_editor_or_the_hand_set_editor_are_allowed() {
-    let c = Config { editor: "subl {path}:{line}".into(), custom_editor: Some("nvim +{line} {path}".into()), read_only: false };
+    let c = Config { editor: "subl {path}:{line}".into(), custom_editor: Some("nvim +{line} {path}".into()), read_only: false, hidden_projects: vec![] };
     assert_eq!(allowed_template(ZED, &c).unwrap(), ZED);
     assert_eq!(allowed_template("  code   -g {path}:{line}:{col} ", &c).unwrap(), VSCODE);
     assert!(allowed_template("nvim +{line}  {path}", &c).is_ok());
@@ -219,4 +219,53 @@ fn an_old_preset_is_upgraded_on_load_and_only_the_new_one_is_allowed() {
     fs::create_dir_all(p.parent().unwrap()).unwrap();
     fs::write(&p, r#"{"editor":"code {path}:{line}"}"#).unwrap();
     assert_eq!(load_or_create(&p).editor, "code {path}:{line}");
+}
+
+// UX wave 7: hidden projects live in the app's own config, written through the same guarded writer.
+
+#[test]
+fn hidden_projects_are_saved_keeping_every_other_key() {
+    let home = tempfile::tempdir().unwrap();
+    let p = config_path_in(home.path());
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(&p, r#"{"editor":"hx {path}:{line}","customEditor":"hx {path}:{line}","readOnly":true,"mine":{"k":1}}"#).unwrap();
+    let c = save_hidden_projects(&p, &["/w/b".into(), " /w/a ".into(), "/w/b".into(), "".into()], None).unwrap();
+    assert_eq!(c.hidden_projects, vec!["/w/b".to_string(), "/w/a".to_string()], "trimmed, deduplicated, no blanks");
+    assert_eq!(c.editor, "hx {path}:{line}");
+    assert!(c.read_only);
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+    assert_eq!(v["mine"], serde_json::json!({"k":1}));
+    assert_eq!(v["editor"], "hx {path}:{line}");
+    assert_eq!(v["readOnly"], true);
+    assert_eq!(v["hiddenProjects"], serde_json::json!(["/w/b", "/w/a"]));
+    assert_eq!(load_or_create(&p).hidden_projects, vec!["/w/b".to_string(), "/w/a".to_string()]);
+    // Showing them all again.
+    assert!(save_hidden_projects(&p, &[], None).unwrap().hidden_projects.is_empty());
+}
+
+#[test]
+fn hidden_projects_never_touch_the_claudegate_home() {
+    let home = tempfile::tempdir().unwrap();
+    let cg = home.path().join(".claudegate");
+    fs::create_dir_all(&cg).unwrap();
+    let roots = cg.join("workspace-roots.json");
+    fs::write(&roots, r#"["/w/a"]"#).unwrap();
+    // A config path inside the ClaudeGate home is refused outright.
+    assert!(save_hidden_projects(&cg.join("config.json"), &["/w/a".into()], Some(&cg)).is_err());
+    let p = config_path_in(home.path());
+    save_hidden_projects(&p, &["/w/a".into()], Some(&cg)).unwrap();
+    assert_eq!(fs::read_to_string(&roots).unwrap(), r#"["/w/a"]"#);
+    assert!(!cg.join("config.json").exists());
+}
+
+#[test]
+fn hidden_projects_ignore_a_malformed_value_and_a_bad_file_is_never_clobbered() {
+    let home = tempfile::tempdir().unwrap();
+    let p = config_path_in(home.path());
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(&p, r#"{"hiddenProjects":"nope"}"#).unwrap();
+    assert!(load_or_create(&p).hidden_projects.is_empty());
+    fs::write(&p, "{not json").unwrap();
+    assert!(save_hidden_projects(&p, &["/w/a".into()], None).is_err());
+    assert_eq!(fs::read_to_string(&p).unwrap(), "{not json");
 }

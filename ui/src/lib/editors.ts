@@ -6,7 +6,13 @@ const OLD_ZED = "zed {path}:{line}";
 const OLD_VSCODE = "code -g {path}:{line}";
 
 /** The app's settings (src-tauri/src/config.rs `Config`). */
-export type EditorConfig = { editor: string; customEditor?: string | null; readOnly?: boolean };
+export type EditorConfig = {
+  editor: string;
+  customEditor?: string | null;
+  readOnly?: boolean;
+  /** Project roots hidden from the rail, the header total and the tray. */
+  hiddenProjects?: string[];
+};
 
 const norm = (t: string) => t.trim().split(/\s+/).join(" ");
 
