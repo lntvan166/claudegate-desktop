@@ -8,7 +8,7 @@ import {
   SETTINGS_UNREADABLE_MESSAGE,
   bulkKeys,
   bulkPrompt,
-  folderRejectPrompt,
+  rejectPrompt,
   storeFailure,
   summarize,
   undoFor,
@@ -212,17 +212,9 @@ describe("storeFailure", () => {
 });
 
 describe("bulkPrompt", () => {
-  it("asks before Reject all", () => {
-    expect(bulkPrompt("rejectAll", "pending", 3)).toEqual({
-      text: "Reject 3 files? Originals are restored and files Claude created are deleted.",
-      go: "Reject 3",
-      danger: true,
-    });
-  });
-
   it("asks before Revert all, in the extension's words", () => {
     expect(bulkPrompt("revertAll", "accepted", 4)).toEqual({
-      text: "Revert all 4 accepted file(s) back to pending review?",
+      text: "Revert all 4 accepted files back to pending review?",
       go: "Revert 4",
       danger: false,
     });
@@ -230,7 +222,7 @@ describe("bulkPrompt", () => {
 
   it("asks before Reapply all, in the extension's words", () => {
     expect(bulkPrompt("reapplyAll", "rejected", 2)).toEqual({
-      text: "Re-apply Claude's version to all 2 rejected file(s) on disk?",
+      text: "Re-apply Claude's version to all 2 rejected files on disk?",
       go: "Reapply 2",
       danger: true,
     });
@@ -246,11 +238,48 @@ describe("bulkPrompt", () => {
   });
 });
 
-describe("folderRejectPrompt", () => {
-  it("uses the extension's words and the folder's own name", () => {
-    expect(folderRejectPrompt(3, "src/api")).toEqual({
-      text: 'Reject 3 file(s) in "api"? This restores their original content.',
-      go: "Reject 3",
+describe("rejectPrompt (UX wave 2)", () => {
+  const f = (path: string, rejectOutcome: "restore" | "delete" | "leave" = "restore") => ({ path, rejectOutcome });
+
+  it("counts what is restored and names what is deleted", () => {
+    const rows = [
+      ...Array.from({ length: 10 }, (_, i) => f(`/w/src/f${i}.ts`)),
+      f("/w/db/migrations/0007_refunds.sql", "delete"),
+      f("/w/.wt/x/src/checkout/stripe.test.ts", "delete"),
+    ];
+    expect(rejectPrompt(rows)).toEqual({
+      text: "Reject 12 files? 10 restored to their originals, 2 new files deleted: 0007_refunds.sql, stripe.test.ts",
+      go: "Reject 12",
+      danger: true,
+    });
+  });
+
+  it("says only that originals are restored when nothing will be deleted", () => {
+    expect(rejectPrompt([f("/w/a.ts"), f("/w/b.ts")]).text).toBe("Reject 2 files? Originals are restored.");
+    expect(rejectPrompt([f("/w/a.ts")]).text).toBe("Reject 1 file? Originals are restored.");
+  });
+
+  it("uses singulars, never file(s)", () => {
+    const t = rejectPrompt([f("/w/a.ts"), f("/w/new.ts", "delete")]).text;
+    expect(t).toBe("Reject 2 files? 1 restored to its original, 1 new file deleted: new.ts");
+    expect(t).not.toContain("(s)");
+  });
+
+  it("names at most 3 deleted files, then +N more", () => {
+    const rows = ["a", "b", "c", "d", "e"].map((n) => f(`/w/${n}.ts`, "delete"));
+    expect(rejectPrompt(rows).text).toBe("Reject 5 files? 5 new files deleted: a.ts, b.ts, c.ts +2 more");
+  });
+
+  it("says when a file is left as it is (no original to restore)", () => {
+    expect(rejectPrompt([f("/w/a.ts"), f("/w/b.ts"), f("/w/old.ts", "leave")]).text).toBe(
+      "Reject 3 files? 2 restored to their originals, 1 left as is (no original to restore)",
+    );
+  });
+
+  it("names the folder for a folder reject", () => {
+    expect(rejectPrompt([f("/w/src/api/a.ts"), f("/w/src/api/b.ts")], "src/api")).toEqual({
+      text: 'Reject 2 files in "api"? Originals are restored.',
+      go: "Reject 2",
       danger: true,
     });
   });

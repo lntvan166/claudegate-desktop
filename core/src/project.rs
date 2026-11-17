@@ -31,6 +31,27 @@ pub struct PendingItem {
     pub removed: usize,
     /// No change on disk yet, inside the settle window: the write may still be on its way.
     pub waiting: bool,
+    /// What rejecting this file does to it on disk; the reject prompts count and name these.
+    pub reject_outcome: RejectOutcome,
+}
+
+/// What a reject does to a pending file: restore its baseline, delete the file Claude created, or
+/// leave it alone (a null baseline not known to be Claude's new file). `decide::apply_reject` acts
+/// on exactly this, so the prompt can never promise something the reject won't do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RejectOutcome {
+    Restore,
+    Delete,
+    Leave,
+}
+
+pub fn reject_outcome(original: Option<&str>, new_file: Option<bool>) -> RejectOutcome {
+    match (original, new_file) {
+        (Some(_), _) => RejectOutcome::Restore,
+        (None, Some(true)) => RejectOutcome::Delete,
+        (None, _) => RejectOutcome::Leave,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -181,6 +202,7 @@ fn load_scope(
                 added,
                 removed,
                 waiting,
+                reject_outcome: reject_outcome(e.original_content.as_deref(), e.new_file),
             });
         }
         for r in &s.accepted {

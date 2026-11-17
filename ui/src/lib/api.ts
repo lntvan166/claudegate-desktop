@@ -6,7 +6,7 @@
 // builds drop the branch and never emit the mock chunk.
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { DecideAction, DecideReport, DecideTarget } from "./decide";
+import type { DecideAction, DecideReport, DecideTarget, RejectOutcome } from "./decide";
 import type { EditorConfig } from "./editors";
 
 export type { DecideAction, DecideReport, DecideTarget, EditorConfig };
@@ -30,6 +30,8 @@ export type PendingItem = {
   removed: number;
   /** No change on disk yet, inside the settle window: Claude's write may still be on its way. */
   waiting: boolean;
+  /** What a reject does to it on disk (core `RejectOutcome`). */
+  rejectOutcome: RejectOutcome;
 };
 
 export type RecordItem = {

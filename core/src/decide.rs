@@ -464,16 +464,22 @@ enum RejectOutcome {
 }
 
 /// `applyReject`: restore the baseline, delete a confident new file, or leave the file alone.
+/// The choice is `project::reject_outcome`, the same function the UI's reject prompt is built from.
 fn apply_reject(s: &Session, fp: &str, entry: &FileEntry) -> std::io::Result<RejectOutcome> {
-    if let Some(original) = &entry.original_content {
-        workspace_write::restore(s, Path::new(fp), original)?;
-        return Ok(RejectOutcome::Restored);
+    use crate::project::RejectOutcome as Planned;
+    match crate::project::reject_outcome(entry.original_content.as_deref(), entry.new_file) {
+        Planned::Restore => {
+            // Restore is only planned for a baseline; never write an empty one in its place.
+            let Some(original) = entry.original_content.as_deref() else { return Ok(RejectOutcome::Left) };
+            workspace_write::restore(s, Path::new(fp), original)?;
+            Ok(RejectOutcome::Restored)
+        }
+        Planned::Delete => {
+            workspace_write::delete(s, Path::new(fp))?;
+            Ok(RejectOutcome::Deleted)
+        }
+        Planned::Leave => Ok(RejectOutcome::Left),
     }
-    if entry.new_file == Some(true) {
-        workspace_write::delete(s, Path::new(fp))?;
-        return Ok(RejectOutcome::Deleted);
-    }
-    Ok(RejectOutcome::Left)
 }
 
 /// `rejectFile` / `rejectFolder` / `rejectAll`. Persisted with no guards, as the TS does.

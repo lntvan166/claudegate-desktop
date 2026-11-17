@@ -208,6 +208,7 @@
   );
   /** What the tab's bulk actions touch and count: see `bulkKeys`. */
   const bulk = $derived(view ? bulkKeys(view, tab) : []);
+  const rejectOutcomes = $derived(Object.fromEntries((view?.pending ?? []).map((p) => [p.path, p.rejectOutcome])));
 
   // Responses can arrive out of order when events land in quick succession.
   let viewSeq = 0;
@@ -734,7 +735,7 @@
           </div>
         {:else if view && canDecide && bulk.length > 0}
           {#key tab}
-            <ActionBar {tab} keys={bulk} {busy} onaction={runBulk} />
+            <ActionBar {tab} keys={bulk} {busy} outcomes={rejectOutcomes} onaction={runBulk} />
           {/key}
         {/if}
         <div class="scroll">

@@ -240,15 +240,16 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
 export function bulkPrompt(action: BulkAction, tab: "pending" | "accepted" | "rejected", count: number): Prompt | null {
   switch (action) {
     case "rejectAll":
+      // The real question is `rejectPrompt`, built from the rows; this is only its fallback.
       return {
         text: `Reject ${plural(count, "file", "files")}? Originals are restored and files Claude created are deleted.`,
         go: `Reject ${count}`,
         danger: true,
       };
     case "revertAll":
-      return { text: `Revert all ${count} accepted file(s) back to pending review?`, go: `Revert ${count}`, danger: false };
+      return { text: `Revert all ${plural(count, "accepted file", "accepted files")} back to pending review?`, go: `Revert ${count}`, danger: false };
     case "reapplyAll":
-      return { text: `Re-apply Claude's version to all ${count} rejected file(s) on disk?`, go: `Reapply ${count}`, danger: true };
+      return { text: `Re-apply Claude's version to all ${plural(count, "rejected file", "rejected files")} on disk?`, go: `Reapply ${count}`, danger: true };
     case "clear":
       return {
         text: `Clear ${plural(count, "record", "records")} from ${tab === "accepted" ? "Accepted" : "Rejected"}? Files on disk stay as they are.`,
@@ -260,14 +261,34 @@ export function bulkPrompt(action: BulkAction, tab: "pending" | "accepted" | "re
   }
 }
 
-/** The question before a folder reject, in the extension's words (`rejectFolder`). */
-export function folderRejectPrompt(count: number, rel: string): Prompt {
-  const name = norm(rel).split("/").pop() || rel;
-  return {
-    text: `Reject ${count} file(s) in "${name}"? This restores their original content.`,
-    go: `Reject ${count}`,
-    danger: true,
-  };
+/** What rejecting a pending file does on disk (core `RejectOutcome`). */
+export type RejectOutcome = "restore" | "delete" | "leave";
+
+/** Deleted files named in a reject prompt before "+N more". */
+const NAMED = 3;
+
+/**
+ * The question before Reject all (no `folderRel`) or a folder reject: how many files are restored,
+ * which new files are deleted (by name, at most 3), and any left as they are. `rows` are exactly
+ * the rows the reject will send.
+ */
+export function rejectPrompt(rows: { path: string; rejectOutcome: RejectOutcome }[], folderRel?: string): Prompt {
+  const n = rows.length;
+  const restored = rows.filter((r) => r.rejectOutcome === "restore").length;
+  const deleted = rows.filter((r) => r.rejectOutcome === "delete").map((r) => nameOf(r.path));
+  const left = rows.filter((r) => r.rejectOutcome === "leave").length;
+  const where = folderRel ? ` in "${norm(folderRel).split("/").pop() || folderRel}"` : "";
+  const ask = `Reject ${plural(n, "file", "files")}${where}?`;
+  if (deleted.length === 0 && left === 0) return { text: `${ask} Originals are restored.`, go: `Reject ${n}`, danger: true };
+  const parts: string[] = [];
+  if (restored > 0) parts.push(`${restored} restored to ${restored === 1 ? "its original" : "their originals"}`);
+  if (left > 0) parts.push(`${left} left as is (no original to restore)`);
+  if (deleted.length > 0) {
+    const shown = deleted.slice(0, NAMED).join(", ");
+    const more = deleted.length > NAMED ? ` +${deleted.length - NAMED} more` : "";
+    parts.push(`${plural(deleted.length, "new file", "new files")} deleted: ${shown}${more}`);
+  }
+  return { text: `${ask} ${parts.join(", ")}`, go: `Reject ${n}`, danger: true };
 }
 
 /** What the result bar shows after a decision. `id` changes on every new result. */

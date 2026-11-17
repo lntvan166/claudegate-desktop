@@ -14,6 +14,7 @@ const row = (scopeRoot: string, rel: string): Row => ({
   newFile: false,
   decidedAt: null,
   waiting: false,
+  rejectOutcome: "restore",
 });
 
 const A = "/ws/a";

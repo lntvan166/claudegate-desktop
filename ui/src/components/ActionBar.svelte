@@ -1,18 +1,21 @@
 <script lang="ts">
   import { tick } from "svelte";
   import type { DiffKind } from "../lib/api";
-  import { bulkPrompt, type BulkAction } from "../lib/decide";
+  import { bulkPrompt, rejectPrompt, type BulkAction, type RejectOutcome } from "../lib/decide";
 
   let {
     tab,
     keys,
     busy,
+    outcomes = {},
     onaction,
   }: {
     tab: DiffKind;
     /** The files (or records, for Clear) the tab's bulk actions touch; see `bulkKeys`. */
     keys: string[];
     busy: boolean;
+    /** Pending: what a reject does to each key, so Reject all names the files it deletes. */
+    outcomes?: Record<string, RejectOutcome>;
     /** `keys` are exactly the rows counted in the question the user answered. */
     onaction: (a: BulkAction, keys: string[]) => void;
   } = $props();
@@ -25,7 +28,13 @@
 
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
-  const prompt = $derived(confirming ? bulkPrompt(confirming, tab, asked.length) : null);
+  const prompt = $derived(
+    confirming === "rejectAll"
+      ? rejectPrompt(asked.map((path) => ({ path, rejectOutcome: outcomes[path] ?? "restore" })))
+      : confirming
+        ? bulkPrompt(confirming, tab, asked.length)
+        : null,
+  );
 
   async function ask(a: BulkAction) {
     asked = [...keys];

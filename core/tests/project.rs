@@ -252,3 +252,33 @@ fn recheck_is_the_earliest_deadline_and_the_write_landing_makes_it_real() {
     assert!(!v.pending[0].waiting);
     assert_eq!(v.next_recheck_at, None);
 }
+
+/// UX wave 2: what a reject will do to each pending file, exactly as `apply_reject` decides it.
+#[test]
+fn reject_outcome_matches_apply_reject() {
+    use claudegate_core::project::RejectOutcome;
+    let h = tempfile::tempdir().unwrap();
+    let w = tempfile::tempdir().unwrap();
+    let root = w.path();
+    let restored = root.join("restored.txt");
+    let created = root.join("created.txt");
+    let legacy = root.join("legacy.txt");
+    for f in [&restored, &created, &legacy] {
+        fs::write(f, "claude\n").unwrap();
+    }
+    let mut files = serde_json::Map::new();
+    files.insert(restored.to_string_lossy().into(), entry(Some("orig\n")));
+    let mut c = entry(None);
+    c["newFile"] = serde_json::json!(true);
+    files.insert(created.to_string_lossy().into(), c);
+    // A null baseline from an older hook: not known to be Claude's new file, so a reject leaves it.
+    files.insert(legacy.to_string_lossy().into(), entry(None));
+    write_session(h.path(), root, &session(files.into(), serde_json::json!([]), serde_json::json!({})));
+    let v = load_project(h.path(), root);
+    let of = |name: &str| v.pending.iter().find(|p| p.rel == name).unwrap().reject_outcome;
+    assert_eq!(of("restored.txt"), RejectOutcome::Restore);
+    assert_eq!(of("created.txt"), RejectOutcome::Delete);
+    assert_eq!(of("legacy.txt"), RejectOutcome::Leave);
+    let json = serde_json::to_value(&v.pending[0]).unwrap();
+    assert!(json["rejectOutcome"].is_string(), "{json}");
+}

@@ -11,7 +11,7 @@ const view: ProjectView = {
     { root: "/ws/shop/.worktrees/feat", isWorktree: true, shapeUnknown: [], error: null },
   ],
   pending: [
-    { path: "/ws/shop/src/a.ts", rel: "src/a.ts", scope: "/ws/shop", newFile: false, capturedAt: null, added: 3, removed: 1, waiting: false },
+    { path: "/ws/shop/src/a.ts", rel: "src/a.ts", scope: "/ws/shop", newFile: false, capturedAt: null, added: 3, removed: 1, waiting: false, rejectOutcome: "restore" },
     {
       path: "/ws/shop/.worktrees/feat/src/b.ts",
       rel: ".worktrees/feat/src/b.ts",
@@ -21,6 +21,7 @@ const view: ProjectView = {
       added: 9,
       removed: 0,
       waiting: true,
+      rejectOutcome: "delete",
     },
   ],
   accepted: [

@@ -2,7 +2,7 @@
   import { tick } from "svelte";
   import type { SvelteSet } from "svelte/reactivity";
   import type { DiffKind } from "../lib/api";
-  import { folderPrefix, folderRejectPrompt, type DecideAction, type DecideTarget, type Prompt } from "../lib/decide";
+  import { folderPrefix, rejectPrompt, type DecideAction, type DecideTarget, type Prompt } from "../lib/decide";
   import { iconFor, type IconTheme } from "../lib/icons";
   import { WAITING_REFUSAL } from "../lib/keys";
   import { nodeKey, type Group, type Row } from "../lib/rows";
@@ -90,8 +90,10 @@
 
   async function askFolderReject(id: string, scope: string, n: TreeNode<Row>) {
     // The rows counted in the question are the rows sent: nothing that lands later is rejected.
-    const keys = actionableRows(n).map((r) => r.path);
-    folderAsk = { id, scope, prefix: folderPrefix(scope, n.rel), keys, prompt: folderRejectPrompt(keys.length, n.rel) };
+    const rows = actionableRows(n);
+    const keys = rows.map((r) => r.path);
+    const prompt = rejectPrompt(rows.map((r) => ({ path: r.path, rejectOutcome: r.rejectOutcome ?? "restore" })), n.rel);
+    folderAsk = { id, scope, prefix: folderPrefix(scope, n.rel), keys, prompt };
     await tick();
     // Cancel is the safe default.
     askEl?.querySelector<HTMLButtonElement>("[data-cancel]")?.focus();

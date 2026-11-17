@@ -1,4 +1,5 @@
 import type { DiffKind, ProjectSummary, ProjectView, ScopeView } from "./api";
+import type { RejectOutcome } from "./decide";
 import type { TreeNode } from "./tree";
 
 /** One file row on a review tab, whatever tab it came from. */
@@ -15,6 +16,8 @@ export type Row = {
   decidedAt: string | null;
   /** A pending capture whose write has not landed yet. */
   waiting: boolean;
+  /** Pending rows: what a reject does on disk. Null on the Accepted and Rejected tabs. */
+  rejectOutcome: RejectOutcome | null;
 };
 
 export type Group = { scope: ScopeView; label: string; rows: Row[] };
@@ -47,6 +50,7 @@ function rowsOf(view: ProjectView, kind: DiffKind): Row[] {
       newFile: p.newFile,
       decidedAt: null,
       waiting: p.waiting,
+      rejectOutcome: p.rejectOutcome,
     }));
   }
   return view[kind].map((r) => ({
@@ -59,6 +63,7 @@ function rowsOf(view: ProjectView, kind: DiffKind): Row[] {
     newFile: false,
     decidedAt: r.decidedAt,
     waiting: false,
+    rejectOutcome: null,
   }));
 }
 

@@ -25,12 +25,14 @@ const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
 
 function pending(scope: string, rel: string, added: number, removed: number, newFile = false): PendingItem {
   const path = `${scope}/${rel}`;
-  return { path, rel: path.slice(SHOP.length + 1), scope, newFile, capturedAt: ago(added), added, removed, waiting: false };
+  // scripts/seed.py has a null baseline from an older hook: a reject leaves it on disk.
+  const rejectOutcome = newFile ? "delete" : rel.endsWith("seed.py") ? "leave" : "restore";
+  return { path, rel: path.slice(SHOP.length + 1), scope, newFile, capturedAt: ago(added), added, removed, waiting: false, rejectOutcome };
 }
 
 function pendingIn(root: string, rel: string, added: number, removed: number): PendingItem {
   const path = `${root}/${rel}`;
-  return { path, rel, scope: root, newFile: false, capturedAt: ago(added), added, removed, waiting: false };
+  return { path, rel, scope: root, newFile: false, capturedAt: ago(added), added, removed, waiting: false, rejectOutcome: "restore" };
 }
 
 function record(root: string, rel: string, min: number, added: number, removed: number): RecordItem {
@@ -445,7 +447,7 @@ function mockDecide(root: string, action: DecideAction, target: DecideTarget): D
         if (action === "revert") v.accepted = v.accepted.filter((x) => x !== r);
         else v.rejected = v.rejected.filter((x) => x !== r);
         if (!v.pending.some((p) => p.path === r.path)) {
-          v.pending.push({ path: r.path, rel: r.rel, scope: r.scope, newFile: false, capturedAt: now, added: r.added, removed: r.removed, waiting: false });
+          v.pending.push({ path: r.path, rel: r.rel, scope: r.scope, newFile: false, capturedAt: now, added: r.added, removed: r.removed, waiting: false, rejectOutcome: "restore" });
         }
         changed.push(r.path);
         report.done++;
