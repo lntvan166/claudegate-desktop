@@ -66,7 +66,12 @@ export type DecisionContext = {
   selectedKey: string | null;
   /** The selected row is a capture whose write has not landed: it cannot be decided yet. */
   selectedWaiting?: boolean;
+  /** A narrow window shows the list or the diff; a file is never decided unseen. */
+  diffHidden?: boolean;
 };
+
+/** What a/r say in a narrow window while the list, not the file's diff, is on screen. */
+export const DIFF_HIDDEN_REFUSAL = "Open the file to see its diff before deciding";
 
 /** What a/r say on a row Claude has not written yet (the disabled buttons' tooltip too). */
 export const WAITING_REFUSAL = "Claude hasn't written this yet";
@@ -82,6 +87,7 @@ export function decisionFor(e: KeyLike, c: DecisionContext): KeyDecision | null 
   const action = e.key === "a" ? "accept" : e.key === "r" ? "reject" : null;
   if (!action) return null;
   if (c.tab !== "pending" || c.typing || c.menuOpen || c.readOnly || c.busy || !c.selectedKey) return null;
+  if (c.diffHidden) return { refused: DIFF_HIDDEN_REFUSAL };
   if (c.selectedWaiting) return { refused: WAITING_REFUSAL };
   return { action, key: c.selectedKey };
 }

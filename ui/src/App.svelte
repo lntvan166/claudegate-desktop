@@ -109,6 +109,20 @@
   /** A narrow window stacks the projects on top, where a rail has no meaning, and hides the diff. */
   const narrow = $derived(stacked(innerWidth));
   const railed = $derived(projectsCollapsed && !narrow);
+  /** Narrow only: the selected file's diff covers the list, full height, until Back or Esc. */
+  let narrowDiff = $state(false);
+  const narrowDiffOpen = $derived(narrow && narrowDiff && !!selectedRow);
+  const diffShown = $derived(!narrow || narrowDiffOpen);
+  // The file left the list (decided, or gone): back to the list, never an empty full-height pane.
+  $effect(() => {
+    if (!selectedRow) narrowDiff = false;
+  });
+  function openNarrowDiff() {
+    if (narrow) narrowDiff = true;
+  }
+  function closeNarrowDiff() {
+    narrowDiff = false;
+  }
   const panes = $derived(layout(preferred, innerWidth, railed));
 
   function readStored(): string | null {
@@ -473,6 +487,13 @@
 
   function onKey(e: KeyboardEvent) {
     if (e.defaultPrevented || e.repeat && e.key === "o") return;
+    // Esc leaves the narrow full-height diff, wherever focus is (Monaco included), unless a menu
+    // or a confirmation is up: Esc answers those first.
+    if (e.key === "Escape" && narrow && narrowDiff && !document.querySelector('[role="menu"], [data-confirm]')) {
+      e.preventDefault();
+      closeNarrowDiff();
+      return;
+    }
     if (isTypingTarget(e.target as HTMLElement | null)) return;
     const d = decisionFor(e, {
       tab,
@@ -482,6 +503,7 @@
       busy: busy || e.repeat,
       selectedKey: selectedRow?.key ?? null,
       selectedWaiting: selectedRow?.waiting ?? false,
+      diffHidden: !diffShown,
     });
     if (d && "refused" in d) {
       e.preventDefault();
@@ -598,7 +620,7 @@
   {/if}
 </div>
 
-<div class="app" class:animate={animatePanes} style:--sidebar-w="{panes.projects}px" style:--tree-w="{panes.tree}px">
+<div class="app" class:animate={animatePanes} class:narrow-diff={narrowDiffOpen} style:--sidebar-w="{panes.projects}px" style:--tree-w="{panes.tree}px">
   <header class="toolbar">
     <div class="brand">
       <svg class="mark" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
@@ -662,7 +684,7 @@
   </div>
   {/if}
 
-  <div class="sheet">
+  <div class="sheet" class:narrow-diff={narrowDiffOpen}>
     <section class="review" aria-label="Changes">
       {#if listError}
         <div class="state">
@@ -747,9 +769,12 @@
               {collapsed}
               editorName={editorLabel(config.editor)}
               selectedKey={selectedRow?.key ?? null}
-              onselect={(r) => (selectedRow = r)}
+              onselect={(r, via) => {
+                selectedRow = r;
+                if (via === "pointer") openNarrowDiff();
+              }}
               onopen={(r) => void open(r, lineFor(r))}
-              {canDecide}
+              canDecide={canDecide && !narrow}
               {busy}
               ondecide={(action, target, row) => void runDecide(action, target, { row })}
               onnotice={announce}
@@ -757,7 +782,7 @@
           {/if}
         </div>
       {/if}
-      {#if narrow}
+      {#if narrow && !narrowDiffOpen}
         <!-- The diff pane (the bar's usual home) is hidden here; store errors and "left on disk" must stay visible. -->
         <ResultBar result={shownResult} {busy} ondismiss={() => (result = null)} />
       {/if}
@@ -788,9 +813,19 @@
       onopen={() => selectedRow && void open(selectedRow, firstLine)}
       onpick={(t) => void pickEditor(t)}
       ondismiss={() => (openError = null)}
+      canDecide={canDecide && diffShown}
+      lockText={lock?.text ?? null}
+      {busy}
+      ondecide={(action) => {
+        const row = selectedRow;
+        if (!row) return;
+        void runDecide(action, { kind: "file", scope: row.scope, key: action === "revert" ? row.key : row.path }, { row });
+      }}
+      onnotice={announce}
+      onback={narrow ? closeNarrowDiff : null}
     >
       {#snippet footer()}
-        {#if !narrow}
+        {#if !narrow || narrowDiffOpen}
           <ResultBar result={shownResult} {busy} ondismiss={() => (result = null)} />
         {/if}
       {/snippet}
@@ -1124,6 +1159,19 @@
     .sheet > :global(.diff),
     .split {
       display: none;
+    }
+    /* A file opened in a narrow window: its diff, full height, in place of the list. */
+    .app.narrow-diff {
+      grid-template-rows: var(--toolbar-h) minmax(0, 1fr);
+    }
+    .app.narrow-diff > :global(.projects) {
+      display: none;
+    }
+    .sheet.narrow-diff > .review {
+      display: none;
+    }
+    .sheet.narrow-diff > :global(.diff) {
+      display: flex;
     }
   }
 

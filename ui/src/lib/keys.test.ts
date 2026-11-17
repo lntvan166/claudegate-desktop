@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL } from "./keys";
+import { actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL, DIFF_HIDDEN_REFUSAL } from "./keys";
 
 describe("nextIndex", () => {
   it("clamps without wrapping", () => {
@@ -131,5 +131,26 @@ describe("decisionFor on a waiting row", () => {
     expect(decisionFor(k("x"), ctx)).toBeNull();
     expect(decisionFor(k("a"), { ...ctx, typing: true })).toBeNull();
     expect(decisionFor(k("a"), { ...ctx, tab: "accepted" })).toBeNull();
+  });
+});
+
+describe("decisionFor while the diff is hidden (narrow window)", () => {
+  const ctx = {
+    tab: "pending" as const,
+    typing: false,
+    menuOpen: false,
+    readOnly: false,
+    busy: false,
+    selectedKey: "/w/a.ts" as string | null,
+    diffHidden: true,
+  };
+
+  it("never decides a file whose diff is not on screen, and says why", () => {
+    expect(decisionFor(k("a"), ctx)).toEqual({ refused: DIFF_HIDDEN_REFUSAL });
+    expect(decisionFor(k("r"), ctx)).toEqual({ refused: DIFF_HIDDEN_REFUSAL });
+  });
+
+  it("decides once the diff is shown", () => {
+    expect(decisionFor(k("a"), { ...ctx, diffHidden: false })).toEqual({ action: "accept", key: "/w/a.ts" });
   });
 });

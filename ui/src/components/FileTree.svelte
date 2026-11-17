@@ -43,7 +43,8 @@
     /** Collapsed folders and groups, keyed per tab. Owned by App so keyboard order can see it. */
     collapsed: SvelteSet<string>;
     editorName: string;
-    onselect: (row: Row) => void;
+    /** `pointer` for a click or Enter on the row, `key` when arrow keys move the selection. */
+    onselect: (row: Row, via?: "pointer" | "key") => void;
     onopen: (row: Row) => void;
     /** Show the accept/reject (revert, reapply) actions; false in read-only mode. */
     canDecide?: boolean;
@@ -187,7 +188,7 @@
     if (to === null || to < 0) return;
     const target = items[to];
     void focusItem(target.id);
-    if (target.row && target.row.key !== selectedKey) onselect(target.row);
+    if (target.row && target.row.key !== selectedKey) onselect(target.row, "key");
   }
 
   function onfocusin(e: FocusEvent) {
@@ -339,7 +340,7 @@
         tabindex={tabId === id ? 0 : -1}
         style:padding-left="{pad(depth) + 16}px"
         title={row.path}
-        onclick={() => onselect(row)}
+        onclick={() => onselect(row, "pointer")}
       >
         {@render guides(depth)}
         <img class="icon" src={iconFor(n.name, "file", false, theme)} alt="" draggable="false" />
@@ -410,6 +411,8 @@
             onclick={() => ondecide("reapply", { kind: "file", scope: row.scope, key: row.path }, row)}
           >{@render back()}</button>
         {/if}
+      {#if row.key !== selectedKey}
+      <!-- The selected row's file is open in the diff, whose header has Open in…; no second ↗. -->
       <button class="act open" tabindex="-1" aria-label="Open {n.name} in {editorName}" title="Open in {editorName}" onclick={() => onopen(row)}>
         <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
           <path
@@ -422,6 +425,7 @@
           />
         </svg>
       </button>
+      {/if}
       </div>
     </div>
   {/if}

@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount, untrack, type Snippet } from "svelte";
   import { getDiff, type DiffKind, type DiffPayload } from "../lib/api";
+  import type { DecideAction } from "../lib/decide";
+  import { WAITING_REFUSAL } from "../lib/keys";
   import { editorLabel, type EditorConfig } from "../lib/editors";
   import { iconFor, type IconTheme } from "../lib/icons";
   import { languageFor } from "../lib/language";
@@ -25,6 +27,12 @@
     onpick,
     ondismiss,
     footer,
+    canDecide = false,
+    lockText = null,
+    busy = false,
+    ondecide = () => {},
+    onnotice = () => {},
+    onback = null,
   }: {
     row: Row | null;
     kind: DiffKind;
@@ -41,7 +49,37 @@
     ondismiss: () => void;
     /** A slim bar under the diff (the decision result). */
     footer?: Snippet;
+    /** Decisions are on for this project (off in read-only mode and other locks). */
+    canDecide?: boolean;
+    /** Why decisions are off, for the disabled buttons' tooltip. */
+    lockText?: string | null;
+    busy?: boolean;
+    /** Decide the shown row: accept/reject on Pending, revert on Accepted, reapply on Rejected. */
+    ondecide?: (action: DecideAction) => void;
+    onnotice?: (message: string) => void;
+    /** Narrow window: the diff covers the list; Back (or Esc) returns to it. */
+    onback?: (() => void) | null;
   } = $props();
+
+  /** The decisions the header offers for the shown row's tab. */
+  const decisions = $derived<{ action: DecideAction; label: string; key?: string; tone: string }[]>(
+    kind === "pending"
+      ? [
+          { action: "accept", label: "Accept", key: "A", tone: "accept" },
+          { action: "reject", label: "Reject", key: "R", tone: "reject" },
+        ]
+      : kind === "accepted"
+        ? [{ action: "revert", label: "Revert", tone: "back" }]
+        : [{ action: "reapply", label: "Reapply", tone: "back" }],
+  );
+  const waitingRow = $derived(kind === "pending" && !!row?.waiting);
+  function decideTitle(d: { label: string; key?: string }): string {
+    if (!canDecide) return lockText ?? "Decisions are off";
+    if (waitingRow) return WAITING_REFUSAL;
+    if (d.label === "Revert") return "Revert: back to pending review";
+    if (d.label === "Reapply") return "Reapply Claude's version";
+    return `${d.label} (${d.key})`;
+  }
 
   const SIDE_KEY = "claudegate.diffSideBySide";
   let sideBySide = $state(true);
@@ -242,6 +280,14 @@
 <main class="diff" aria-label="Diff">
   {#if row}
     <div class="diff-head">
+      {#if onback}
+        <button class="back" aria-label="Back to the file list" title="Back to the file list (Esc)" onclick={onback}>
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path d="M10 3.5 5.5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          <span>Back</span>
+        </button>
+      {/if}
       <img src={iconFor(fileName(row.rel), "file", false, theme)} alt="" width="16" height="16" draggable="false" />
       <span class="diff-path" title={row.path}>
         {#if row.rel.includes("/")}<span class="diff-dir">{row.rel.slice(0, row.rel.lastIndexOf("/") + 1)}</span>{/if}<span class="diff-file">{fileName(row.rel)}</span>
@@ -270,6 +316,28 @@
             <path d="M4.5 6.5h7M4.5 9.5h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
           </svg>
         </button>
+      </div>
+      <div class="decide" role="group" aria-label="Decide this file">
+        {#each decisions as d (d.action)}
+          <!-- Waiting: aria-disabled so the tooltip shows and a click says why; locked: disabled. -->
+          <button
+            class="dbtn {d.tone}"
+            disabled={!canDecide || busy}
+            aria-disabled={waitingRow ? "true" : undefined}
+            aria-keyshortcuts={d.key?.toLowerCase()}
+            title={decideTitle(d)}
+            onclick={() => (waitingRow ? onnotice(WAITING_REFUSAL) : ondecide(d.action))}
+          >
+            {#if d.tone === "accept"}
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3.5 8.5 6.5 11.5 12.5 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            {:else if d.tone === "reject"}
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
+            {:else}
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M5.5 3.5 2.5 6.5l3 3M2.5 6.5h7a3.5 3.5 0 0 1 0 7H7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            {/if}
+            <span class="dlabel">{d.label}</span>{#if d.key}<kbd class="dkey">{d.key}</kbd>{/if}
+          </button>
+        {/each}
       </div>
       <OpenWith {config} {onopen} {onpick} />
     </div>
@@ -393,6 +461,70 @@
   }
   .del {
     color: var(--negative);
+  }
+
+  .back {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    height: 28px;
+    margin-left: -6px;
+    padding: 0 8px 0 4px;
+    border-radius: var(--radius-control);
+    font-size: var(--fs-small);
+    font-weight: 500;
+    color: var(--muted);
+  }
+  .back:hover {
+    color: var(--text);
+    background: var(--hover);
+  }
+
+  .decide {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+  }
+  .dbtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 28px;
+    padding: 0 8px;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-control);
+    font-size: var(--fs-small);
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--text);
+    background: var(--surface);
+    transition:
+      background 120ms var(--ease),
+      color 120ms var(--ease);
+  }
+  .dbtn:hover:not(:disabled):not([aria-disabled="true"]) {
+    background: var(--hover);
+  }
+  .dbtn.accept:hover:not(:disabled):not([aria-disabled="true"]) svg {
+    color: var(--positive);
+  }
+  .dbtn.reject:hover:not(:disabled):not([aria-disabled="true"]) svg {
+    color: var(--negative);
+  }
+  .dbtn svg {
+    color: var(--muted);
+  }
+  .dbtn:disabled,
+  .dbtn[aria-disabled="true"] {
+    color: var(--faint);
+    opacity: 0.6;
+  }
+  .dkey {
+    font-family: var(--font-mono);
+    font-size: var(--fs-meta);
+    color: var(--faint);
   }
 
   .view {
@@ -531,9 +663,10 @@
     margin: 0;
   }
   /* A narrow pane (a small window) keeps the path and the open action; the rest steps aside. */
-  @container diff (max-width: 560px) {
+  @container diff (max-width: 640px) {
     .diff-stats,
     .view,
+    .dkey,
     .tag.new {
       display: none;
     }
@@ -541,8 +674,13 @@
       margin-right: auto;
     }
   }
-  @container diff (max-width: 360px) {
+  @container diff (max-width: 500px) {
     .diff-head :global(.split .main span) {
+      display: none;
+    }
+  }
+  @container diff (max-width: 380px) {
+    .dlabel {
       display: none;
     }
   }
