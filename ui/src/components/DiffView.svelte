@@ -248,13 +248,15 @@
       </span>
       {#if row.newFile}<span class="tag new">New file</span>{/if}
       {#if row.waiting}
-        <!-- The row's own "waiting for write…" is under its actions while it is selected. -->
-        <span class="tag waiting" title="Captured before Claude wrote it; the write hasn't landed yet">Waiting for Claude's write…</span>
+        <!-- No change on disk yet: "+0 −0" would read as an empty edit, so say what it is. -->
+        <span class="tag waiting" title="Captured before Claude wrote it; the write hasn't landed yet. It can be decided once it does.">Not written yet</span>
+        <span class="diff-stats-gap"></span>
+      {:else}
+        <span class="diff-stats num">
+          <span class="add">+{row.added}</span>
+          <span class="del">−{row.removed}</span>
+        </span>
       {/if}
-      <span class="diff-stats num">
-        <span class="add">+{row.added}</span>
-        <span class="del">−{row.removed}</span>
-      </span>
       <div class="view" role="group" aria-label="Diff layout">
         <button class:on={sideBySide} aria-pressed={sideBySide} title="Side by side" onclick={() => setSide(true)}>
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
@@ -369,11 +371,14 @@
     padding: 0 6px;
     border-radius: var(--radius-chip);
     font-size: var(--fs-meta);
-    font-style: italic;
+    font-weight: 500;
     line-height: 18px;
     white-space: nowrap;
-    color: var(--muted);
-    background: var(--raised);
+    color: var(--waiting-ink);
+    background: var(--waiting-bg);
+  }
+  .diff-stats-gap {
+    margin-left: auto;
   }
   .diff-stats {
     margin-left: auto;

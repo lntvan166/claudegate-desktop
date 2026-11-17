@@ -43,7 +43,7 @@
   } from "./lib/decide";
   import { editorLabel, ZED } from "./lib/editors";
   import type { IconTheme } from "./lib/icons";
-  import { actionFor, decisionFor, isTypingTarget, nextIndex } from "./lib/keys";
+  import { actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL } from "./lib/keys";
   import { basename, groupsFor, scopeLabel, selectionAfterList, sortProjects, type Row } from "./lib/rows";
   import { Rechecks } from "./lib/recheck";
   import {
@@ -88,6 +88,14 @@
   /** The result bar under the diff. */
   let result = $state<ResultMessage | null>(null);
   let resultSeq = 0;
+  /** A short status said through the live region (and shown briefly), e.g. why a key did nothing. */
+  let notice = $state<{ id: number; text: string } | null>(null);
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  function announce(text: string) {
+    notice = { id: (notice?.id ?? 0) + 1, text };
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => (notice = null), 3000);
+  }
   /** The backend refused for a reason the config does not show (its settings file is unreadable). */
   let settingsBlocked = $state<string | null>(null);
 
@@ -374,6 +382,14 @@
   ) {
     const root = selected;
     if (busy || !root || !view) return;
+    // A capture whose write has not landed has nothing to decide yet; the controls say so too.
+    if (target.kind === "file" && (action === "accept" || action === "reject")) {
+      const item = view.pending.find((p) => p.path === target.key && p.scope === target.scope);
+      if (item?.waiting) {
+        announce(WAITING_REFUSAL);
+        return;
+      }
+    }
     const advanceFrom =
       target.kind === "file" && tab === "pending" && opts.row && opts.row.key === selectedRow?.key ? opts.row.key : null;
     const nextKey = advanceFrom ? nextAfterDecision(fileOrder(groupsFor(view, "pending"), mode), advanceFrom) : null;
@@ -465,7 +481,13 @@
       readOnly: !canDecide,
       busy: busy || e.repeat,
       selectedKey: selectedRow?.key ?? null,
+      selectedWaiting: selectedRow?.waiting ?? false,
     });
+    if (d && "refused" in d) {
+      e.preventDefault();
+      announce(d.refused);
+      return;
+    }
     if (d && selectedRow) {
       e.preventDefault();
       const row = selectedRow;
@@ -550,6 +572,13 @@
 </script>
 
 <svelte:window bind:innerWidth />
+
+<!-- The live region: always in the DOM so screen readers hear each new status. -->
+<div class="notice-region" role="status" aria-live="polite">
+  {#if notice}
+    {#key notice.id}<p class="toast">{notice.text}</p>{/key}
+  {/if}
+</div>
 
 <div class="app" class:animate={animatePanes} style:--sidebar-w="{panes.projects}px" style:--tree-w="{panes.tree}px">
   <header class="toolbar">
@@ -705,6 +734,7 @@
               {canDecide}
               {busy}
               ondecide={(action, target, row) => void runDecide(action, target, { row })}
+              onnotice={announce}
             />
           {/if}
         </div>
@@ -1015,6 +1045,33 @@
     }
   }
 
+
+  /* A short status, bottom centre, above everything; it fades on its own. */
+  .notice-region {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    z-index: 50;
+    transform: translateX(-50%);
+    pointer-events: none;
+  }
+  .toast {
+    padding: 7px 12px;
+    border-radius: var(--radius-control);
+    font-size: var(--fs-small);
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--surface);
+    background: var(--text);
+    box-shadow: var(--menu-shadow);
+    animation: toast-in 140ms var(--ease);
+  }
+  @keyframes toast-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+  }
 
   /* Narrow windows (a browser preview, a tiled window): one column, projects on top. */
   @media (max-width: 720px) {

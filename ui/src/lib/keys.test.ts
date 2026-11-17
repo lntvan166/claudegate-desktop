@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionFor, decisionFor, isTypingTarget, nextIndex } from "./keys";
+import { actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL } from "./keys";
 
 describe("nextIndex", () => {
   it("clamps without wrapping", () => {
@@ -82,6 +82,7 @@ describe("decisionFor", () => {
     readOnly: false,
     busy: false,
     selectedKey: "/w/a.ts" as string | null,
+    selectedWaiting: false,
   };
 
   it("a accepts and r rejects the selected pending row", () => {
@@ -106,5 +107,29 @@ describe("decisionFor", () => {
     expect(decisionFor(k("a", { ctrlKey: true }), ctx)).toBeNull();
     expect(decisionFor(k("A"), ctx)).toBeNull();
     expect(decisionFor(k("x"), ctx)).toBeNull();
+  });
+});
+
+describe("decisionFor on a waiting row", () => {
+  const ctx = {
+    tab: "pending" as const,
+    typing: false,
+    menuOpen: false,
+    readOnly: false,
+    busy: false,
+    selectedKey: "/w/a.ts" as string | null,
+    selectedWaiting: true,
+  };
+
+  it("refuses a and r with the reason, never a decision", () => {
+    expect(decisionFor(k("a"), ctx)).toEqual({ refused: WAITING_REFUSAL });
+    expect(decisionFor(k("r"), ctx)).toEqual({ refused: WAITING_REFUSAL });
+    expect(WAITING_REFUSAL).toBe("Claude hasn't written this yet");
+  });
+
+  it("stays silent for keys that are not decisions, or when the key would be ignored anyway", () => {
+    expect(decisionFor(k("x"), ctx)).toBeNull();
+    expect(decisionFor(k("a"), { ...ctx, typing: true })).toBeNull();
+    expect(decisionFor(k("a"), { ...ctx, tab: "accepted" })).toBeNull();
   });
 });

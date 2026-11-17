@@ -63,6 +63,9 @@
   --warning-ink: #92400e;
   --error-bg: #ffedea;
   --error-ink: #831c1e;
+  /* A capture whose write has not landed. */
+  --waiting-bg: #fbf3cf;
+  --waiting-ink: #6b5300;
   --focus-ring: #1b6c80;
   /* The one destructive control (Reject N in the confirmation); white text on it. */
   --danger: #c4242a;
@@ -95,6 +98,8 @@
     --warning-ink: #f0c867;
     --error-bg: #2c1a1d;
     --error-ink: #f0868c;
+    --waiting-bg: #2f2f1f;
+    --waiting-ink: #f1fa8c;
     --focus-ring: #5fb3c6;
     --danger: #c0353d;
     --danger-hover: #a92e35;
@@ -171,6 +176,19 @@ button {
 ::-webkit-scrollbar-track,
 ::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+/* Read by screen readers only. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .num {

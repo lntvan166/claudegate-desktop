@@ -64,16 +64,24 @@ export type DecisionContext = {
   busy: boolean;
   /** The selected row's key on the current tab. */
   selectedKey: string | null;
+  /** The selected row is a capture whose write has not landed: it cannot be decided yet. */
+  selectedWaiting?: boolean;
 };
 
-/** `a` accepts and `r` rejects the selected pending row; null when the key does not apply now. */
-export function decisionFor(
-  e: KeyLike,
-  c: DecisionContext,
-): { action: "accept" | "reject"; key: string } | null {
+/** What a/r say on a row Claude has not written yet (the disabled buttons' tooltip too). */
+export const WAITING_REFUSAL = "Claude hasn't written this yet";
+
+export type KeyDecision = { action: "accept" | "reject"; key: string } | { refused: string };
+
+/**
+ * `a` accepts and `r` rejects the selected pending row; `refused` when the key applies but the row
+ * cannot be decided (the reason is announced); null when the key does not apply now.
+ */
+export function decisionFor(e: KeyLike, c: DecisionContext): KeyDecision | null {
   if (e.ctrlKey || e.metaKey || e.altKey) return null;
   const action = e.key === "a" ? "accept" : e.key === "r" ? "reject" : null;
   if (!action) return null;
   if (c.tab !== "pending" || c.typing || c.menuOpen || c.readOnly || c.busy || !c.selectedKey) return null;
+  if (c.selectedWaiting) return { refused: WAITING_REFUSAL };
   return { action, key: c.selectedKey };
 }

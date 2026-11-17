@@ -4,6 +4,7 @@
   import type { DiffKind } from "../lib/api";
   import { folderPrefix, folderRejectPrompt, type DecideAction, type DecideTarget, type Prompt } from "../lib/decide";
   import { iconFor, type IconTheme } from "../lib/icons";
+  import { WAITING_REFUSAL } from "../lib/keys";
   import { nodeKey, type Group, type Row } from "../lib/rows";
   import { relTime } from "../lib/time";
   import type { TreeNode } from "../lib/tree";
@@ -31,6 +32,7 @@
     canDecide = false,
     busy = false,
     ondecide = () => {},
+    onnotice = () => {},
   }: {
     groups: Group[];
     showGroups: boolean;
@@ -49,6 +51,8 @@
     busy?: boolean;
     /** `row` is the file decided, or null for a folder. */
     ondecide?: (action: DecideAction, target: DecideTarget, row: Row | null) => void;
+    /** Says why an action is unavailable (through the app's live region). */
+    onnotice?: (message: string) => void;
   } = $props();
 
   let treeEl: HTMLDivElement | undefined = $state();
@@ -347,7 +351,29 @@
       </button>
       <!-- Mouse shortcuts; the keyboard equivalents are A, R and O on the selected row. -->
       <div class="actions">
-        {#if canDecide && tab === "pending"}
+        {#if row.waiting}
+          <!-- The row's own label sits under these buttons; this copy keeps it readable. -->
+          <span class="meta waiting" title="Captured before Claude wrote it; the write hasn't landed yet">waiting for write…</span>
+        {/if}
+        {#if canDecide && tab === "pending" && row.waiting}
+          <!-- aria-disabled, not disabled: the tooltip still shows and a click says why. -->
+          <button
+            class="act accept"
+            tabindex="-1"
+            aria-disabled="true"
+            aria-label="Accept {n.name}: {WAITING_REFUSAL}"
+            title={WAITING_REFUSAL}
+            onclick={() => onnotice(WAITING_REFUSAL)}
+          >{@render check()}</button>
+          <button
+            class="act reject"
+            tabindex="-1"
+            aria-disabled="true"
+            aria-label="Reject {n.name}: {WAITING_REFUSAL}"
+            title={WAITING_REFUSAL}
+            onclick={() => onnotice(WAITING_REFUSAL)}
+          >{@render cross()}</button>
+        {:else if canDecide && tab === "pending"}
           <button
             class="act accept"
             tabindex="-1"
@@ -549,25 +575,34 @@
       color 120ms var(--ease),
       background 120ms var(--ease);
   }
-  .act:hover:not(:disabled) {
+  .act:hover:not(:disabled):not([aria-disabled="true"]) {
     color: var(--text);
     background: color-mix(in srgb, var(--text) 9%, transparent);
   }
-  .act.accept:hover:not(:disabled) {
+  .act.accept:hover:not(:disabled):not([aria-disabled="true"]) {
     color: var(--positive);
   }
-  .act.reject:hover:not(:disabled) {
+  .act.reject:hover:not(:disabled):not([aria-disabled="true"]) {
     color: var(--negative);
   }
-  .act:disabled {
+  .act:disabled,
+  .act[aria-disabled="true"] {
     opacity: 0.45;
   }
-  .item:hover .stats,
-  .item:hover .meta,
-  .item:focus-within .stats,
-  .item:focus-within .meta,
-  .item.selected .stats,
-  .item.selected .meta {
+  .act[aria-disabled="true"]:hover {
+    color: var(--muted);
+    background: none;
+  }
+  .actions .meta.waiting {
+    margin-right: 6px;
+    white-space: nowrap;
+  }
+  .item:hover > .row .stats,
+  .item:hover > .row .meta,
+  .item:focus-within > .row .stats,
+  .item:focus-within > .row .meta,
+  .item.selected > .row .stats,
+  .item.selected > .row .meta {
     visibility: hidden;
   }
 
