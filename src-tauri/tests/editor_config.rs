@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 #[test]
 fn render_splits_template_before_substituting() {
     assert_eq!(
-        render_editor_command("zed {path}:{line}", "/a b/c.ts", 12),
+        render_editor_command("zed {path}:{line}", "/a b/c.ts", 12, 1),
         vec!["zed".to_string(), "/a b/c.ts:12".to_string()]
     );
     assert_eq!(
-        render_editor_command("code -g {path}:{line}", "/a b/c.ts", 12),
+        render_editor_command("code -g {path}:{line}", "/a b/c.ts", 12, 1),
         vec!["code".to_string(), "-g".to_string(), "/a b/c.ts:12".to_string()]
     );
 }
@@ -24,7 +24,7 @@ fn render_splits_template_before_substituting() {
 #[test]
 fn render_appends_path_when_template_has_no_placeholder() {
     assert_eq!(
-        render_editor_command("subl", "/x y.rs", 3),
+        render_editor_command("subl", "/x y.rs", 3, 1),
         vec!["subl".to_string(), "/x y.rs".to_string()]
     );
 }
@@ -32,7 +32,7 @@ fn render_appends_path_when_template_has_no_placeholder() {
 #[test]
 fn render_does_not_reexpand_placeholders_inside_the_path() {
     assert_eq!(
-        render_editor_command("zed {path}:{line}", "/w/{line}.ts", 7),
+        render_editor_command("zed {path}:{line}", "/w/{line}.ts", 7, 1),
         vec!["zed".to_string(), "/w/{line}.ts:7".to_string()]
     );
 }
@@ -44,7 +44,7 @@ fn missing_config_gives_default_and_creates_it() {
     assert_eq!(p, home.path().join(".claudegate-desktop").join("config.json"));
     let c = load_or_create(&p);
     assert_eq!(c, Config { editor: DEFAULT_EDITOR.into(), custom_editor: None, read_only: false });
-    assert_eq!(DEFAULT_EDITOR, "zed {path}:{line}");
+    assert_eq!(DEFAULT_EDITOR, "zed {path}:{line}:{col}");
     assert!(p.is_file(), "defaults written to the app's own dir");
     assert_eq!(load_or_create(&p), c);
 }
@@ -144,7 +144,7 @@ fn resolver_falls_back_to_an_app_bundled_cli() {
 fn only_presets_the_custom_editor_or_the_hand_set_editor_are_allowed() {
     let c = Config { editor: "subl {path}:{line}".into(), custom_editor: Some("nvim +{line} {path}".into()), read_only: false };
     assert_eq!(allowed_template(ZED, &c).unwrap(), ZED);
-    assert_eq!(allowed_template("  code   -g {path}:{line} ", &c).unwrap(), VSCODE);
+    assert_eq!(allowed_template("  code   -g {path}:{line}:{col} ", &c).unwrap(), VSCODE);
     assert!(allowed_template("nvim +{line}  {path}", &c).is_ok());
     assert!(allowed_template("subl {path}:{line}", &c).is_ok(), "the editor the user wrote by hand");
     for bad in ["sh -c {path}", "rm -rf {path}", "zed --dev-server-token x {path}", ""] {
@@ -173,4 +173,50 @@ fn target_must_be_an_absolute_path() {
     assert!(check_target("--new-window").is_err());
     assert!(check_target("rel/a.ts").is_err());
     assert!(check_target("").is_err());
+}
+
+// UX wave 9: open at the exact line and column (Ctrl/Cmd+click, F12).
+
+#[test]
+fn presets_carry_the_column() {
+    assert_eq!(ZED, "zed {path}:{line}:{col}");
+    assert_eq!(VSCODE, "code -g {path}:{line}:{col}");
+}
+
+#[test]
+fn render_substitutes_the_column() {
+    assert_eq!(render_editor_command(ZED, "/a b/c.ts", 12, 5), vec!["zed".to_string(), "/a b/c.ts:12:5".to_string()]);
+    assert_eq!(
+        render_editor_command(VSCODE, "/a/c.ts", 3, 9),
+        vec!["code".to_string(), "-g".to_string(), "/a/c.ts:3:9".to_string()]
+    );
+    // Column 0 means "no column": 1. A `{col}` inside the path is never expanded.
+    assert_eq!(render_editor_command(ZED, "/w/{col}.ts", 7, 0), vec!["zed".to_string(), "/w/{col}.ts:7:1".to_string()]);
+    // A template without `{col}` ignores it.
+    assert_eq!(render_editor_command("hx {path}:{line}", "/f", 2, 8), vec!["hx".to_string(), "/f:2".to_string()]);
+}
+
+#[test]
+fn an_old_preset_is_upgraded_on_load_and_only_the_new_one_is_allowed() {
+    for (old, new) in [("code -g {path}:{line}", VSCODE), ("zed {path}:{line}", ZED), ("  code  -g {path}:{line} ", VSCODE)] {
+        let home = tempfile::tempdir().unwrap();
+        let p = config_path_in(home.path());
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let text = format!(r#"{{"editor":{},"readOnly":true,"mine":{{"k":1}}}}"#, serde_json::to_string(old).unwrap());
+        fs::write(&p, &text).unwrap();
+        let c = load_or_create(&p);
+        assert_eq!(c.editor, new, "{old}");
+        assert!(c.read_only);
+        // Loading never rewrites the user's file.
+        assert_eq!(fs::read_to_string(&p).unwrap(), text);
+        // The allow-list is unchanged in kind: presets, customEditor, the stored editor (upgraded).
+        assert!(allowed_template(new, &c).is_ok());
+        assert!(allowed_template("sh -c {path}", &c).is_err());
+    }
+    // A hand-written editor that merely resembles a preset is kept as written.
+    let home = tempfile::tempdir().unwrap();
+    let p = config_path_in(home.path());
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(&p, r#"{"editor":"code {path}:{line}"}"#).unwrap();
+    assert_eq!(load_or_create(&p).editor, "code {path}:{line}");
 }

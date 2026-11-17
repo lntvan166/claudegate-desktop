@@ -6,6 +6,7 @@
   import { editorLabel, type EditorConfig } from "../lib/editors";
   import { iconFor, type IconTheme } from "../lib/icons";
   import { languageFor } from "../lib/language";
+  import { modifiedPositionFor } from "../lib/navigate";
   import { paneState } from "../lib/paneState";
   import type { Row } from "../lib/rows";
   import OpenWith from "./OpenWith.svelte";
@@ -33,6 +34,7 @@
     ondecide = () => {},
     onnotice = () => {},
     onback = null,
+    onopenat = () => {},
   }: {
     row: Row | null;
     kind: DiffKind;
@@ -59,7 +61,67 @@
     onnotice?: (message: string) => void;
     /** Narrow window: the diff covers the list; Back (or Esc) returns to it. */
     onback?: (() => void) | null;
+    /** Open the file at a position on its current (modified) side: Ctrl/Cmd+click, F12, the menu. */
+    onopenat?: (line: number, col: number) => void;
   } = $props();
+
+  /** The last cursor position in either side of the diff, for "Open at cursor". */
+  let cursor: { side: "original" | "modified"; line: number; col: number } | null = null;
+  const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+
+  /** Opens the file at `line`:`col` of `side`; the original side is carried across the changes. */
+  function openAt(side: "original" | "modified", line: number, col: number) {
+    if (side === "modified") return onopenat(line, col);
+    const p = modifiedPositionFor(line, col, editor?.getLineChanges() ?? []);
+    onopenat(p.line, p.col);
+  }
+
+  /** "Open at cursor (F12)" from the menu: the last cursor, else the first change. */
+  function openAtCursor() {
+    if (cursor) openAt(cursor.side, cursor.line, cursor.col);
+    else onopenat(firstLine, 1);
+  }
+
+  type CodeEditor = import("monaco-editor/editor/editor.api.js").editor.IStandaloneCodeEditor;
+
+  /** VS Code's go-to gesture on one side: Ctrl/Cmd+hover underlines the word, click or F12 opens. */
+  function wireNavigation(m: Monaco, side: "original" | "modified", e: CodeEditor) {
+    const link = e.createDecorationsCollection();
+    const held = (ev: { ctrlKey: boolean; metaKey: boolean }) => (isMac ? ev.metaKey : ev.ctrlKey);
+    const onText = (t: { type: number; position: unknown }) => t.type === m.editor.MouseTargetType.CONTENT_TEXT && !!t.position;
+    e.onMouseMove((ev) => {
+      const pos = ev.target.position;
+      if (!held(ev.event) || !pos || !onText(ev.target)) return link.clear();
+      const w = e.getModel()?.getWordAtPosition(pos);
+      const range = w
+        ? new m.Range(pos.lineNumber, w.startColumn, pos.lineNumber, w.endColumn)
+        : new m.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column + 1);
+      link.set([{ range, options: { inlineClassName: "cg-link" } }]);
+    });
+    e.onMouseLeave(() => link.clear());
+    e.onKeyUp((ev) => {
+      if (!held(ev)) link.clear();
+    });
+    e.onMouseDown((ev) => {
+      const pos = ev.target.position;
+      if (!held(ev.event) || !ev.event.leftButton || !pos || !onText(ev.target)) return;
+      ev.event.preventDefault();
+      link.clear();
+      openAt(side, pos.lineNumber, pos.column);
+    });
+    e.onDidChangeCursorPosition((ev) => {
+      cursor = { side, line: ev.position.lineNumber, col: ev.position.column };
+    });
+    e.addAction({
+      id: `claudegate.openAtCursor.${side}`,
+      label: "Open at cursor in editor",
+      keybindings: [m.KeyCode.F12],
+      run: (ed) => {
+        const p = ed.getPosition();
+        if (p) openAt(side, p.lineNumber, p.column);
+      },
+    });
+  }
 
   /** The decisions the header offers for the shown row's tab. */
   const decisions = $derived<{ action: DecideAction; label: string; key?: string; tone: string }[]>(
@@ -144,7 +206,10 @@
   // object: a refresh hands in a fresh object for the same row and must keep the computed line.
   $effect(() => {
     void rowIdent;
-    untrack(() => (firstLine = 1));
+    untrack(() => {
+      firstLine = 1;
+      cursor = null;
+    });
   });
 
   let setDiffTheme: MonacoModule["setDiffTheme"] | null = null;
@@ -191,6 +256,8 @@
       fixedOverflowWidgets: true,
       ariaLabel: "Diff",
     });
+    wireNavigation(m, "original", ed.getOriginalEditor());
+    wireNavigation(m, "modified", ed.getModifiedEditor());
     ed.onDidUpdateDiff(() => {
       const changes = ed.getLineChanges() ?? [];
       const c = changes[0];
@@ -339,7 +406,7 @@
           </button>
         {/each}
       </div>
-      <OpenWith {config} {onopen} {onpick} />
+      <OpenWith {config} {onopen} {onpick} onopencursor={pane === "editor" ? openAtCursor : null} />
     </div>
   {/if}
 
@@ -601,6 +668,11 @@
   }
   .editor[hidden] {
     display: none;
+  }
+  /* Ctrl/Cmd held over a token: it reads as a link, as in VS Code. */
+  .editor :global(.cg-link) {
+    text-decoration: underline;
+    cursor: pointer;
   }
   /* Quick fetches never show it; only a slow one fades in. */
   .loading {

@@ -319,10 +319,10 @@
     selectedRow = null;
   }
 
-  async function open(row: Row, line: number, template: string | null = null) {
+  async function open(row: Row, line: number, template: string | null = null, col = 1) {
     openError = null;
     try {
-      await openInEditor(row.path, line, template);
+      await openInEditor(row.path, line, col, template);
     } catch (e) {
       openError = String(e);
     }
@@ -841,6 +841,7 @@
       bind:firstLine
       {openError}
       onopen={() => selectedRow && void open(selectedRow, firstLine)}
+      onopenat={(line, col) => selectedRow && void open(selectedRow, line, null, col)}
       onpick={(t) => void pickEditor(t)}
       ondismiss={() => (openError = null)}
       canDecide={canDecide && diffShown}

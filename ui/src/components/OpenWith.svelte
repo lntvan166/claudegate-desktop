@@ -7,6 +7,7 @@
     disabled = false,
     onopen,
     onpick,
+    onopencursor = null,
   }: {
     config: EditorConfig;
     disabled?: boolean;
@@ -14,6 +15,8 @@
     onopen: () => void;
     /** Open with `template` and remember it. */
     onpick: (template: string) => void;
+    /** Open in the remembered editor at the diff's cursor (F12); null when no diff is shown. */
+    onopencursor?: (() => void) | null;
   } = $props();
 
   let open = $state(false);
@@ -24,14 +27,15 @@
   const options = $derived(menuOptions(config));
   const label = $derived(editorLabel(config.editor));
 
-  const items = () => [...(menu?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]') ?? [])];
+  const items = () => [...(menu?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"], [role="menuitem"]') ?? [])];
 
   async function show(focus: "current" | "first" | "last" = "current") {
     open = true;
     await tick();
     const all = items();
+    const shift = onopencursor ? 1 : 0;
     const i =
-      focus === "first" ? 0 : focus === "last" ? all.length - 1 : Math.max(0, options.findIndex((o) => o.current));
+      focus === "first" ? 0 : focus === "last" ? all.length - 1 : Math.max(0, options.findIndex((o) => o.current)) + shift;
     all[i]?.focus();
   }
 
@@ -115,6 +119,23 @@
 
   {#if open}
     <div class="menu" role="menu" aria-label="Open with" tabindex="-1" bind:this={menu} onkeydown={onMenuKey}>
+      {#if onopencursor}
+        <button
+          role="menuitem"
+          tabindex="-1"
+          onclick={() => {
+            hide(true);
+            onopencursor?.();
+          }}
+        >
+          <svg class="check" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path d="M4 2.5v11M4 8h8.5M9.5 5l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          <span class="label">Open at cursor in {label}</span>
+          <kbd class="cmd">F12</kbd>
+        </button>
+        <div class="sep" role="separator"></div>
+      {/if}
       <p class="menu-title" role="presentation">Open with</p>
       {#each options as o (o.label)}
         <button role="menuitemradio" aria-checked={o.current} tabindex="-1" onclick={() => pick(o.template)}>
@@ -199,6 +220,11 @@
     }
   }
 
+  .sep {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--rule);
+  }
   .menu-title {
     padding: 6px 8px 4px;
     font-size: var(--fs-meta);

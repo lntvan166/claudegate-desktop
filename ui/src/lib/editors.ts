@@ -1,6 +1,9 @@
 // Editor presets for "Open with". Must match ZED / VSCODE in src-tauri/src/config.rs.
-export const ZED = "zed {path}:{line}";
-export const VSCODE = "code -g {path}:{line}";
+export const ZED = "zed {path}:{line}:{col}";
+export const VSCODE = "code -g {path}:{line}:{col}";
+/** The presets before `{col}`; config.rs reads a stored one as its successor. */
+const OLD_ZED = "zed {path}:{line}";
+const OLD_VSCODE = "code -g {path}:{line}";
 
 /** The app's settings (src-tauri/src/config.rs `Config`). */
 export type EditorConfig = { editor: string; customEditor?: string | null; readOnly?: boolean };
@@ -10,8 +13,8 @@ const norm = (t: string) => t.trim().split(/\s+/).join(" ");
 /** A short name for the editor a template runs: the preset's name, else the program's base name. */
 export function editorLabel(template: string): string {
   const t = norm(template);
-  if (t === ZED) return "Zed";
-  if (t === VSCODE) return "VS Code";
+  if (t === ZED || t === OLD_ZED) return "Zed";
+  if (t === VSCODE || t === OLD_VSCODE) return "VS Code";
   const program = t.split(" ")[0] ?? "";
   const base = program.split(/[\\/]/).pop() ?? "";
   return base.replace(/\.(exe|cmd|bat)$/i, "") || "editor";

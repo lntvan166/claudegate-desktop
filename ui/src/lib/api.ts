@@ -81,8 +81,8 @@ export interface Api {
   getConfig(): Promise<EditorConfig>;
   /** Remembers `template` as the editor in ~/.claudegate-desktop/config.json. */
   setEditor(template: string): Promise<EditorConfig>;
-  /** Opens `path` at `line`; `template` null means the remembered editor. */
-  openInEditor(path: string, line: number, template: string | null): Promise<void>;
+  /** Opens `path` at `line`:`col`; `template` null means the remembered editor. */
+  openInEditor(path: string, line: number, col: number, template: string | null): Promise<void>;
   /** The tray tooltip's total. */
   setPendingCount(count: number): Promise<void>;
   /**
@@ -101,7 +101,7 @@ const tauriApi: Api = {
   onChanged: (handler) => listen<ChangedPayload>(CHANGED_EVENT, (e) => handler(e.payload)),
   getConfig: () => invoke<EditorConfig>("get_config"),
   setEditor: (template) => invoke<EditorConfig>("set_editor", { template }),
-  openInEditor: (path, line, template) => invoke<void>("open_in_editor", { path, line, template }),
+  openInEditor: (path, line, col, template) => invoke<void>("open_in_editor", { path, line, col, template }),
   setPendingCount: (count) => invoke<void>("set_pending_count", { count }),
   decide: (root, action, target) => invoke<DecideReport>("decide", { root, action, target }),
   setReadOnly: (on) => invoke<EditorConfig>("set_read_only", { on }),
@@ -131,8 +131,8 @@ export const onChanged = async (handler: (p: ChangedPayload) => void) =>
   (await api()).onChanged(handler);
 export const getConfig = async () => (await api()).getConfig();
 export const setEditor = async (template: string) => (await api()).setEditor(template);
-export const openInEditor = async (path: string, line: number, template: string | null = null) =>
-  (await api()).openInEditor(path, line, template);
+export const openInEditor = async (path: string, line: number, col = 1, template: string | null = null) =>
+  (await api()).openInEditor(path, line, col, template);
 export const setPendingCount = async (count: number) => (await api()).setPendingCount(count);
 export const decide = async (root: string, action: DecideAction, target: DecideTarget) =>
   (await api()).decide(root, action, target);

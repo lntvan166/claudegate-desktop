@@ -3,14 +3,17 @@ import { editorLabel, menuOptions, VSCODE, ZED } from "./editors";
 
 describe("editors", () => {
   it("uses the brief's preset templates", () => {
-    expect(ZED).toBe("zed {path}:{line}");
-    expect(VSCODE).toBe("code -g {path}:{line}");
+    expect(ZED).toBe("zed {path}:{line}:{col}");
+    expect(VSCODE).toBe("code -g {path}:{line}:{col}");
   });
 
   it("names presets, and anything else by its program", () => {
     expect(editorLabel(ZED)).toBe("Zed");
     expect(editorLabel(VSCODE)).toBe("VS Code");
-    expect(editorLabel("  zed  {path}:{line} ")).toBe("Zed");
+    expect(editorLabel("  zed  {path}:{line}:{col} ")).toBe("Zed");
+    // The presets before {col} still read as their editor.
+    expect(editorLabel("zed {path}:{line}")).toBe("Zed");
+    expect(editorLabel("code -g {path}:{line}")).toBe("VS Code");
     expect(editorLabel("/opt/sublime/subl {path}:{line}")).toBe("subl");
     expect(editorLabel("C:\\Tools\\hx.exe {path}")).toBe("hx");
     expect(editorLabel("")).toBe("editor");

@@ -6,11 +6,13 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Splits `template` on whitespace **before** substituting `{path}` and `{line}`, so a path with
-/// spaces stays one argument and nothing in it is re-read as a placeholder. A template that never
-/// mentions `{path}` gets the path appended as the last argument.
-pub fn render_editor_command(template: &str, path: &str, line: u32) -> Vec<String> {
+/// Splits `template` on whitespace **before** substituting `{path}`, `{line}` and `{col}`, so a
+/// path with spaces stays one argument and nothing in it is re-read as a placeholder. A template
+/// that never mentions `{path}` gets the path appended as the last argument. Line and column are
+/// 1-based; 0 means 1.
+pub fn render_editor_command(template: &str, path: &str, line: u32, col: u32) -> Vec<String> {
     let line = line.max(1).to_string();
+    let col = col.max(1).to_string();
     let mut saw_path = false;
     let mut argv: Vec<String> = template
         .split_whitespace()
@@ -27,6 +29,9 @@ pub fn render_editor_command(template: &str, path: &str, line: u32) -> Vec<Strin
                     rest = t;
                 } else if let Some(t) = tail.strip_prefix("{line}") {
                     out.push_str(&line);
+                    rest = t;
+                } else if let Some(t) = tail.strip_prefix("{col}") {
+                    out.push_str(&col);
                     rest = t;
                 } else {
                     out.push('{');
@@ -160,9 +165,9 @@ pub fn check_target(path: &str) -> Result<(), String> {
 }
 
 /// Resolves and spawns the editor for `template`. Returns once the process has started.
-pub fn launch(template: &str, path: &str, line: u32) -> Result<(), String> {
+pub fn launch(template: &str, path: &str, line: u32, col: u32) -> Result<(), String> {
     check_target(path)?;
-    let mut argv = render_editor_command(template, path, line);
+    let mut argv = render_editor_command(template, path, line, col);
     if argv.is_empty() {
         return Err("The editor command is empty. Choose an editor from the Open with menu.".into());
     }
@@ -198,7 +203,7 @@ pub fn launch(template: &str, path: &str, line: u32) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn open_in_editor(path: String, line: u32, template: Option<String>) -> Result<(), String> {
+pub async fn open_in_editor(path: String, line: u32, col: Option<u32>, template: Option<String>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         check_target(&path)?;
         let cfg = crate::config::load_or_create(&crate::config::config_path());
@@ -206,7 +211,7 @@ pub async fn open_in_editor(path: String, line: u32, template: Option<String>) -
             Some(t) => crate::config::allowed_template(&t, &cfg)?,
             None => cfg.editor,
         };
-        launch(&t, &path, line)
+        launch(&t, &path, line, col.unwrap_or(1))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -218,12 +223,12 @@ mod tests {
 
     #[test]
     fn line_zero_is_clamped_to_one() {
-        assert_eq!(render_editor_command("zed {path}:{line}", "/f", 0), vec!["zed", "/f:1"]);
+        assert_eq!(render_editor_command("zed {path}:{line}", "/f", 0, 0), vec!["zed", "/f:1"]);
     }
 
     #[test]
     fn unknown_braces_are_kept() {
-        assert_eq!(render_editor_command("ed {x} {path}", "/f", 2), vec!["ed", "{x}", "/f"]);
+        assert_eq!(render_editor_command("ed {x} {path}", "/f", 2, 1), vec!["ed", "{x}", "/f"]);
     }
 
     #[test]

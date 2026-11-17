@@ -4,14 +4,23 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const ZED: &str = "zed {path}:{line}";
-pub const VSCODE: &str = "code -g {path}:{line}";
+pub const ZED: &str = "zed {path}:{line}:{col}";
+pub const VSCODE: &str = "code -g {path}:{line}:{col}";
 pub const DEFAULT_EDITOR: &str = ZED;
+
+/// The presets before `{col}`: a stored `editor` equal to one is read as its successor, so
+/// "Open at cursor" lands on the column. The file itself is not rewritten.
+const UPGRADES: [(&str, &str); 2] = [("zed {path}:{line}", ZED), ("code -g {path}:{line}", VSCODE)];
+
+fn upgraded(editor: String) -> String {
+    let n = norm(&editor);
+    UPGRADES.iter().find(|(old, _)| *old == n).map_or(editor, |(_, new)| (*new).to_string())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
-    /// Command template for "Open in editor": `{path}` and `{line}` are substituted per argument.
+    /// Command template for "Open in editor": `{path}`, `{line}` and `{col}` are substituted per argument.
     pub editor: String,
     /// A user-supplied template offered as "Custom…" in the Open-with menu.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,7 +57,7 @@ fn non_empty(s: Option<&str>) -> Option<String> {
 
 fn from_value(v: &serde_json::Value) -> Config {
     Config {
-        editor: non_empty(v.get("editor").and_then(|e| e.as_str())).unwrap_or_else(|| DEFAULT_EDITOR.into()),
+        editor: upgraded(non_empty(v.get("editor").and_then(|e| e.as_str())).unwrap_or_else(|| DEFAULT_EDITOR.into())),
         custom_editor: non_empty(v.get("customEditor").and_then(|e| e.as_str())),
         read_only: v.get("readOnly").and_then(|e| e.as_bool()).unwrap_or(false),
     }
@@ -218,7 +227,7 @@ mod tests {
     #[test]
     fn serializes_camel_case_without_absent_custom() {
         let v = serde_json::to_value(Config::default()).unwrap();
-        assert_eq!(v, serde_json::json!({ "editor": "zed {path}:{line}", "readOnly": false }));
+        assert_eq!(v, serde_json::json!({ "editor": "zed {path}:{line}:{col}", "readOnly": false }));
         let c = Config { editor: VSCODE.into(), custom_editor: Some("x".into()), read_only: false };
         assert_eq!(serde_json::to_value(c).unwrap()["customEditor"], "x");
     }

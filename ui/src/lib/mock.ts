@@ -284,7 +284,7 @@ function sample(path: string, isNew: boolean): { before: string | null; after: s
   return { before: CLIENT_BEFORE, after: CLIENT_AFTER };
 }
 
-let config: EditorConfig = { editor: "zed {path}:{line}", customEditor: "nvim +{line} {path}", readOnly: false };
+let config: EditorConfig = { editor: "zed {path}:{line}:{col}", customEditor: "nvim +{line} {path}", readOnly: false };
 
 const delay = <T>(v: T) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), 120));
 
@@ -347,9 +347,10 @@ export const mockApi: Api = {
     config = { ...config, editor: template };
     return delay(config);
   },
-  openInEditor: async (path, line, template) => {
+  openInEditor: async (path, line, col, template) => {
     const t = template ?? config.editor;
-    console.info("[mock] open", t, path, line);
+    console.info("[mock] open", t, path, line, col);
+    (globalThis as Record<string, unknown>).__lastOpen = { path, line, col, template: t };
     if (t.startsWith("nvim")) {
       throw "Couldn't find nvim (`nvim`). Install its command-line tool, or pick another editor.";
     }
