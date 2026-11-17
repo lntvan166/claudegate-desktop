@@ -85,26 +85,65 @@ export function storeFailure(action: DecideAction, err: DecideError): { note: st
 }
 
 export type Undo = {
-  action: DecideAction;
-  target: { kind: "file"; scope: string; key: string };
+  action: "revert" | "reapply";
   /**
-   * The key is a path that must be resolved to the new record's id (in the refreshed Accepted
-   * list, see `recordIdFor`) before the call.
+   * What the undo sends. A file target's key, and a bulk or folder target's `keys`, are filled in
+   * by `undoKeys` just before the call: paths for a reapply, the new records' ids for a revert.
    */
+  target: DecideTarget;
+  /** The keys are record ids resolved by path (see `recordIdFor`) against a fresh fetch. */
   byPath: boolean;
+  /** The files the decision actually decided, each with its scope. */
+  rows: { scope: string; path: string }[];
 };
 
 /**
- * The decision that undoes `action` on `target`: an accept by reverting its new record, a reject by
- * reapplying the same path, both in the same scope. Only a single file that was decided can be
- * undone; bulk and folder actions, revert, reapply and clear have none.
+ * The decision that undoes `action` on `target`: an accept by reverting the records it made, a
+ * reject by reapplying the same paths, in the same scopes. A single file must have been decided
+ * cleanly. A bulk or folder decision needs `decided`, the rows the user confirmed; the undo covers
+ * those minus any that failed or changed since. Revert, reapply and clear have none.
  */
-export function undoFor(action: DecideAction, target: DecideTarget, report: DecideReport): Undo | null {
-  if (target.kind !== "file" || report.done !== 1 || report.errors.length > 0) return null;
-  const t = { kind: "file" as const, scope: target.scope, key: target.key };
-  if (action === "accept") return { action: "revert", target: t, byPath: true };
-  if (action === "reject") return { action: "reapply", target: t, byPath: false };
-  return null;
+export function undoFor(
+  action: DecideAction,
+  target: DecideTarget,
+  report: DecideReport,
+  decided?: { scope: string; path: string }[],
+): Undo | null {
+  if (action !== "accept" && action !== "reject") return null;
+  const undo = action === "accept" ? "revert" : "reapply";
+  const byPath = action === "accept";
+  if (target.kind === "file") {
+    if (report.done !== 1 || report.errors.length > 0) return null;
+    const t = { kind: "file" as const, scope: target.scope, key: target.key };
+    return { action: undo, target: t, byPath, rows: [{ scope: target.scope, path: target.key }] };
+  }
+  if (!decided || report.done === 0) return null;
+  const failed = new Set(report.errors.map(([p]) => p));
+  const rows = decided.filter((r) => !failed.has(r.path));
+  if (rows.length === 0) return null;
+  const keys = byPath ? [] : rows.map((r) => r.path);
+  return { action: undo, target: { ...target, keys }, byPath, rows };
+}
+
+/**
+ * The keys an undo sends: its paths for a reapply; for a revert, the record each accept made,
+ * found in `accepted` (a fresh fetch) by scope, path and `decidedAt` ≥ `since`. `missing` names
+ * the paths whose record could not be found; they are not sent.
+ */
+export function undoKeys(
+  u: Undo,
+  accepted: { id: string; path: string; scope: string; decidedAt: string }[],
+  since: string,
+): { keys: string[]; missing: string[] } {
+  if (!u.byPath) return { keys: u.rows.map((r) => r.path), missing: [] };
+  const keys: string[] = [];
+  const missing: string[] = [];
+  for (const r of u.rows) {
+    const id = recordIdFor(accepted, r.scope, r.path, since);
+    if (id) keys.push(id);
+    else missing.push(r.path);
+  }
+  return { keys, missing };
 }
 
 const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -233,8 +272,11 @@ export type Prompt = { text: string; go: string; danger: boolean };
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
+/** Accept all asks first above this many files. */
+export const ACCEPT_ALL_ASK_ABOVE = 5;
+
 /**
- * The question asked before a bulk action, or null for Accept all, which changes no file. Revert
+ * The question asked before a bulk action, or null for an Accept all of 5 files or fewer. Revert
  * and Reapply use the extension's wording (`revertAcceptedAll`, `reapplyAll` in extension.ts).
  */
 export function bulkPrompt(action: BulkAction, tab: "pending" | "accepted" | "rejected", count: number): Prompt | null {
@@ -257,7 +299,8 @@ export function bulkPrompt(action: BulkAction, tab: "pending" | "accepted" | "re
         danger: true,
       };
     case "acceptAll":
-      return null;
+      // Accepting changes no file, so it is not destructive: asked only for a large batch.
+      return count > ACCEPT_ALL_ASK_ABOVE ? { text: `Accept ${plural(count, "file", "files")}?`, go: `Accept ${count}`, danger: false } : null;
   }
 }
 

@@ -40,8 +40,16 @@
     asked = [...keys];
     confirming = a;
     await tick();
-    // Cancel is the safe default.
-    region?.querySelector<HTMLButtonElement>("[data-cancel]")?.focus();
+    // Cancel is the safe default; a question whose answer destroys nothing (Accept all) defaults
+    // to its own action.
+    const sel = prompt && !prompt.danger ? "[data-go]" : "[data-cancel]";
+    region?.querySelector<HTMLButtonElement>(sel)?.focus();
+  }
+
+  /** Accept all: at once for a few files, after "Accept N files?" for more. */
+  function acceptAll() {
+    if (bulkPrompt("acceptAll", tab, keys.length)) void ask("acceptAll");
+    else onaction("acceptAll", [...keys]);
   }
 
   function cancel() {
@@ -108,14 +116,14 @@
   <div class="bar confirm" role="group" aria-label="Confirm" data-confirm bind:this={region} onkeydown={trap}>
     <p class="question">{prompt.text}</p>
     <div class="buttons">
-      <button class="btn" class:danger={prompt.danger} class:primary={!prompt.danger} disabled={busy} onclick={go}>{prompt.go}</button>
+      <button class="btn" class:danger={prompt.danger} class:primary={!prompt.danger} data-go disabled={busy} onclick={go}>{prompt.go}</button>
       <button class="btn" data-cancel onclick={cancel}>Cancel</button>
     </div>
   </div>
 {:else}
   <div class="bar" role="toolbar" aria-label="{tab} actions">
     {#if tab === "pending"}
-      <button class="btn" disabled={busy || count === 0} onclick={() => onaction("acceptAll", [...keys])}>
+      <button class="btn" disabled={busy || count === 0} onclick={() => acceptAll()}>
         {@render check()} Accept all
       </button>
       <button class="btn" disabled={busy || count === 0} onclick={() => void ask("rejectAll")}>

@@ -33,6 +33,7 @@
     storeFailure,
     summarize,
     undoFor,
+    undoKeys,
     type BulkAction,
     type DecideAction,
     type DecideError,
@@ -349,12 +350,21 @@
     result = { ...r, id: ++resultSeq };
   }
 
-  function report(root: string, action: DecideAction, target: DecideTarget, rep: DecideReport, since: string) {
+  function report(
+    root: string,
+    action: DecideAction,
+    target: DecideTarget,
+    rep: DecideReport,
+    since: string,
+    decided?: { scope: string; path: string }[],
+    note?: string,
+  ) {
     const s = summarize(action, target, rep);
-    const u = undoFor(action, target, rep);
+    const u = undoFor(action, target, rep, decided);
     show({
       text: s.text,
-      tone: s.tone,
+      tone: note && s.tone === "ok" ? "warn" : s.tone,
+      note,
       details: rep.errors.length > 0 ? rep.errors : undefined,
       undo: u ? () => void runUndo(root, u, since) : undefined,
     });
@@ -393,7 +403,7 @@
   async function runDecide(
     action: DecideAction,
     target: DecideTarget,
-    opts: { row?: Row | null; reselect?: string } = {},
+    opts: { row?: Row | null; reselect?: string; note?: string } = {},
   ) {
     const root = selected;
     if (busy || !root || !view) return;
@@ -410,6 +420,12 @@
     const nextKey = advanceFrom ? nextAfterDecision(fileOrder(groupsFor(view, "pending"), mode), advanceFrom) : null;
     // Undo of an accept looks for a record stamped at or after this moment, never an older one.
     const since = new Date().toISOString();
+    // A bulk or folder accept/reject: the confirmed rows, with their scopes, for its Undo.
+    const confirmed = target.kind !== "file" ? target.keys : undefined;
+    const decided =
+      confirmed && (action === "accept" || action === "reject")
+        ? view.pending.filter((p) => confirmed.includes(p.path)).map((p) => ({ scope: p.scope, path: p.path }))
+        : undefined;
     busy = true;
     try {
       const rep = await decide(root, action, target);
@@ -418,7 +434,7 @@
       // A failed decision leaves the row where it was: stay on it.
       if (nextKey && rep.done > 0) selectPending(fresh, nextKey);
       else if (opts.reselect && rep.done > 0) selectPending(fresh, opts.reselect);
-      report(root, action, target, rep, since);
+      report(root, action, target, rep, since, decided, opts.note);
     } catch (e) {
       const err = parseDecideError(e);
       if (root !== selected) return;
@@ -430,11 +446,15 @@
     }
   }
 
+  /**
+   * Undoes a decision: exactly the files it decided, with explicit keys. An accept's records are
+   * resolved against a fresh fetch, never `view` (a superseded reload can leave it a step behind).
+   */
   async function runUndo(root: string, u: Undo, since: string) {
     if (busy || root !== selected) return;
-    let key = u.target.key;
+    let keys: string[] = u.rows.map((r) => r.path);
+    let missing: string[] = [];
     if (u.byPath) {
-      // Resolve against a fresh fetch, never `view`: a superseded reload can leave it a step behind.
       busy = true;
       let fresh: ProjectView | null = null;
       try {
@@ -442,14 +462,23 @@
       } catch {}
       busy = false;
       if (root !== selected) return;
-      const id = fresh ? recordIdFor(fresh.accepted, u.target.scope, key, since) : null;
-      if (!id) {
+      const found = fresh ? undoKeys(u, fresh.accepted, since) : { keys: [], missing: keys };
+      if (found.keys.length === 0) {
         show({ text: "Couldn't find that accept to undo — use Revert in the Accepted tab", tone: "error" });
         return;
       }
-      key = id;
+      keys = found.keys;
+      missing = found.missing;
     }
-    await runDecide(u.action, { ...u.target, key }, { reselect: u.target.key });
+    const note =
+      missing.length > 0
+        ? `Couldn't find ${missing.length === 1 ? "1 accept" : `${missing.length} accepts`} to undo (${missing.map(basename).join(", ")}); use Revert in the Accepted tab.`
+        : undefined;
+    if (u.target.kind === "file") {
+      await runDecide(u.action, { ...u.target, key: keys[0] }, { reselect: u.rows[0].path, note });
+    } else {
+      await runDecide(u.action, { ...u.target, keys }, { note });
+    }
   }
 
   /** `keys` are the rows the user counted and confirmed; the backend decides no other. */

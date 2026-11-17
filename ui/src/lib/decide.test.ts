@@ -12,6 +12,7 @@ import {
   storeFailure,
   summarize,
   undoFor,
+  undoKeys,
   type DecideReport,
 } from "./decide";
 
@@ -24,6 +25,7 @@ describe("undoFor", () => {
       action: "revert",
       target: { kind: "file", scope: "/w", key: "/w/a.ts" },
       byPath: true,
+      rows: [{ scope: "/w", path: "/w/a.ts" }],
     });
   });
 
@@ -32,6 +34,7 @@ describe("undoFor", () => {
       action: "reapply",
       target: { kind: "file", scope: "/w/.worktrees/x", key: "/w/a.ts" },
       byPath: false,
+      rows: [{ scope: "/w/.worktrees/x", path: "/w/a.ts" }],
     });
   });
 
@@ -46,14 +49,72 @@ describe("undoFor", () => {
     expect(undoFor("clearRejected", { kind: "all" }, ok(3))).toBeNull();
   });
 
-  it("bulk and folder decisions have no undo", () => {
-    expect(undoFor("accept", { kind: "all" }, ok(4))).toBeNull();
-    expect(undoFor("reject", { kind: "folder", scope: "/w", prefix: "/w/src" }, ok(2))).toBeNull();
-  });
-
   it("nothing decided, or a failure, has no undo", () => {
     expect(undoFor("accept", file("/w/a.ts"), ok(0))).toBeNull();
     expect(undoFor("reject", file("/w/a.ts"), ok(0, [], [["/w/a.ts", "EACCES"]]))).toBeNull();
+  });
+});
+
+describe("undoFor bulk and folder decisions (UX wave 3)", () => {
+  const rows = [
+    { scope: "/w", path: "/w/src/a.ts" },
+    { scope: "/w", path: "/w/src/b.ts" },
+    { scope: "/w/.wt/x", path: "/w/.wt/x/c.ts" },
+  ];
+  const keys = rows.map((r) => r.path);
+
+  it("undoes a Reject all by reapplying exactly the paths it rejected, with explicit keys", () => {
+    expect(undoFor("reject", { kind: "all", keys }, ok(3), rows)).toEqual({
+      action: "reapply",
+      target: { kind: "all", keys },
+      byPath: false,
+      rows,
+    });
+  });
+
+  it("leaves out the rows that failed or changed since confirming", () => {
+    const u = undoFor("reject", { kind: "all", keys }, ok(2, [], [["/w/src/b.ts", "EACCES"]]), rows);
+    expect(u?.target).toEqual({ kind: "all", keys: ["/w/src/a.ts", "/w/.wt/x/c.ts"] });
+    expect(u?.rows.map((r) => r.path)).toEqual(["/w/src/a.ts", "/w/.wt/x/c.ts"]);
+  });
+
+  it("undoes a folder accept by reverting the records it made, resolved by path later", () => {
+    const folder = { kind: "folder" as const, scope: "/w", prefix: "/w/src", keys: keys.slice(0, 2) };
+    expect(undoFor("accept", folder, ok(2), rows.slice(0, 2))).toEqual({
+      action: "revert",
+      target: { kind: "folder", scope: "/w", prefix: "/w/src", keys: [] },
+      byPath: true,
+      rows: rows.slice(0, 2),
+    });
+  });
+
+  it("has no undo without the confirmed rows, or when nothing was decided", () => {
+    expect(undoFor("accept", { kind: "all", keys }, ok(3))).toBeNull();
+    expect(undoFor("accept", { kind: "all", keys }, ok(0, [], [["/w/src/a.ts", "x"]]), rows)).toBeNull();
+  });
+});
+
+describe("undoKeys (UX wave 3)", () => {
+  const since = "2026-11-16T11:00:00.000Z";
+  const rec = (path: string, decidedAt: string, scope = "/w") => ({ id: `${decidedAt}::${path}`, path, scope, decidedAt });
+
+  it("a reapply sends the paths themselves", () => {
+    const u = { action: "reapply" as const, target: { kind: "all" as const, keys: ["/w/a.ts"] }, byPath: false, rows: [{ scope: "/w", path: "/w/a.ts" }] };
+    expect(undoKeys(u, [], since)).toEqual({ keys: ["/w/a.ts"], missing: [] });
+  });
+
+  it("a revert sends the record each accept made, never an older one, and names any it can't find", () => {
+    const u = {
+      action: "revert" as const,
+      target: { kind: "all" as const, keys: [] },
+      byPath: true,
+      rows: [
+        { scope: "/w", path: "/w/a.ts" },
+        { scope: "/w", path: "/w/b.ts" },
+      ],
+    };
+    const accepted = [rec("/w/a.ts", "2026-11-16T10:00:00.000Z"), rec("/w/a.ts", "2026-11-16T11:00:01.000Z"), rec("/w/b.ts", "2026-11-16T09:00:00.000Z")];
+    expect(undoKeys(u, accepted, since)).toEqual({ keys: ["2026-11-16T11:00:01.000Z::/w/a.ts"], missing: ["/w/b.ts"] });
   });
 });
 
@@ -235,6 +296,17 @@ describe("bulkPrompt", () => {
 
   it("Accept all needs no question: it changes no file", () => {
     expect(bulkPrompt("acceptAll", "pending", 3)).toBeNull();
+  });
+});
+
+describe("Accept all confirmation (UX wave 3)", () => {
+  it("asks when more than 5 files would be accepted; accepting is not destructive", () => {
+    expect(bulkPrompt("acceptAll", "pending", 12)).toEqual({ text: "Accept 12 files?", go: "Accept 12", danger: false });
+    expect(bulkPrompt("acceptAll", "pending", 6)?.go).toBe("Accept 6");
+  });
+  it("accepts 5 or fewer at once", () => {
+    expect(bulkPrompt("acceptAll", "pending", 5)).toBeNull();
+    expect(bulkPrompt("acceptAll", "pending", 1)).toBeNull();
   });
 });
 
