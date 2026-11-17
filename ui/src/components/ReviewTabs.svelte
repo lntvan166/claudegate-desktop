@@ -48,12 +48,12 @@
   </div>
 
   <div class="mode" role="group" aria-label="Layout">
-    <button class:on={mode === "tree"} aria-pressed={mode === "tree"} title="Tree" onclick={() => onmode("tree")}>
+    <button class:on={mode === "tree"} aria-pressed={mode === "tree"} aria-label="Show as a folder tree" title="Folder tree" onclick={() => onmode("tree")}>
       <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
         <path d="M3 3h4M6 8h7M6 13h7M4 4v8.5c0 .3.2.5.5.5H6M4 8h2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
       </svg>
     </button>
-    <button class:on={mode === "list"} aria-pressed={mode === "list"} title="Flat list" onclick={() => onmode("list")}>
+    <button class:on={mode === "list"} aria-pressed={mode === "list"} aria-label="Show as a flat list" title="Flat list" onclick={() => onmode("list")}>
       <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
         <path d="M3 4h10M3 8h10M3 12h10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
       </svg>

@@ -12,7 +12,11 @@ export type KeyAction =
   | { type: "pending"; dir: 1 | -1 }
   | { type: "open" }
   | { type: "projects" }
-  | { type: "tab"; tab: DiffKind };
+  | { type: "tab"; tab: DiffKind }
+  /** Shift+A / Shift+R: Accept all / Reject all, through their confirmations. */
+  | { type: "bulk"; action: "acceptAll" | "rejectAll" }
+  /** `?`: the shortcut overlay. */
+  | { type: "help" };
 
 type KeyLike = { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean };
 
@@ -36,6 +40,12 @@ export function actionFor(e: KeyLike): KeyAction | null {
       return { type: "open" };
     case "[":
       return { type: "projects" };
+    case "A":
+      return { type: "bulk", action: "acceptAll" };
+    case "R":
+      return { type: "bulk", action: "rejectAll" };
+    case "?":
+      return { type: "help" };
   }
   const tab = TABS[e.key];
   return tab ? { type: "tab", tab } : null;
@@ -68,7 +78,12 @@ export type DecisionContext = {
   selectedWaiting?: boolean;
   /** A narrow window shows the list or the diff; a file is never decided unseen. */
   diffHidden?: boolean;
+  /** Why decisions are off when `readOnly` is set for a reason other than the switch. */
+  lockReason?: string;
 };
+
+/** What a/r say while read-only mode is on. */
+export const READ_ONLY_REFUSAL = "Read-only mode is on";
 
 /** What a/r say in a narrow window while the list, not the file's diff, is on screen. */
 export const DIFF_HIDDEN_REFUSAL = "Open the file to see its diff before deciding";
@@ -86,7 +101,9 @@ export function decisionFor(e: KeyLike, c: DecisionContext): KeyDecision | null 
   if (e.ctrlKey || e.metaKey || e.altKey) return null;
   const action = e.key === "a" ? "accept" : e.key === "r" ? "reject" : null;
   if (!action) return null;
-  if (c.tab !== "pending" || c.typing || c.menuOpen || c.readOnly || c.busy || !c.selectedKey) return null;
+  if (c.tab !== "pending" || c.typing || c.menuOpen || c.busy) return null;
+  if (c.readOnly) return { refused: c.lockReason ?? READ_ONLY_REFUSAL };
+  if (!c.selectedKey) return null;
   if (c.diffHidden) return { refused: DIFF_HIDDEN_REFUSAL };
   if (c.selectedWaiting) return { refused: WAITING_REFUSAL };
   return { action, key: c.selectedKey };

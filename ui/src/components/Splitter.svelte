@@ -116,6 +116,12 @@
     background: var(--border);
     transition: background 120ms var(--ease);
   }
+  /* Keyboard focus: a visible ring around the handle, not just a tinted 1px line. */
+  .splitter:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -1px;
+    border-radius: 4px;
+  }
   .splitter:hover::after,
   .splitter:focus-visible::after,
   .splitter.dragging::after {

@@ -46,6 +46,13 @@
     region?.querySelector<HTMLButtonElement>(sel)?.focus();
   }
 
+  /** Shift+A / Shift+R: the same buttons, with the same confirmations. */
+  export function trigger(a: "acceptAll" | "rejectAll") {
+    if (busy || count === 0 || tab !== "pending" || confirming) return;
+    if (a === "acceptAll") acceptAll();
+    else void ask("rejectAll");
+  }
+
   /** Accept all: at once for a few files, after "Accept N files?" for more. */
   function acceptAll() {
     if (bulkPrompt("acceptAll", tab, keys.length)) void ask("acceptAll");

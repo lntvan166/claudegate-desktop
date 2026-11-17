@@ -7,6 +7,7 @@
   import ProjectList from "./components/ProjectList.svelte";
   import ResultBar from "./components/ResultBar.svelte";
   import ReviewTabs from "./components/ReviewTabs.svelte";
+  import Shortcuts from "./components/Shortcuts.svelte";
   import Splitter from "./components/Splitter.svelte";
   import {
     decide,
@@ -45,7 +46,7 @@
   } from "./lib/decide";
   import { editorLabel, ZED } from "./lib/editors";
   import type { IconTheme } from "./lib/icons";
-  import { actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL } from "./lib/keys";
+  import { actionFor, decisionFor, DIFF_HIDDEN_REFUSAL, isTypingTarget, nextIndex, READ_ONLY_REFUSAL, WAITING_REFUSAL } from "./lib/keys";
   import { basename, groupsFor, scopeLabel, selectionAfterList, sortProjects, splitHidden, type Row } from "./lib/rows";
   import { Rechecks } from "./lib/recheck";
   import {
@@ -90,6 +91,9 @@
   /** The result bar under the diff. */
   let result = $state<ResultMessage | null>(null);
   let resultSeq = 0;
+  /** The `?` overlay. */
+  let helpOpen = $state(false);
+  let actionBar: ActionBar | undefined = $state();
   /** A short status said through the live region (and shown briefly), e.g. why a key did nothing. */
   let notice = $state<{ id: number; text: string } | null>(null);
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -206,6 +210,8 @@
     return null;
   });
   const canDecide = $derived(!!view && !view.missing && !lock);
+  /** What a/r and Shift+A/R say while decisions are off: the switch, or the lock's own reason. */
+  const lockReason = $derived(lock ? (lock.action === "turnOff" ? READ_ONLY_REFUSAL : lock.text) : null);
   /** Undo and Retry are decisions too: not offered while decisions are off. */
   const shownResult = $derived(
     result && !canDecide ? { ...result, undo: undefined, retry: undefined } : result,
@@ -542,12 +548,14 @@
       closeNarrowDiff();
       return;
     }
+    if (helpOpen) return; // the overlay handles its own keys
     if (isTypingTarget(e.target as HTMLElement | null)) return;
     const d = decisionFor(e, {
       tab,
       typing: false,
       menuOpen: !!document.querySelector('[role="menu"], [data-confirm]'),
-      readOnly: !canDecide,
+      readOnly: !!lock,
+      lockReason: lockReason ?? undefined,
       busy: busy || e.repeat,
       selectedKey: selectedRow?.key ?? null,
       selectedWaiting: selectedRow?.waiting ?? false,
@@ -558,13 +566,26 @@
       announce(d.refused);
       return;
     }
-    if (d && selectedRow) {
+    if (d && selectedRow && canDecide) {
       e.preventDefault();
       const row = selectedRow;
       void runDecide(d.action, { kind: "file", scope: row.scope, key: row.path }, { row });
       return;
     }
     const a = actionFor(e);
+    if (a?.type === "help") {
+      helpOpen = !helpOpen;
+      e.preventDefault();
+      return;
+    }
+    if (a?.type === "bulk") {
+      if (document.querySelector('[role="menu"], [data-confirm]') || !view || view.missing || tab !== "pending") return;
+      e.preventDefault();
+      if (lockReason) announce(lockReason);
+      else if (bulk.length === 0) announce("Nothing to decide");
+      else actionBar?.trigger(a.action);
+      return;
+    }
     if (a?.type === "projects") {
       // Not while the Open-with menu is up, wherever focus is.
       if (document.querySelector('[role="menu"]')) return;
@@ -662,6 +683,10 @@
 </script>
 
 <svelte:window bind:innerWidth />
+
+{#if helpOpen}
+  <Shortcuts editorName={editorLabel(config.editor)} onclose={() => (helpOpen = false)} />
+{/if}
 
 <!-- The live region: always in the DOM so screen readers hear each new status. -->
 <div class="notice-region" role="status" aria-live="polite">
@@ -787,7 +812,7 @@
           </div>
         {:else if view && canDecide && bulk.length > 0}
           {#key tab}
-            <ActionBar {tab} keys={bulk} {busy} outcomes={rejectOutcomes} onaction={runBulk} />
+            <ActionBar bind:this={actionBar} {tab} keys={bulk} {busy} outcomes={rejectOutcomes} onaction={runBulk} />
           {/key}
         {/if}
         <div class="scroll">
@@ -831,6 +856,7 @@
               {busy}
               ondecide={(action, target, row) => void runDecide(action, target, { row })}
               onnotice={announce}
+              lockReason={narrow ? DIFF_HIDDEN_REFUSAL : lockReason}
             />
           {/if}
         </div>

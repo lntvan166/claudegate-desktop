@@ -371,13 +371,13 @@
         </span>
       {/if}
       <div class="view" role="group" aria-label="Diff layout">
-        <button class:on={sideBySide} aria-pressed={sideBySide} title="Side by side" onclick={() => setSide(true)}>
+        <button class:on={sideBySide} aria-pressed={sideBySide} aria-label="Side-by-side diff" title="Side by side" onclick={() => setSide(true)}>
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
             <rect x="2" y="3" width="12" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3" />
             <path d="M8 3v10" stroke="currentColor" stroke-width="1.3" />
           </svg>
         </button>
-        <button class:on={!sideBySide} aria-pressed={!sideBySide} title="Inline" onclick={() => setSide(false)}>
+        <button class:on={!sideBySide} aria-pressed={!sideBySide} aria-label="Inline diff" title="Inline" onclick={() => setSide(false)}>
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
             <rect x="2" y="3" width="12" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3" />
             <path d="M4.5 6.5h7M4.5 9.5h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
@@ -436,10 +436,11 @@
         <dl class="keys">
           <div><dt><kbd>J</kbd> <kbd>K</kbd></dt><dd>Next and previous file</dd></div>
           <div><dt><kbd>N</kbd> <kbd>P</kbd></dt><dd>Next and previous pending, across worktrees</dd></div>
-          <div><dt><kbd>A</kbd> <kbd>R</kbd></dt><dd>Accept or reject the selected pending file</dd></div>
+          <div><dt><kbd>A</kbd> <kbd>R</kbd></dt><dd>Accept or reject the selected file or focused folder</dd></div>
           <div><dt><kbd>O</kbd></dt><dd>Open in {label} at the first change</dd></div>
           <div><dt><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></dt><dd>Pending, accepted, rejected</dd></div>
           <div><dt><kbd>[</kbd></dt><dd>Collapse or expand projects</dd></div>
+          <div><dt><kbd>?</kbd></dt><dd>All shortcuts</dd></div>
         </dl>
       </div>
     {:else if pane === "loading"}
@@ -646,8 +647,8 @@
     display: grid;
     place-items: center;
     flex: none;
-    width: 20px;
-    height: 20px;
+    width: 24px;
+    height: 24px;
     border-radius: var(--radius-chip);
     color: inherit;
   }

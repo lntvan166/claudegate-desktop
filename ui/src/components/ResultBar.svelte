@@ -144,8 +144,8 @@
     display: grid;
     place-items: center;
     flex: none;
-    width: 22px;
-    height: 22px;
+    width: 24px;
+    height: 24px;
     border-radius: var(--radius-chip);
     color: var(--muted);
   }

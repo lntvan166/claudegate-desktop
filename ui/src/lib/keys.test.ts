@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL, DIFF_HIDDEN_REFUSAL } from "./keys";
+import { actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL, DIFF_HIDDEN_REFUSAL, READ_ONLY_REFUSAL } from "./keys";
 
 describe("nextIndex", () => {
   it("clamps without wrapping", () => {
@@ -41,6 +41,13 @@ describe("actionFor", () => {
     expect(actionFor(k("2"))).toEqual({ type: "tab", tab: "accepted" });
     expect(actionFor(k("3"))).toEqual({ type: "tab", tab: "rejected" });
     expect(actionFor(k("["))).toEqual({ type: "projects" });
+  });
+
+  it("maps Shift+A, Shift+R and ? (UX wave 6)", () => {
+    expect(actionFor(k("A"))).toEqual({ type: "bulk", action: "acceptAll" });
+    expect(actionFor(k("R"))).toEqual({ type: "bulk", action: "rejectAll" });
+    expect(actionFor(k("?"))).toEqual({ type: "help" });
+    expect(actionFor(k("A", { ctrlKey: true }))).toBeNull();
   });
 
   it("leaves modified and unknown keys to the system", () => {
@@ -95,11 +102,19 @@ describe("decisionFor", () => {
     expect(decisionFor(k("r"), { ...ctx, tab: "rejected" })).toBeNull();
   });
 
-  it("is ignored while typing, with the menu open, in read-only mode, or mid-decision", () => {
+  it("is ignored while typing, with the menu open, or mid-decision", () => {
     expect(decisionFor(k("a"), { ...ctx, typing: true })).toBeNull();
     expect(decisionFor(k("a"), { ...ctx, menuOpen: true })).toBeNull();
-    expect(decisionFor(k("r"), { ...ctx, readOnly: true })).toBeNull();
     expect(decisionFor(k("r"), { ...ctx, busy: true })).toBeNull();
+  });
+
+  it("in read-only mode says so instead of deciding (UX wave 6)", () => {
+    expect(decisionFor(k("r"), { ...ctx, readOnly: true })).toEqual({ refused: "Read-only mode is on" });
+    expect(READ_ONLY_REFUSAL).toBe("Read-only mode is on");
+    // Even with nothing selected: the key did nothing, and the reason is the mode.
+    expect(decisionFor(k("a"), { ...ctx, readOnly: true, selectedKey: null })).toEqual({ refused: "Read-only mode is on" });
+    // Another lock says its own reason.
+    expect(decisionFor(k("a"), { ...ctx, readOnly: true, lockReason: "Update the app" })).toEqual({ refused: "Update the app" });
   });
 
   it("needs a selected row and an unmodified key", () => {

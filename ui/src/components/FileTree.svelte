@@ -33,6 +33,7 @@
     busy = false,
     ondecide = () => {},
     onnotice = () => {},
+    lockReason = null,
   }: {
     groups: Group[];
     showGroups: boolean;
@@ -54,7 +55,61 @@
     ondecide?: (action: DecideAction, target: DecideTarget, row: Row | null) => void;
     /** Says why an action is unavailable (through the app's live region). */
     onnotice?: (message: string) => void;
+    /** Why decisions are off (said when a/r is pressed on a row then); null when they are on. */
+    lockReason?: string | null;
   } = $props();
+
+  /** `a`/`r` on the focused file or folder: the same actions and confirmations as its buttons. */
+  function decideFocused(e: KeyboardEvent, cur: (typeof items)[number]): boolean {
+    if (e.key !== "a" && e.key !== "r") return false;
+    if (tab !== "pending" || e.repeat || busy) return cur.kind !== "group";
+    if (cur.kind === "group") return false;
+    if (!canDecide) {
+      if (lockReason) onnotice(lockReason);
+      return true;
+    }
+    const accept = e.key === "a";
+    if (cur.kind === "file" && cur.row) {
+      if (cur.row.waiting) {
+        onnotice(WAITING_REFUSAL);
+        return true;
+      }
+      ondecide(accept ? "accept" : "reject", { kind: "file", scope: cur.row.scope, key: cur.row.path }, cur.row);
+      return true;
+    }
+    const found = findFolder(cur.id);
+    if (!found) return true;
+    const rows = actionableRows(found.node);
+    if (rows.length === 0) {
+      onnotice("Nothing in this folder can be decided yet");
+      return true;
+    }
+    if (accept) {
+      const keys = rows.map((r) => r.path);
+      ondecide("accept", { kind: "folder", scope: found.scope, prefix: folderPrefix(found.scope, found.node.rel), keys }, null);
+    } else {
+      void askFolderReject(cur.id, found.scope, found.node);
+    }
+    return true;
+  }
+
+  /** The tree node behind a folder row id, with its scope. */
+  function findFolder(id: string): { scope: string; node: TreeNode<Row> } | null {
+    const walk = (nodes: TreeNode<Row>[], scope: string): TreeNode<Row> | null => {
+      for (const n of nodes) {
+        if (n.kind !== "folder") continue;
+        if (folderId(scope, n.rel) === id) return n;
+        const hit = walk(n.children ?? [], scope);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    for (const t of trees) {
+      const node = walk(t.nodes, t.group.scope.root);
+      if (node) return { scope: t.group.scope.root, node };
+    }
+    return null;
+  }
 
   let treeEl: HTMLDivElement | undefined = $state();
 
@@ -183,6 +238,10 @@
         else if (cur.parent) to = items.findIndex((x) => x.id === cur.parent);
         break;
       default:
+        if (decideFocused(e, cur)) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
         return;
     }
     e.preventDefault();
@@ -574,8 +633,8 @@
   .act {
     display: grid;
     place-items: center;
-    width: 22px;
-    height: 22px;
+    width: 24px;
+    height: 24px;
     border-radius: var(--radius-chip);
     color: var(--muted);
     transition:
