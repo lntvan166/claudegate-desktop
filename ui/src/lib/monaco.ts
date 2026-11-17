@@ -14,7 +14,7 @@ import EditorWorker from "monaco-editor/editor/editor.worker.js?worker";
 import { EncodedTokenMetadata, INITIAL, type StateStack } from "@shikijs/vscode-textmate";
 import { GRAMMARS, SHIKI_THEME, createDiffHighlighter } from "./grammars";
 import { LANGUAGES } from "./language";
-import { buildTheme, fromTextmate, themeName } from "./monacoTheme";
+import { buildTheme, commentOverride, fromTextmate, themeName } from "./monacoTheme";
 
 // The diff runs in the editor worker. No language service runs at all: a read-only diff needs
 // colours, not completions or validation.
@@ -27,10 +27,16 @@ self.MonacoEnvironment = {
 const highlighter = await createDiffHighlighter();
 
 // Our two themes: the TextMate theme's token rules, our chrome and diff tints.
-const monacoThemes = {
-  dark: buildTheme(true, fromTextmate(highlighter.getTheme(SHIKI_THEME.dark))),
-  light: buildTheme(false, fromTextmate(highlighter.getTheme(SHIKI_THEME.light))),
+const textmate = {
+  dark: fromTextmate(highlighter.getTheme(SHIKI_THEME.dark)),
+  light: fromTextmate(highlighter.getTheme(SHIKI_THEME.light)),
 };
+const monacoThemes = {
+  dark: buildTheme(true, textmate.dark),
+  light: buildTheme(false, textmate.light),
+};
+/** Shiki still paints comments its own colour; read it as ours so the token finds its rule. */
+const comments = { dark: commentOverride(true, textmate.dark), light: commentOverride(false, textmate.light) };
 monaco.editor.defineTheme(themeName(true), monacoThemes.dark);
 monaco.editor.defineTheme(themeName(false), monacoThemes.light);
 
@@ -67,7 +73,8 @@ function ruleStyleBits(fontStyle: string | undefined): number {
 /** Switch the diff to the dark or light theme: Shiki's colour map first, then Monaco's theme. */
 export function setDiffTheme(dark: boolean) {
   const ret = highlighter.setTheme(dark ? SHIKI_THEME.dark : SHIKI_THEME.light);
-  colorMap = ret.colorMap.map(norm);
+  const c = dark ? comments.dark : comments.light;
+  colorMap = ret.colorMap.map(norm).map((x) => (c.from && x === c.from ? c.to : x));
   scopeFor.clear();
   for (const r of (dark ? monacoThemes.dark : monacoThemes.light).rules) {
     const c = norm(r.foreground);

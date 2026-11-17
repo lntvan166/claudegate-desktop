@@ -1,7 +1,8 @@
 import dracula from "@shikijs/themes/dracula";
 import githubLight from "@shikijs/themes/github-light";
 import { describe, expect, it } from "vitest";
-import { buildTheme, fromTextmate as fromShiki, themeName } from "./monacoTheme";
+import { contrast } from "./contrast";
+import { buildTheme, commentOverride, fromTextmate as fromShiki, themeName } from "./monacoTheme";
 const rule = (t: ReturnType<typeof buildTheme>, token: string) => t.rules.find((r) => r.token === token);
 
 describe("buildTheme (dark: Shiki's Dracula)", () => {
@@ -72,4 +73,23 @@ describe("both themes", () => {
   it("have distinct names", () => {
     expect(themeName(true)).not.toBe(themeName(false));
   });
+});
+
+describe("comment colour (UX wave 5)", () => {
+  for (const dark of [true, false]) {
+    const shiki = fromShiki(dark ? dracula : githubLight);
+    const t = buildTheme(dark, shiki);
+    const bg = t.colors["editor.background"];
+    const o = commentOverride(dark, shiki);
+
+    it(`${dark ? "dark" : "light"}: comments are readable (4.5:1) and only the comment colour changes`, () => {
+      expect(contrast(`#${rule(t, "comment")!.foreground}`, bg)).toBeGreaterThanOrEqual(4.5);
+      expect(rule(t, "comment")!.foreground).toBe(o.to);
+      // Every other token keeps the TextMate theme's colour.
+      expect(t.rules).toHaveLength(shiki.rules.length);
+      shiki.rules.forEach((r, i) => {
+        if (r.foreground?.toLowerCase() !== o.from) expect(t.rules[i]).toEqual(r);
+      });
+    });
+  }
 });

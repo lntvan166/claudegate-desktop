@@ -64,7 +64,7 @@
     type Pane,
     type Widths,
   } from "./lib/panes";
-  import { relTime } from "./lib/time";
+  import { headerTotal, projectLine } from "./lib/counts";
   import { collapseKeysToReveal, fileOrder, visibleItems } from "./lib/visible";
 
   const STORE_KEY = "claudegate.selectedProject";
@@ -175,22 +175,15 @@
     rejected: view?.rejected.length ?? 0,
   });
   const groups = $derived(view ? groupsFor(view, tab) : []);
-  /** The screen's one finding: what is waiting, where, and for how long. */
-  const finding = $derived.by(() => {
-    if (!view || view.missing) return "";
-    const n = view.pending.length;
-    if (n === 0) return "Nothing waiting for review";
-    const parts = groupsFor(view, "pending").map((g) => `${g.rows.length} in ${basename(g.scope.root)}`);
-    const oldest = view.pending
-      .map((p) => p.capturedAt)
-      .filter((t): t is string => !!t)
-      .sort()[0];
-    const where = parts.length > 1 ? ` · ${parts.join(", ")}` : "";
-    const age = oldest ? ` · oldest ${relTime(oldest)}` : "";
-    const w = view.pending.filter((p) => p.waiting).length;
-    const unwritten = w > 0 ? ` · ${w} not written yet` : "";
-    return `${n} waiting${where}${age}${unwritten}`;
-  });
+  /** The screen's one finding: what is pending, what isn't written yet, for how long. */
+  const finding = $derived(
+    !view || view.missing
+      ? null
+      : projectLine(
+          view.pending,
+          view.scopes.map((s) => ({ root: s.root, label: scopeLabel(view!, s) })),
+        ),
+  );
   const troubled = $derived(view ? view.scopes.filter((s) => s.error) : []);
   /** Fields this version does not know, from every scope written by a newer ClaudeGate. */
   const unknownFields = $derived(view ? [...new Set(view.scopes.flatMap((s) => s.shapeUnknown))] : []);
@@ -729,9 +722,7 @@
         </svg>
         Read-only
       </button>
-      <span class="total" class:none={totalPending === 0}>
-        <span class="num">{totalPending}</span> pending
-      </span>
+      <span class="total" class:none={totalPending === 0}>{headerTotal(split.visible)}</span>
     </div>
   </header>
 
@@ -786,7 +777,7 @@
       {:else}
         <div class="title-row">
           <h1>{current.name}</h1>
-          <p class="finding" class:has-pending={(view?.pending.length ?? 0) > 0}>{finding || "\u00a0"}</p>
+          <p class="finding" title={finding?.detail ?? finding?.text}>{finding?.text ?? "\u00a0"}</p>
         </div>
         <ReviewTabs {tab} {counts} {mode} ontab={setTab} onmode={(m) => (mode = m)} />
         {#each troubled as s (s.root)}
@@ -812,7 +803,7 @@
           </div>
         {:else if view && canDecide && bulk.length > 0}
           {#key tab}
-            <ActionBar bind:this={actionBar} {tab} keys={bulk} {busy} outcomes={rejectOutcomes} onaction={runBulk} />
+            <ActionBar bind:this={actionBar} {tab} keys={bulk} {busy} outcomes={rejectOutcomes} tabCount={counts[tab]} onaction={runBulk} />
           {/key}
         {/if}
         <div class="scroll">
@@ -1057,10 +1048,16 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* Two lines at most, whatever the project: the per-worktree breakdown is its tooltip. */
   .finding {
     margin-top: 3px;
     font-size: var(--fs-small);
     color: var(--muted);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
   }
   .finding.warn {
     color: var(--warning-ink);

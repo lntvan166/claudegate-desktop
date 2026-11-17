@@ -166,12 +166,27 @@ export function fromTextmate(theme: unknown): TextmateTheme {
   return textmateThemeToMonacoTheme(theme as Parameters<typeof textmateThemeToMonacoTheme>[0]) as unknown as TextmateTheme;
 }
 
+/**
+ * Comments in a shade that reads at 4.5:1 on the diff's ground. Dracula's #6272a4 is 3.0:1 on
+ * #282a36; GitHub Light's #6a737d is 4.5:1 on white but only just on Alucard's #f8f8f2, and less
+ * on a tinted diff line. Only the comment colour changes; every other token keeps its own.
+ */
+const COMMENT = { dark: "8a98c9", light: "5c6570" } as const;
+
+/** The TextMate theme's comment colour (`from`, as Shiki paints it) and the one we paint (`to`). */
+export function commentOverride(dark: boolean, shiki: TextmateTheme): { from: string; to: string } {
+  const from = (shiki.rules.find((r) => r.token === "comment")?.foreground ?? "").toLowerCase();
+  return { from, to: dark ? COMMENT.dark : COMMENT.light };
+}
+
 /** The Monaco theme for one mode: `shiki` (a TextMate theme converted by @shikijs/monaco) for the
- *  tokens, with our chrome and diff colours laid over its own. */
+ *  tokens, with our chrome and diff colours laid over its own and comments lightened. */
 export function buildTheme(dark: boolean, shiki: TextmateTheme): Theme {
   const p = dark ? DRACULA : ALUCARD;
+  const c = commentOverride(dark, shiki);
+  const rules = shiki.rules.map((r) => (c.from && r.foreground?.toLowerCase() === c.from ? { ...r, foreground: c.to } : r));
   // Not inherited: every token colour is the TextMate theme's, none leaks in from Monaco's vs/vs-dark.
-  return { base: dark ? "vs-dark" : "vs", inherit: false, rules: shiki.rules, colors: { ...shiki.colors, ...colors(p) } };
+  return { base: dark ? "vs-dark" : "vs", inherit: false, rules, colors: { ...shiki.colors, ...colors(p) } };
 }
 
 export const themeName = (dark: boolean) => (dark ? "claudegate-dracula" : "claudegate-light");

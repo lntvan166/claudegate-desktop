@@ -582,7 +582,7 @@
   }
   .btn.danger {
     border-color: transparent;
-    color: #fff;
+    color: var(--on-danger);
     background: var(--danger);
   }
   .btn.danger:hover:not(:disabled) {
@@ -750,6 +750,7 @@
   }
   .meta.waiting {
     font-style: italic;
+    color: var(--waiting-ink);
   }
 
   .stats {

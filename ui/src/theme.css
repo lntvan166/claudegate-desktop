@@ -3,10 +3,11 @@
 
    Style: the taste-skill "framed sheet" app style (seed 1746260420). One tinted L-frame holds the
    toolbar and the project list with no rule between them; the work sits on a sheet inset 8px from
-   the window's right and bottom edges, 1px edge, 16px corners, no shadow. Colour goes on data
-   only: pending files in the git "modified" amber, new files in the git "untracked" green, line
-   counts in green and red. The chrome is grey; selection is a neutral tone step. Dark mode keeps
-   the same structure on true neutral darks. Fonts are bundled (no network). */
+   the window's right and bottom edges, 1px edge, 16px corners, no shadow. The whole app is Dracula
+   in dark mode and Alucard (Dracula's light theme) in light, matching the diff editor. Colour goes
+   on data and the one accent: pending files orange (git "modified"), new files and added lines
+   green, removed lines red, files not written yet yellow, focus and primary purple. Fonts are
+   bundled (no network). */
 
 @import "@fontsource/ibm-plex-sans/latin-400.css";
 @import "@fontsource/ibm-plex-sans/latin-500.css";
@@ -41,70 +42,80 @@
   --pad: 20px;
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
 
-  /* light */
-  --frame: #f6f7f8;
-  --surface: #ffffff;
-  --raised: #f4f6f8;
-  --hover: #f2f3f5;
-  --active: #e9ebed;
-  --border: #e6e8ea;
-  --control-border: #d8dadd;
-  --rule: #eff0f2;
-  --guide: #e9eaec;
-  --text: #131416;
-  --muted: #5d5f63;
-  --faint: #626468;
-  --mark: #1b6c80;
-  --pending: #9c5700;
-  --untracked: #1e7b4f;
-  --positive: #1e7b4f;
-  --negative: #c4242a;
-  --warning-bg: #fffbeb;
-  --warning-ink: #92400e;
-  --error-bg: #ffedea;
-  --error-ink: #831c1e;
+  /* light: Alucard, Dracula's light theme, the same ground as the light diff */
+  --frame: #efeee6;
+  --surface: #f8f8f2;
+  --raised: #f1f0e9;
+  --hover: #ecebe3;
+  --active: #e4e3ec;
+  --border: #dddcd2;
+  --control-border: #cfcec4;
+  --rule: #e6e5dc;
+  --guide: #e2e1d8;
+  --text: #1f1f1f;
+  --muted: #635d45;
+  --faint: #6c664b;
+  --mark: #644ac9;
+  --pending: #a34d14;
+  --untracked: #14710a;
+  --positive: #14710a;
+  --negative: #b8321f;
+  --warning-bg: #f6f0d2;
+  --warning-ink: #5f4c08;
+  --error-bg: #fbe8e3;
+  --error-ink: #8f2416;
   /* A capture whose write has not landed. */
-  --waiting-bg: #fbf3cf;
-  --waiting-ink: #6b5300;
-  --focus-ring: #1b6c80;
-  /* The one destructive control (Reject N in the confirmation); white text on it. */
-  --danger: #c4242a;
-  --danger-hover: #a81e23;
-  --scrollbar: rgba(19, 20, 22, 0.16);
-  /* Only what floats (the Open-with menu) casts a shadow. */
-  --menu-shadow: 0 10px 28px rgba(19, 20, 22, 0.12), 0 2px 6px rgba(19, 20, 22, 0.06);
+  --waiting-bg: #f4efcf;
+  --waiting-ink: #5f4c08;
+  --focus-ring: #644ac9;
+  /* The primary action (a confirmation that destroys nothing). */
+  --primary: #644ac9;
+  --on-primary: #ffffff;
+  /* The one destructive control (Reject N in the confirmation). */
+  --danger: #cb3a2a;
+  --danger-hover: #b23021;
+  --on-danger: #ffffff;
+  --scrollbar: rgba(108, 102, 75, 0.3);
+  /* Only what floats (menus, the shortcut sheet) casts a shadow. */
+  --menu-shadow: 0 10px 28px rgba(31, 31, 31, 0.12), 0 2px 6px rgba(31, 31, 31, 0.06);
 }
 
+/* dark: Dracula. The tree, tabs, header and diff share one surface (#282a36), so the diff editor
+   sits on the sheet with no seam. Dracula's comment grey (#6272a4) is only 3.0:1 there, so muted
+   text is a lighter shade of it. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --frame: #0c0c0d;
-    --surface: #151516;
-    --raised: #1c1c1e;
-    --hover: #1d1d1f;
-    --active: #2a2a2d;
-    --border: #252527;
-    --control-border: #333336;
-    --rule: #1f1f21;
-    --guide: #262628;
-    --text: #f4f4f5;
-    --muted: #b4b4b8;
-    --faint: #949498;
-    --mark: #5fb3c6;
-    --pending: #f2a65a;
-    --untracked: #4fc985;
-    --positive: #4fc985;
-    --negative: #f0646e;
-    --warning-bg: #2a2412;
-    --warning-ink: #f0c867;
-    --error-bg: #2c1a1d;
-    --error-ink: #f0868c;
-    --waiting-bg: #2f2f1f;
+    --frame: #21222c;
+    --surface: #282a36;
+    --raised: #2d2f3d;
+    --hover: #313343;
+    --active: #44475a;
+    --border: #343746;
+    --control-border: #4a4d61;
+    --rule: #343746;
+    --guide: #383b4c;
+    --text: #f8f8f2;
+    --muted: #b6bee0;
+    --faint: #a4aed6;
+    --mark: #bd93f9;
+    --pending: #ffb86c;
+    --untracked: #50fa7b;
+    --positive: #50fa7b;
+    --negative: #ff5555;
+    --warning-bg: #3a3b2f;
+    --warning-ink: #f1fa8c;
+    --error-bg: #3e2a35;
+    --error-ink: #ff8a8a;
+    --waiting-bg: #3a3b2f;
     --waiting-ink: #f1fa8c;
-    --focus-ring: #5fb3c6;
-    --danger: #c0353d;
-    --danger-hover: #a92e35;
-    --scrollbar: rgba(255, 255, 255, 0.14);
-    --menu-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
+    --focus-ring: #bd93f9;
+    --primary: #bd93f9;
+    --on-primary: #21222c;
+    --danger: #ff5555;
+    --danger-hover: #ff6e6e;
+    --on-danger: #21222c;
+    --scrollbar: rgba(98, 114, 164, 0.45);
+    --menu-shadow: 0 12px 32px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
   }
 }
 

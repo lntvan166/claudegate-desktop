@@ -174,7 +174,7 @@
   }
   dl div {
     display: grid;
-    grid-template-columns: 76px 1fr;
+    grid-template-columns: 84px 1fr;
     gap: 10px;
     align-items: baseline;
   }
@@ -198,6 +198,7 @@
     font-family: var(--font-mono);
     font-size: var(--fs-meta);
     text-align: center;
+    white-space: nowrap;
     color: var(--text);
     background: var(--raised);
   }

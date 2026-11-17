@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import type { DiffKind } from "../lib/api";
+  import { bulkLabel } from "../lib/counts";
   import { bulkPrompt, rejectPrompt, type BulkAction, type RejectOutcome } from "../lib/decide";
 
   let {
@@ -8,6 +9,7 @@
     keys,
     busy,
     outcomes = {},
+    tabCount = 0,
     onaction,
   }: {
     tab: DiffKind;
@@ -16,6 +18,8 @@
     busy: boolean;
     /** Pending: what a reject does to each key, so Reject all names the files it deletes. */
     outcomes?: Record<string, RejectOutcome>;
+    /** The tab's own count; the bar says "N to review" when it acts on fewer. */
+    tabCount?: number;
     /** `keys` are exactly the rows counted in the question the user answered. */
     onaction: (a: BulkAction, keys: string[]) => void;
   } = $props();
@@ -148,7 +152,7 @@
       <button class="btn quiet" disabled={busy || count === 0} onclick={() => void ask("clear")}>Clear</button>
     {/if}
     {#if count > 0}
-      <span class="count num">{plural(count, tab === "pending" ? "file" : "record", tab === "pending" ? "files" : "records")}</span>
+      <span class="count num" title={count !== tabCount ? "Files whose write has landed; the rest can't be decided yet" : undefined}>{bulkLabel(count, tabCount, tab)}</span>
     {/if}
   </div>
 {/if}
@@ -206,19 +210,19 @@
   }
   .btn.danger {
     border-color: transparent;
-    color: #fff;
+    color: var(--on-danger);
     background: var(--danger);
   }
   .btn.danger:hover:not(:disabled) {
     background: var(--danger-hover);
   }
   .btn.primary {
-    border-color: var(--text);
-    color: var(--surface);
-    background: var(--text);
+    border-color: transparent;
+    color: var(--on-primary);
+    background: var(--primary);
   }
   .btn.primary:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text) 85%, var(--surface));
+    background: color-mix(in srgb, var(--primary) 88%, var(--text));
   }
 
   .confirm {
