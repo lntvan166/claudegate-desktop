@@ -188,6 +188,53 @@ fn quote(s: &str, out: &mut String) {
     out.push('"');
 }
 
+/// `(digits, exponent)` of `{:e}`: `9.5e2` is `("95", 2)`.
+fn sci_parts(sci: &str) -> (String, i64) {
+    let (mant, exp) = sci.split_once('e').unwrap_or((sci, "0"));
+    (mant.chars().filter(|c| *c != '.').collect(), exp.parse().unwrap_or(0))
+}
+
+/// Adds one to the last digit of a digit string; `None` when that carries into a new digit.
+fn bump(d: &str) -> Option<String> {
+    let mut b = d.as_bytes().to_vec();
+    for i in (0..b.len()).rev() {
+        if b[i] == b'9' {
+            b[i] = b'0';
+        } else {
+            b[i] += 1;
+            return String::from_utf8(b).ok();
+        }
+    }
+    None
+}
+
+/// The shortest round-trip digits ECMA's Number::toString picks for `x > 0`. Rust's `{:e}` gives
+/// shortest round-trip digits too, but on an exact tie between two of them (the value lies
+/// precisely halfway, e.g. 963.96636962890625) ECMA takes the even one and Rust may not.
+fn shortest_digits(x: f64) -> (String, i64) {
+    let (d, e) = sci_parts(&format!("{x:e}"));
+    // An f64 has at most 767 significant decimal digits, so this is its exact value.
+    let (exact, ee) = sci_parts(&format!("{x:.800e}"));
+    let k = d.len();
+    if ee != e || exact.len() <= k || d.as_bytes()[k - 1] % 2 == 0 {
+        return (d, e);
+    }
+    let rest = exact[k..].trim_end_matches('0');
+    if rest != "5" {
+        return (d, e); // not a tie
+    }
+    let lower = exact[..k].to_owned();
+    let other = if d == lower { bump(&lower) } else { Some(lower) };
+    let parses_back = |c: &str| {
+        let txt = format!("{}{}{}e{e}", &c[..1], if c.len() > 1 { "." } else { "" }, &c[1..]);
+        txt.parse::<f64>().ok() == Some(x)
+    };
+    match other {
+        Some(o) if o.as_bytes()[k - 1] % 2 == 0 && parses_back(&o) => (o, e),
+        _ => (d, e),
+    }
+}
+
 /// `Number.prototype.toString()` (ECMA-262 Number::toString, radix 10). Rust's `{:e}` gives the
 /// same shortest round-trip digits; only the layout differs.
 pub fn js_number(n: f64) -> String {
@@ -197,11 +244,8 @@ pub fn js_number(n: f64) -> String {
     if n == 0.0 {
         return "0".into();
     }
-    let sci = format!("{:e}", n.abs());
-    let (mant, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
-    let digits: String = mant.chars().filter(|c| *c != '.').collect();
+    let (digits, e) = shortest_digits(n.abs());
     let k = digits.len() as i64;
-    let e: i64 = exp.parse().unwrap_or(0);
     let pos = e + 1; // ECMA's n: the decimal point sits after `pos` digits
     let mut s = String::new();
     if n < 0.0 {
@@ -298,6 +342,9 @@ mod tests {
             (0.1, "0.1"),
             (123.456, "123.456"),
             (12345678901234567890.0, "12345678901234567000"),
+            (963.96636962890625, "963.9663696289062"), // a tie: ECMA takes the even digit
+            (5e-324, "5e-324"),
+            (1.7976931348623157e308, "1.7976931348623157e+308"),
         ] {
             assert_eq!(js_number(n), s, "{n}");
         }

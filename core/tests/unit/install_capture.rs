@@ -3,7 +3,7 @@
 //! crate-private fault seam. Temp HOME only.
 
 use crate::capture::{InstallError, HOOK_SH_CONTENT};
-use crate::store::{install_capture, set_install_fault};
+use crate::store::{install_capture, set_install_corrupt, set_install_fault};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -53,19 +53,24 @@ fn install_with(h: &Home, fault: impl FnMut(&str) -> io::Result<()> + 'static) -
     r
 }
 
+/// Runs `install_capture` with our settings bytes replaced by `bad` before they are written.
+fn install_corrupted(h: &Home, bad: &'static str) -> Result<crate::capture::InstallReport, InstallError> {
+    set_install_corrupt(Some(Box::new(move |b: &mut Vec<u8>| *b = bad.as_bytes().to_vec())));
+    let r = install_capture(&h.home, HOOK, true, false);
+    set_install_corrupt(None);
+    r
+}
+
 #[test]
 fn forced_verification_failure_restores_the_backup_byte_for_byte() {
     let h = Home::new();
     h.write_settings(EXISTING);
-    let target = h.settings();
-    let err = install_with(&h, move |stage| {
-        if stage == "after_settings_write" {
-            // A write that lands wrong content: our entry is missing.
-            fs::write(&target, "{\"model\":\"opus\",\"hooks\":{}}").unwrap();
-        }
-        Ok(())
-    })
-    .unwrap_err();
+    let dir = h.home.join(".claude");
+    for d in 1..=7 {
+        fs::write(dir.join(format!("settings.json.claudegate-2020-01-0{d}T00-00-00.000Z.bak")), "old").unwrap();
+    }
+    // Our own write lands wrong content: our entry is missing.
+    let err = install_corrupted(&h, "{\"model\":\"opus\",\"hooks\":{}}").unwrap_err();
 
     assert!(matches!(err, InstallError::Failed { .. }), "{err:?}");
     assert!(err.to_string().contains("the claudegate hook entry is missing"), "{err}");
@@ -74,26 +79,82 @@ fn forced_verification_failure_restores_the_backup_byte_for_byte() {
         assert!(!h.cg(f).exists(), "{f} left behind");
     }
     assert!(!h.home.join(".claudegate").exists(), "the folder this call created is gone");
-    let backups = h.backups();
-    assert_eq!(backups.len(), 1, "the backup stays as a recoverable copy");
-    assert_eq!(fs::read(&backups[0]).unwrap(), EXISTING.as_bytes());
+    let mut backups = h.backups();
+    backups.sort();
+    assert_eq!(backups.len(), 8, "the new backup stays, and a failed setup prunes nothing");
+    assert_eq!(fs::read(backups.last().unwrap()).unwrap(), EXISTING.as_bytes());
 }
 
 #[test]
 fn verification_failure_on_a_fresh_install_removes_the_settings_it_created() {
     let h = Home::new();
+    let err = install_corrupted(&h, "[]").unwrap_err();
+    assert!(matches!(err, InstallError::Failed { rollback: None, .. }), "{err:?}");
+    assert!(!h.settings().exists());
+    assert!(!h.home.join(".claude").exists(), "the empty folder this call created is gone");
+    assert!(!h.home.join(".claudegate").exists());
+}
+
+#[test]
+fn a_foreign_write_right_after_ours_is_never_restored_over() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
     let target = h.settings();
+    let theirs = "{\"model\":\"sonnet\",\"hooks\":{\"Stop\":[]}}";
     let err = install_with(&h, move |stage| {
         if stage == "after_settings_write" {
-            fs::write(&target, "[]").unwrap();
+            fs::write(&target, theirs).unwrap(); // Claude Code rewrites the file, dropping our entry
         }
         Ok(())
     })
     .unwrap_err();
-    assert!(matches!(err, InstallError::Failed { .. }), "{err:?}");
-    assert!(!h.settings().exists());
-    assert!(!h.home.join(".claude").exists(), "the empty folder this call created is gone");
-    assert!(!h.home.join(".claudegate").exists());
+    let msg = err.to_string();
+    assert!(msg.contains("was changed by another program right after setup; it was left as is"), "{msg}");
+    assert!(msg.contains("Your pre-setup copy is"), "{msg}");
+    assert!(msg.contains("capture is not set up"), "{msg}");
+    assert_eq!(fs::read_to_string(h.settings()).unwrap(), theirs, "their write survives untouched");
+    for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
+        assert!(!h.cg(f).exists(), "{f}: the entry is gone, so the files this call made go too");
+    }
+    assert_eq!(h.backups().len(), 1);
+}
+
+#[test]
+fn a_foreign_write_that_keeps_our_entry_is_a_successful_setup() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    let target = h.settings();
+    let t2 = target.clone();
+    let report = install_with(&h, move |stage| {
+        if stage == "after_settings_write" {
+            let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&t2).unwrap()).unwrap();
+            v["model"] = "sonnet".into();
+            fs::write(&t2, serde_json::to_string(&v).unwrap()).unwrap();
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert!(report.note.as_deref().is_some_and(|n| n.contains("left as is")), "{report:?}");
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(v["model"], "sonnet", "their change kept");
+    assert!(h.cg("hook.py").exists() && h.cg("hook.sh").exists() && h.cg(".installed-by-desktop").exists());
+}
+
+#[test]
+fn a_change_just_before_our_write_is_refused_and_kept() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    let target = h.settings();
+    let err = install_with(&h, move |stage| {
+        if stage == "before_write" {
+            fs::write(&target, "{\"model\":\"changed\"}").unwrap();
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(matches!(err, InstallError::Failed { rollback: None, .. }), "{err:?}");
+    assert_eq!(fs::read_to_string(h.settings()).unwrap(), "{\"model\":\"changed\"}");
+    assert!(!h.cg("hook.py").exists());
 }
 
 #[test]

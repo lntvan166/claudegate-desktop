@@ -179,6 +179,16 @@
         "changed": false,
         "parseError": true
       }
+    },
+    {
+      "name": "numbers on an exact halfway tie take the even digit",
+      "raw": "{\"tie\":[963.96636962890625,0.5000000000000001,1.0000000000000002,4.35,5e-324,1.7976931348623157e308]}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\n  \"tie\": [\n    963.9663696289062,\n    0.5000000000000001,\n    1.0000000000000002,\n    4.35,\n    5e-324,\n    1.7976931348623157e+308\n  ],\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "changed": true,
+        "parseError": false
+      }
     }
   ],
   "refuse": [

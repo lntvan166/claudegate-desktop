@@ -202,7 +202,15 @@ pub fn verify_settings_content(after: &str, previous: &str, hook_command: &str) 
             }
         }
     }
-    let landed = parsed
+    let landed = entry_landed(&parsed, hook_command);
+    if !landed {
+        return Some("the claudegate hook entry is missing".into());
+    }
+    None
+}
+
+fn entry_landed(settings: &Value, hook_command: &str) -> bool {
+    settings
         .get("hooks")
         .and_then(|h| h.get("PreToolUse"))
         .and_then(Value::as_array)
@@ -212,11 +220,13 @@ pub fn verify_settings_content(after: &str, previous: &str, hook_command: &str) 
                     .and_then(Value::as_array)
                     .is_some_and(|xs| xs.iter().any(|x| x.get("command").and_then(Value::as_str) == Some(hook_command)))
             })
-        });
-    if !landed {
-        return Some("the claudegate hook entry is missing".into());
-    }
-    None
+        })
+}
+
+/// Whether `settings_text` carries a PreToolUse hook running exactly `hook_command` (the
+/// "landed" half of `verify_settings_content`). Unparseable text carries nothing.
+pub fn has_hook_entry(settings_text: &str, hook_command: &str) -> bool {
+    serde_json::from_str::<Value>(settings_text).is_ok_and(|v| entry_landed(&v, hook_command))
 }
 
 /// What a successful setup wrote.
@@ -230,6 +240,9 @@ pub struct InstallReport {
     pub created: Vec<PathBuf>,
     /// The version written to the marker.
     pub version: String,
+    /// Set when another program rewrote settings.json right after our write but kept our entry:
+    /// setup worked, and the file was left as that program wrote it.
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -240,6 +253,9 @@ pub enum InstallError {
     BundledHook,
     /// `~/.claudegate/hook.py` is already there (most likely the extension's).
     HookFilesExist,
+    /// `~/.claudegate/hook.py` is there next to the marker: left over from an earlier setup by
+    /// this app whose settings entry was removed.
+    HookFilesFromApp,
     /// `~/.claudegate/hook.sh` is there with content other than the extension's wrapper.
     ForeignWrapper,
     /// Capture is already set up (or the status is anything but `NotSetUp`).
@@ -263,6 +279,11 @@ impl std::fmt::Display for InstallError {
                 f,
                 "ClaudeGate's hook files already exist (likely from the VS Code extension). \
                  Reinstall the extension or remove ~/.claudegate/hook.py first."
+            ),
+            InstallError::HookFilesFromApp => write!(
+                f,
+                "ClaudeGate's hook files from an earlier setup in this app already exist. \
+                 Remove ~/.claudegate/hook.py, hook.sh and .installed-by-desktop to set up again."
             ),
             InstallError::ForeignWrapper => write!(
                 f,

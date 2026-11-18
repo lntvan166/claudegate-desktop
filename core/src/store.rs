@@ -136,8 +136,12 @@ fn tmp_name(target: &Path) -> PathBuf {
 /// and the existing file's mode is kept; a new file gets the default mode. Parent dirs are
 /// created. On error the tmp is removed.
 ///
-/// Crate-private: the only callers are `persist` (session files) and `workspace_write` (which
-/// checks the path is a key of the session being decided). `no_writes` forbids it elsewhere.
+/// The temp file is synced before the rename, so a crash leaves the old file or the new one.
+///
+/// Crate-private, and `no_writes` forbids it (and `atomic_write_bytes`) outside `store.rs` and
+/// `workspace_write.rs`. Callers: `persist` (session files), `workspace_write` (which checks the
+/// path is a key of the session being decided), the roots and excludes writers, and capture
+/// setup (`install_capture`).
 pub(crate) fn atomic_write(target: &Path, content: &str, preserve_existing: bool) -> io::Result<()> {
     atomic_write_bytes(target, content.as_bytes(), preserve_existing)
 }
@@ -161,6 +165,7 @@ pub(crate) fn atomic_write_bytes(target: &Path, content: &[u8], preserve_existin
         }
         let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         f.write_all(content)?;
+        f.sync_all()?;
         drop(f);
         if let Some(p) = perms {
             fs::set_permissions(&tmp, p)?;
@@ -709,10 +714,31 @@ thread_local! {
 }
 
 /// Test seam: called at each install stage (`before_hook_py`, `after_hooks`, `before_backup`,
-/// `after_settings_write`); an error aborts the install there.
+/// `before_write`, `after_settings_write`); an error aborts the install there.
 #[cfg(test)]
 pub(crate) fn set_install_fault(f: Option<Box<dyn FnMut(&str) -> io::Result<()>>>) {
     INSTALL_FAULT.with(|r| *r.borrow_mut() = f);
+}
+
+#[cfg(test)]
+thread_local! {
+    static INSTALL_CORRUPT: std::cell::RefCell<Option<Box<dyn FnMut(&mut Vec<u8>)>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam: rewrites the settings bytes just before we write them, to stand for a write of
+/// ours that lands wrong content.
+#[cfg(test)]
+pub(crate) fn set_install_corrupt(f: Option<Box<dyn FnMut(&mut Vec<u8>)>>) {
+    INSTALL_CORRUPT.with(|r| *r.borrow_mut() = f);
+}
+
+fn corrupt_point(_bytes: &mut Vec<u8>) {
+    #[cfg(test)]
+    INSTALL_CORRUPT.with(|r| {
+        if let Some(f) = r.borrow_mut().as_mut() {
+            f(_bytes);
+        }
+    });
 }
 
 fn install_fault(_stage: &str) -> io::Result<()> {
@@ -815,24 +841,48 @@ struct Undo {
     replaced: Vec<(PathBuf, Vec<u8>)>,
     /// Folders this call created (removed only while empty).
     dirs: Vec<PathBuf>,
-    /// The settings write: its target and the backup to restore from. `None`: the file did not
-    /// exist before, so it is removed, whatever it holds now, as a backup is restored whatever the
-    /// file holds now (the extension's rule).
-    settings: Option<(PathBuf, Option<PathBuf>)>,
+    /// Our settings write, once it happened.
+    settings: Option<SettingsUndo>,
+}
+
+struct SettingsUndo {
+    home: PathBuf,
+    target: PathBuf,
+    /// The pre-setup copy; `None`: there was no file, so undoing ours removes it.
+    backup: Option<PathBuf>,
+    /// The exact bytes we wrote. The file is restored or removed only while it still holds them:
+    /// anything else is another program's write (Claude Code rewrites this file often), and
+    /// putting the backup over it would destroy that change.
+    ours: Vec<u8>,
+}
+
+fn concurrent_note(backup: Option<&Path>) -> String {
+    let copy = match backup {
+        Some(b) => format!("Your pre-setup copy is {}.", b.display()),
+        None => "There was no settings.json before setup.".to_owned(),
+    };
+    format!("settings.json was changed by another program right after setup; it was left as is. {copy}")
 }
 
 impl Undo {
-    /// Best-effort, settings first. Returns what could not be put back.
+    /// Best-effort, settings first. Returns what could not be put back, or was left alone.
     fn run(self) -> Option<String> {
         let mut problems = Vec::new();
-        if let Some((target, backup)) = self.settings {
-            let res = match &backup {
-                Some(b) => fs::read(b).and_then(|bytes| atomic_write_bytes(&target, &bytes, true)),
-                None => fs::remove_file(&target),
-            };
+        if let Some(su) = self.settings {
+            let res = guard_settings_target(&su.home, &su.target).and_then(|()| match fs::read(&su.target) {
+                Ok(now) if now == su.ours => match &su.backup {
+                    Some(b) => fs::read(b).and_then(|bytes| atomic_write_bytes(&su.target, &bytes, true)),
+                    None => fs::remove_file(&su.target),
+                },
+                Err(e) if e.kind() == io::ErrorKind::NotFound && su.backup.is_none() => Ok(()),
+                _ => {
+                    problems.push(concurrent_note(su.backup.as_deref()));
+                    Ok(())
+                }
+            });
             if let Err(e) = res {
-                let from = backup.map(|b| format!("; your previous settings are in {}", b.display())).unwrap_or_default();
-                problems.push(format!("could not restore {}: {e}{from}", target.display()));
+                let from = su.backup.map(|b| format!("; your previous settings are in {}", b.display())).unwrap_or_default();
+                problems.push(format!("could not restore {}: {e}{from}", su.target.display()));
             }
         }
         for (p, ours) in self.created.into_iter().rev() {
@@ -858,8 +908,21 @@ fn failed(undo: Undo, reason: impl std::fmt::Display) -> InstallError {
     InstallError::Failed { reason: reason.to_string(), rollback: undo.run() }
 }
 
+/// Keep the newest `SETTINGS_BACKUP_RETENTION` of `<literal>.claudegate-*.bak` (best-effort).
+fn prune_settings_backups(literal: &Path) {
+    if let (Some(dir), Some(base)) = (literal.parent(), literal.file_name().and_then(|b| b.to_str())) {
+        if let Ok(rd) = fs::read_dir(dir) {
+            let names: Vec<String> = rd.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+            for name in backups_to_prune(&names, base, SETTINGS_BACKUP_RETENTION) {
+                let _ = fs::remove_file(dir.join(name));
+            }
+        }
+    }
+}
+
 /// Copy `bytes` (the settings as read) to `<literal>.claudegate-<stamp>[_n].bak` with the
-/// original's mode, then prune the ring to the extension's keep count (best-effort).
+/// original's mode. Pruning the ring waits until the settings write has
+/// verified (`prune_settings_backups`), so a failed setup never costs an older copy.
 #[cfg(unix)]
 fn backup_settings(literal: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -882,14 +945,6 @@ fn backup_settings(literal: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
             Err(e) => return Err(e),
         }
     };
-    if let (Some(dir), Some(base)) = (literal.parent(), literal.file_name().and_then(|b| b.to_str())) {
-        if let Ok(rd) = fs::read_dir(dir) {
-            let names: Vec<String> = rd.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
-            for name in backups_to_prune(&names, base, SETTINGS_BACKUP_RETENTION) {
-                let _ = fs::remove_file(dir.join(name));
-            }
-        }
-    }
     Ok(path)
 }
 
@@ -910,8 +965,11 @@ fn create_dir_tracked(dir: &Path, undo: &mut Undo) -> io::Result<()> {
 ///    refuse an existing hook.py or a hook.sh that is not the extension's wrapper;
 /// 2. create hook.py and hook.sh (0755) without replacing anything, then the marker;
 /// 3. back up settings.json (refusing if it changed since it was read);
-/// 4. write `compute_settings_patch`'s content atomically to the realpath;
-/// 5. re-read and `verify_settings_content`; on any failure from step 2 on, roll back.
+/// 4. re-compare with what was read, then write `compute_settings_patch`'s content atomically
+///    to the realpath;
+/// 5. re-read: our bytes are verified with `verify_settings_content` (restored on failure);
+///    anyone else's are left alone, and setup holds only if our entry survived in them;
+/// 6. prune the backup ring. On any failure from step 2 on, roll back what this call wrote.
 ///
 /// The wrapper runs `$HOME/.claudegate/hook.py`, so the hook files go to `<home>/.claudegate`
 /// whatever `CLAUDEGATE_HOME` says.
@@ -974,8 +1032,9 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
     if !patch.changed {
         return Err(InstallError::AlreadySetUp(CaptureStatus::NotSetUp));
     }
+    let leftover = |marker_there: bool| if marker_there { InstallError::HookFilesFromApp } else { InstallError::HookFilesExist };
     if fs::symlink_metadata(&py).is_ok() {
-        return Err(InstallError::HookFilesExist);
+        return Err(leftover(fs::symlink_metadata(&marker).is_ok()));
     }
     let write_sh = match fs::read(&sh) {
         Ok(b) if b == HOOK_SH_CONTENT.as_bytes() => false,
@@ -1008,8 +1067,11 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
         match res {
             Ok(()) => undo.created.push((path.clone(), content.to_vec())),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists && path == &py => {
-                undo.run();
-                return Err(InstallError::HookFilesExist);
+                let marker_there = fs::symlink_metadata(&marker).is_ok();
+                return Err(match undo.run() {
+                    None => leftover(marker_there),
+                    Some(r) => InstallError::Failed { reason: leftover(marker_there).to_string(), rollback: Some(r) },
+                });
             }
             Err(e) => return Err(failed(undo, format!("could not write {}: {e}", path.display()))),
         }
@@ -1039,48 +1101,76 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
     if let Err(e) = install_fault("before_backup") {
         return Err(failed(undo, e));
     }
-    let backup = match &raw {
-        None => {
-            if fs::symlink_metadata(&literal).is_ok() {
-                return Err(failed(undo, "settings.json appeared while setting up; try again"));
-            }
-            None
-        }
-        Some(text) => {
-            match fs::read(&target) {
-                Ok(now) if now == text.as_bytes() => {}
-                Ok(_) => return Err(failed(undo, "settings.json changed while setting up; try again")),
-                Err(e) => return Err(failed(undo, format!("could not re-read settings.json: {e}"))),
-            }
-            match backup_settings(&literal, text.as_bytes()) {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    return Err(failed(undo, format!("could not back up settings.json, so it was not changed: {e}")))
-                }
-            }
+    let unchanged_since_read = |what: &str| -> Result<(), String> {
+        match (&raw, fs::read(&target)) {
+            (Some(text), Ok(now)) if now == text.as_bytes() => Ok(()),
+            (Some(_), Ok(_)) => Err(format!("settings.json changed {what}; try again")),
+            (Some(_), Err(e)) => Err(format!("could not re-read settings.json: {e}")),
+            (None, _) if fs::symlink_metadata(&literal).is_err() => Ok(()),
+            (None, _) => Err(format!("settings.json appeared {what}; try again")),
         }
     };
+    if let Err(why) = unchanged_since_read("while setting up") {
+        return Err(failed(undo, why));
+    }
+    let backup = match &raw {
+        None => None,
+        Some(text) => match backup_settings(&literal, text.as_bytes()) {
+            Ok(p) => Some(p),
+            Err(e) => return Err(failed(undo, format!("could not back up settings.json, so it was not changed: {e}"))),
+        },
+    };
 
-    // 4. Write to the realpath.
+    // 4. Write to the realpath. The compare against what we read is the last step before the
+    //    rename. A window remains between that compare and the rename (well under a millisecond,
+    //    no lock exists for this file): a write by Claude Code landing inside it is replaced by
+    //    ours. Its pre-setup state is in the backup; the README notes this.
     if let Err(e) = guard_settings_target(home, &target) {
         return Err(failed(undo, e));
     }
-    if let Err(e) = atomic_write_bytes(&target, patch.content.as_bytes(), true) {
+    let mut ours = patch.content.into_bytes();
+    corrupt_point(&mut ours);
+    if let Err(e) = install_fault("before_write") {
+        return Err(failed(undo, e));
+    }
+    if let Err(why) = unchanged_since_read("while setting up") {
+        return Err(failed(undo, why));
+    }
+    if let Err(e) = atomic_write_bytes(&target, &ours, true) {
         return Err(failed(undo, format!("could not write settings.json: {e}")));
     }
-    undo.settings = Some((target.clone(), backup.clone()));
+    undo.settings = Some(SettingsUndo { home: home.to_path_buf(), target: target.clone(), backup: backup.clone(), ours: ours.clone() });
     if let Err(e) = install_fault("after_settings_write") {
         return Err(failed(undo, e));
     }
 
-    // 5. Verify what is on disk now.
-    let after = fs::read_to_string(&target).unwrap_or_default();
-    if let Some(problem) = verify_settings_content(&after, raw.as_deref().unwrap_or(""), &hook_command) {
+    // 5. Verify what is on disk now. Bytes other than ours are another program's write: never
+    //    restore over it. Setup worked if that write kept our entry; otherwise it did not, and the
+    //    hook files this call created go.
+    let after = fs::read(&target).unwrap_or_default();
+    let created: Vec<PathBuf> = undo.created.iter().map(|(p, _)| p.clone()).filter(|p| p != &marker).collect();
+    let report = |note| InstallReport { settings: target.clone(), backup: backup.clone(), created: created.clone(), version: version.to_owned(), note };
+    if after != ours {
+        let note = concurrent_note(backup.as_deref());
+        let text = String::from_utf8_lossy(&after);
+        if crate::capture::has_hook_entry(&text, &hook_command) {
+            prune_settings_backups(&literal);
+            return Ok(report(Some(note)));
+        }
+        undo.settings = None; // theirs now: leave it
+        let rollback = undo.run();
+        return Err(InstallError::Failed {
+            reason: format!("{note} It no longer has ClaudeGate's entry, so capture is not set up"),
+            rollback,
+        });
+    }
+    let text = String::from_utf8_lossy(&after);
+    if let Some(problem) = verify_settings_content(&text, raw.as_deref().unwrap_or(""), &hook_command) {
         return Err(failed(undo, format!("settings.json did not verify after the write: {problem}")));
     }
-
-    let created = undo.created.iter().map(|(p, _)| p.clone()).filter(|p| p != &marker).collect();
-    Ok(InstallReport { settings: target, backup, created, version: version.to_owned() })
+    // Prune only once setup has succeeded: a failed one never costs an older copy.
+    prune_settings_backups(&literal);
+    Ok(report(None))
 }
 
 #[path = "../tests/unit/install_capture.rs"]

@@ -197,6 +197,7 @@ fn fresh_install_appends_our_entry_and_keeps_everything_else() {
     assert_eq!(mode(&bak), 0o600);
     assert_eq!(report.backup.as_deref(), Some(bak.as_path()));
     assert_eq!(report.version, "v1.16.1");
+    assert_eq!(report.note, None);
 
     // The status now reads as set up by this app.
     let status = claudegate_core::capture::capture_status(
@@ -402,6 +403,23 @@ fn existing_hook_py_is_refused_and_left_alone() {
     assert!(!h.cg("hook.sh").exists());
     assert!(!h.cg(".installed-by-desktop").exists());
     assert!(h.backups().is_empty());
+}
+
+#[test]
+fn leftover_hook_files_from_this_app_get_their_own_message() {
+    let h = Home::new();
+    fs::create_dir_all(h.home.join(".claudegate")).unwrap();
+    fs::write(h.cg("hook.py"), HOOK).unwrap();
+    fs::write(h.cg(".installed-by-desktop"), "v1.16.1").unwrap();
+    let err = h.install().unwrap_err();
+    assert!(matches!(err, InstallError::HookFilesFromApp), "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "ClaudeGate's hook files from an earlier setup in this app already exist. \
+         Remove ~/.claudegate/hook.py, hook.sh and .installed-by-desktop to set up again."
+    );
+    assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), HOOK);
+    assert!(!h.settings().exists());
 }
 
 #[test]
