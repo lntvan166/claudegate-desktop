@@ -418,24 +418,25 @@ pub fn project_record(path: &Path, root: &str) -> claudegate_core::projects::Pro
         exclude: strings("exclude"),
         exclude_written: strings("excludeWritten"),
         exclude_written_prev: strings("excludeWrittenPrev"),
+        exclude_written_at: p.get("excludeWrittenAt").and_then(|t| t.as_i64()),
         managed_by_vscode: p.get("managedByVsCode").and_then(|b| b.as_bool()) == Some(true),
     }
 }
 
 /// Records what the app last wrote to `excludes.json[root]` (`projects[root].excludeWritten`),
 /// moving the value it replaces to `excludeWrittenPrev`.
-pub fn set_exclude_written(path: &Path, root: &str, globs: &[String], guard: Option<&Path>) -> Result<(), String> {
+pub fn set_exclude_written(path: &Path, root: &str, globs: &[String], at_ms: i64, guard: Option<&Path>) -> Result<(), String> {
     update_config(path, guard, |obj, _| {
         let entry = project_entry(obj, root)?;
         let new = serde_json::json!(globs);
-        if entry.get("excludeWritten") == Some(&new) {
-            return Ok(());
+        if entry.get("excludeWritten") != Some(&new) {
+            match entry.remove("excludeWritten") {
+                Some(old) => entry.insert("excludeWrittenPrev".into(), old),
+                None => None,
+            };
+            entry.insert("excludeWritten".into(), new);
         }
-        match entry.remove("excludeWritten") {
-            Some(old) => entry.insert("excludeWrittenPrev".into(), old),
-            None => None,
-        };
-        entry.insert("excludeWritten".into(), new);
+        entry.insert("excludeWrittenAt".into(), serde_json::json!(at_ms));
         Ok(())
     })
     .map(|_| ())
@@ -489,8 +490,8 @@ impl claudegate_core::projects::AppProjects for ConfigProjects<'_> {
     fn record(&self, root: &str) -> claudegate_core::projects::ProjectRecord {
         project_record(self.path, root)
     }
-    fn set_exclude_written(&mut self, root: &str, globs: &[String]) -> Result<(), String> {
-        set_exclude_written(self.path, root, globs, self.guard)
+    fn set_exclude_written(&mut self, root: &str, globs: &[String], at_ms: i64) -> Result<(), String> {
+        set_exclude_written(self.path, root, globs, at_ms, self.guard)
     }
     fn set_managed_by_vscode(&mut self, root: &str, on: bool) -> Result<(), String> {
         set_managed_by_vscode(self.path, root, on, self.guard)

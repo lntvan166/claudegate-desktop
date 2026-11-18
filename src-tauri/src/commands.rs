@@ -693,7 +693,7 @@ pub fn project_in_vs_code_with(cg_home: &Path, config_path: &Path, root: &str, s
     let storage = claudegate_core::projects::storage_files(sources);
     let rec = crate::config::project_record(config_path, root);
     rec.managed_by_vscode
-        || claudegate_core::projects::vscode_uses_root(cg_home, Path::new(root), &rec.written_values(), &storage)
+        || claudegate_core::projects::vscode_uses_root(cg_home, Path::new(root), &rec.written_values(claudegate_core::time::now_ms()), &storage)
 }
 
 /// The native folder picker: one directory, or `None` when cancelled.

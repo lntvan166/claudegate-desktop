@@ -644,15 +644,25 @@ pub(crate) fn excludes_key(root: &Path) -> String {
     crate::paths::resolve_root(root).to_string_lossy().into_owned()
 }
 
-/// Sets `excludes.json[root]` to `globs`, keeping every other key. Writes nothing when the value
-/// is already that. Unconditional, so only Take back uses it: the app's own sync goes through
+/// Sets `excludes.json[root]` to `globs` under the resolved key, dropping any other spelling of
+/// the same root and keeping every other key. Writes nothing when the resolved key alone already
+/// holds that value. Unconditional, so only Take back uses it: the app's own sync goes through
 /// `update_excludes` so it can refuse a key VS Code has taken over in the same read.
 pub(crate) fn excludes_set(home: &Path, root: &Path, globs: &[String]) -> Result<(), StoreError> {
-    let key = excludes_key(root);
+    let resolved = crate::paths::resolve_root(root);
+    let key = excludes_key(&resolved);
     let want = serde_json::json!(globs);
     update_excludes(home, |map| {
-        if map.get(&key) == Some(&want) {
+        let others: Vec<String> = map
+            .keys()
+            .filter(|k| **k != key && crate::paths::resolve_root(Path::new(k)) == resolved)
+            .cloned()
+            .collect();
+        if others.is_empty() && map.get(&key) == Some(&want) {
             return Ok(false);
+        }
+        for k in others {
+            map.remove(&k);
         }
         map.insert(key.clone(), want.clone());
         Ok(true)

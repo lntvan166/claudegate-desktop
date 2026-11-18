@@ -41,7 +41,7 @@ impl AppProjects for Cfg {
             ..Default::default()
         }
     }
-    fn set_exclude_written(&mut self, root: &str, globs: &[String]) -> Result<(), String> {
+    fn set_exclude_written(&mut self, root: &str, globs: &[String], _at_ms: i64) -> Result<(), String> {
         self.written.insert(root.into(), globs.to_vec());
         Ok(())
     }

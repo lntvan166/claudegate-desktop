@@ -21,9 +21,9 @@ pub trait AppProjects {
     fn forget(&mut self, root: &str) -> Result<(), String>;
     /// The app's record of `root` (`projects[root]`); the default when there is none.
     fn record(&self, root: &str) -> ProjectRecord;
-    /// Records the exclude the app last wrote to `excludes.json[root]` (`excludeWritten`),
-    /// moving the value it replaces to `excludeWrittenPrev`.
-    fn set_exclude_written(&mut self, root: &str, globs: &[String]) -> Result<(), String>;
+    /// Records the exclude the app last wrote to `excludes.json[root]` (`excludeWritten`) and
+    /// when (`excludeWrittenAt`, epoch ms), moving the value it replaces to `excludeWrittenPrev`.
+    fn set_exclude_written(&mut self, root: &str, globs: &[String], at_ms: i64) -> Result<(), String>;
     /// Records (`true`) that VS Code took `excludes.json[root]` over (`managedByVsCode`), or
     /// clears it (`false`, Take back).
     fn set_managed_by_vscode(&mut self, root: &str, on: bool) -> Result<(), String>;
@@ -40,6 +40,9 @@ pub struct ProjectRecord {
     /// What the app wrote before that (`excludeWrittenPrev`): a stale write-back of it by the
     /// extension's unlocked rewrite is not a takeover.
     pub exclude_written_prev: Option<Vec<String>>,
+    /// When `exclude_written` was written (`excludeWrittenAt`, epoch ms). `exclude_written_prev`
+    /// counts as the app's only within `STALE_WRITE_BACK_MS` of it.
+    pub exclude_written_at: Option<i64>,
     /// VS Code wrote a different `excludes.json[root]`; the app no longer writes that key.
     pub managed_by_vscode: bool,
 }
@@ -50,9 +53,18 @@ impl ProjectRecord {
         self.added_by_app && !self.managed_by_vscode
     }
 
-    /// The values the app wrote to `excludes.json[root]` (last, then the one before).
-    pub fn written_values(&self) -> Vec<Vec<String>> {
-        [&self.exclude_written, &self.exclude_written_prev].into_iter().flatten().cloned().collect()
+    /// The values that count as the app's own in `excludes.json[root]` at `now_ms`: the last
+    /// write, and the one before it only within `STALE_WRITE_BACK_MS` of the last write (the
+    /// window of the extension's unlocked read-then-write). After that the previous value is
+    /// foreign: it is usually the defaults, which is also exactly what a default-configured VS
+    /// Code writes when it opens the folder.
+    pub fn written_values(&self, now_ms: i64) -> Vec<Vec<String>> {
+        let mut v: Vec<Vec<String>> = self.exclude_written.iter().cloned().collect();
+        let fresh = self.exclude_written_at.is_some_and(|at| now_ms.saturating_sub(at) <= STALE_WRITE_BACK_MS);
+        if fresh {
+            v.extend(self.exclude_written_prev.iter().cloned());
+        }
+        v
     }
 }
 
@@ -100,14 +112,18 @@ fn store_err(e: crate::store::StoreError) -> String {
 /// The values the app itself wrote to `excludes.json[root]`: the last one and the one before
 /// it. The extension rewrites the file without a lock, so a stale copy of the previous value can
 /// land just after the app's write; that is still the app's, not a takeover.
-fn ours(rec: &ProjectRecord) -> Vec<serde_json::Value> {
-    [&rec.exclude_written, &rec.exclude_written_prev].into_iter().flatten().map(|w| serde_json::json!(w)).collect()
+fn ours(rec: &ProjectRecord, now_ms: i64) -> Vec<serde_json::Value> {
+    rec.written_values(now_ms).iter().map(|w| serde_json::json!(w)).collect()
 }
+
+/// How long after its own write the app still reads its previous value as a stale write-back by
+/// the extension rather than a takeover.
+pub const STALE_WRITE_BACK_MS: i64 = 30_000;
 
 /// One root's step of `sync_excludes`. `None` when nothing changed or the root is not owned.
 /// Every key that resolves to the root counts (the extension writes `path.resolve` form, but a
 /// differently spelled key reaches the same root in hook.py).
-fn sync_root(home: &Path, cfg: &mut impl AppProjects, root: &str) -> Result<Option<RootChange>, String> {
+fn sync_root(home: &Path, cfg: &mut impl AppProjects, root: &str, now_ms: i64) -> Result<Option<RootChange>, String> {
     let rec = cfg.record(root);
     if !rec.owned() {
         return Ok(None);
@@ -116,7 +132,7 @@ fn sync_root(home: &Path, cfg: &mut impl AppProjects, root: &str) -> Result<Opti
     let key = excludes_key(&resolved);
     let want = owned_exclude(&rec);
     let want_v = serde_json::json!(want);
-    let mine = ours(&rec);
+    let mine = ours(&rec, now_ms);
     let mut taken = false;
     let wrote = update_excludes(home, |map| {
         taken = false;
@@ -143,8 +159,8 @@ fn sync_root(home: &Path, cfg: &mut impl AppProjects, root: &str) -> Result<Opti
         cfg.set_managed_by_vscode(root, true)?;
         return Ok(Some(RootChange::ManagedByVsCode { root: root.to_string() }));
     }
-    if rec.exclude_written.as_ref() != Some(&want) {
-        cfg.set_exclude_written(root, &want)?;
+    if wrote || rec.exclude_written.as_ref() != Some(&want) {
+        cfg.set_exclude_written(root, &want, now_ms)?;
     }
     Ok(wrote.then(|| RootChange::Written { root: root.to_string(), globs: want }))
 }
@@ -160,9 +176,14 @@ pub fn take_back_exclude(home: &Path, cfg: &mut impl AppProjects, root: &str) ->
         return Err("Only a project added in this app can be taken back.".into());
     }
     let want = owned_exclude(&rec);
-    excludes_set(home, Path::new(root), &want).map_err(store_err)?;
-    cfg.set_exclude_written(root, &want)?;
+    // Recorded before the key is overwritten: if the write then fails, the key still holds VS
+    // Code's value, which the next sync reads as a takeover again. Never the reverse (our key
+    // on disk while the config still says VS Code's).
+    cfg.set_exclude_written(root, &want, crate::time::now_ms())?;
     cfg.set_managed_by_vscode(root, false)?;
+    // Every spelling of the root goes, so a value VS Code wrote under another spelling cannot
+    // mark it managed again at once.
+    excludes_set(home, Path::new(root), &want).map_err(store_err)?;
     Ok(RootChange::Written { root: root.to_string(), globs: want })
 }
 
@@ -172,10 +193,15 @@ pub fn take_back_exclude(home: &Path, cfg: &mut impl AppProjects, root: &str) ->
 /// `managedByVsCode` and never write that key again. Compares before writing, so running it on
 /// its own write's watch event writes nothing. Returns what changed.
 pub fn sync_excludes(home: &Path, cfg: &mut impl AppProjects) -> Result<Vec<RootChange>, String> {
+    sync_excludes_at(home, cfg, crate::time::now_ms())
+}
+
+/// `sync_excludes` with the clock injected.
+pub fn sync_excludes_at(home: &Path, cfg: &mut impl AppProjects, now_ms: i64) -> Result<Vec<RootChange>, String> {
     let mut out = Vec::new();
     let mut first_err = None;
     for root in cfg.app_roots() {
-        match sync_root(home, cfg, &root) {
+        match sync_root(home, cfg, &root, now_ms) {
             Ok(Some(c)) => out.push(c),
             Ok(None) => {}
             Err(e) => {
@@ -332,7 +358,7 @@ pub fn add_project(home: &Path, cfg: &mut impl AppProjects, path: &str) -> Resul
     // 6. The app took ownership: hand the hook its exclude (the defaults, or VS Code's key if a
     // window already wrote one, which makes the root VS Code's). A failure here keeps the add;
     // the next sync (on any change of excludes.json or the config) retries.
-    let _ = sync_root(home, cfg, &name);
+    let _ = sync_root(home, cfg, &name, crate::time::now_ms());
     Ok(Added { root: name, already: false })
 }
 
@@ -353,7 +379,7 @@ pub fn remove_project(
     }
     let settings_err = |e: String| RootsError::Io(format!("Couldn't update the app's settings: {e}"));
     let rec = cfg.record(&name);
-    if rec.managed_by_vscode || vscode_uses_root(home, &root, &rec.written_values(), storage_files) {
+    if rec.managed_by_vscode || vscode_uses_root(home, &root, &rec.written_values(crate::time::now_ms()), storage_files) {
         cfg.forget(&name).map_err(settings_err)?;
         return Ok(Removed { root: name, unregistered: false });
     }
