@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clipboardText, formatRef, selectionOnModified } from "./ref";
+import { chooseSelection, clipboardText, formatRef, selectionOnModified } from "./ref";
 
 const ROOT = "/home/dev/shop";
 
@@ -47,5 +47,23 @@ describe("selectionOnModified", () => {
     // Original lines 5-6 were deleted; modified start is the line above the cut.
     const changes = [{ originalStartLineNumber: 5, originalEndLineNumber: 6, modifiedStartLineNumber: 4, modifiedEndLineNumber: 0 }];
     expect(selectionOnModified("original", { start: 5, end: 6 }, changes)).toEqual({ start: 4, end: 4 });
+  });
+});
+
+describe("chooseSelection", () => {
+  const stale = [{ range: { start: 12, end: 20 }, focused: false }];
+  it("keyboard with focus in the tree ignores a stale diff selection: the whole file", () => {
+    const sel = chooseSelection(stale, true);
+    expect(sel).toBeNull();
+    expect(formatRef(`${ROOT}/src/app.ts`, ROOT, "relative", sel)).toBe("@src/app.ts");
+  });
+  it("keyboard with the editor focused takes its selection", () => {
+    expect(chooseSelection([{ range: { start: 3, end: 4 }, focused: true }], true)).toEqual({ start: 3, end: 4 });
+  });
+  it("the button and menu take a selection whatever has focus", () => {
+    expect(chooseSelection(stale, false)).toEqual({ start: 12, end: 20 });
+  });
+  it("skips an empty side", () => {
+    expect(chooseSelection([{ range: null, focused: true }, { range: { start: 1, end: 2 }, focused: true }], true)).toEqual({ start: 1, end: 2 });
   });
 });

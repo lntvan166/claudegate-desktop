@@ -786,9 +786,10 @@
     if (ref) {
       const t = e.target as HTMLElement | null;
       const inDiff = !!t?.closest?.(".monaco-editor");
-      if (e.repeat || (isTypingTarget(t) && !inDiff)) return;
+      if (e.repeat || (isTypingTarget(t) && !inDiff) || document.querySelector("[data-confirm]")) return;
       e.preventDefault();
-      copySelectedRef(ref === "file", inDiff);
+      // Keyboard: only a selection in a focused editor counts; from the tree it is the whole file.
+      copySelectedRef(ref === "file", true);
       return;
     }
     if (isTypingTarget(e.target as HTMLElement | null)) return;

@@ -8,7 +8,7 @@
   import { languageFor } from "../lib/language";
   import { modifiedPositionFor } from "../lib/navigate";
   import { paneState } from "../lib/paneState";
-  import { selectionOnModified, type LineRange } from "../lib/ref";
+  import { chooseSelection, selectionOnModified, type LineRange } from "../lib/ref";
   import type { Row } from "../lib/rows";
   import OpenWith from "./OpenWith.svelte";
 
@@ -100,12 +100,15 @@
       { side: "original" as const, e: editor.getOriginalEditor() },
       { side: "modified" as const, e: editor.getModifiedEditor() },
     ].sort((a, b) => Number(b.side === cursor?.side) - Number(a.side === cursor?.side));
-    for (const { side, e } of sides) {
-      const sel = e.getSelection();
-      if (!sel || sel.isEmpty() || (focusedOnly && !e.hasTextFocus())) continue;
-      return selectionOnModified(side, { start: sel.startLineNumber, end: sel.endLineNumber }, editor.getLineChanges() ?? []);
-    }
-    return null;
+    const changes = editor.getLineChanges() ?? [];
+    return chooseSelection(
+      sides.map(({ side, e }) => {
+        const sel = e.getSelection();
+        const range = sel && !sel.isEmpty() ? selectionOnModified(side, { start: sel.startLineNumber, end: sel.endLineNumber }, changes) : null;
+        return { range, focused: e.hasTextFocus() };
+      }),
+      focusedOnly,
+    );
   }
 
   type CodeEditor = import("monaco-editor/editor/editor.api.js").editor.IStandaloneCodeEditor;

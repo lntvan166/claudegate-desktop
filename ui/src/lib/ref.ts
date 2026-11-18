@@ -31,3 +31,14 @@ export function selectionOnModified(side: "original" | "modified", sel: LineRang
   const end = modifiedPositionFor(sel.end, 1, changes).line;
   return { start, end: Math.max(start, end) };
 }
+
+/**
+ * Which selection a copy takes, from the candidates in preference order. The keyboard
+ * (`focusedOnly`) counts only an editor that has focus, so a selection left in the diff while
+ * focus is in the file tree is ignored and the whole file is copied; the header button and the
+ * menu take any selection.
+ */
+export function chooseSelection(cands: { range: LineRange | null; focused: boolean }[], focusedOnly: boolean): LineRange | null {
+  for (const c of cands) if (c.range && (!focusedOnly || c.focused)) return c.range;
+  return null;
+}
