@@ -198,6 +198,89 @@ fn a_symlinked_home_does_not_trip_the_guard_on_rollback() {
 }
 
 #[test]
+fn a_failed_restore_keeps_the_files_while_the_entry_is_registered() {
+    // (a) Our write drops a top-level key but carries our entry; verify fails, and the backup is
+    // gone by the time Undo needs it, so the file keeps our entry: the hook stays.
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    set_install_corrupt(Some(Box::new(|b: &mut Vec<u8>| {
+        let mut v: serde_json::Value = serde_json::from_slice(b).unwrap();
+        v.as_object_mut().unwrap().remove("model");
+        *b = serde_json::to_vec_pretty(&v).unwrap();
+    })));
+    let dir = h.home.join(".claude");
+    let err = install_with(&h, move |stage| {
+        if stage == "after_settings_write" {
+            for e in fs::read_dir(&dir).unwrap().flatten() {
+                if e.file_name().to_string_lossy().ends_with(".bak") {
+                    fs::remove_file(e.path()).unwrap();
+                }
+            }
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    set_install_corrupt(None);
+    let InstallError::Failed { reason, rollback } = &err else { panic!("{err:?}") };
+    assert!(reason.contains("top-level key \"model\" was lost"), "{reason}");
+    let rollback = rollback.as_deref().unwrap_or_default();
+    assert!(rollback.contains("could not read the backup"), "{rollback}");
+    assert!(rollback.contains("the hook files were kept"), "{rollback}");
+    for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
+        assert!(h.cg(f).exists(), "{f}");
+    }
+}
+
+#[test]
+fn a_foreign_rewrite_before_undo_that_keeps_an_entry_keeps_the_files() {
+    // (b) Verify fails on our bytes; before Undo runs, another program rewrites the file with an
+    // entry. Undo leaves the file alone, and the hook stays.
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    let target = h.settings();
+    let theirs = r#"{"hooks":{"PreToolUse":[{"matcher":"Write","hooks":[{"command":"$HOME/.claudegate/hook.sh"}]}]}}"#;
+    set_install_corrupt(Some(Box::new(|b: &mut Vec<u8>| *b = b"{\"model\":\"opus\"}".to_vec())));
+    let err = install_with(&h, move |stage| {
+        if stage == "before_undo" {
+            fs::write(&target, theirs).unwrap();
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    set_install_corrupt(None);
+    let InstallError::Failed { rollback, .. } = &err else { panic!("{err:?}") };
+    let rollback = rollback.as_deref().unwrap_or_default();
+    assert!(rollback.contains("was changed by another program right after setup; it was left as is"), "{rollback}");
+    assert!(rollback.contains("the hook files were kept"), "{rollback}");
+    assert_eq!(fs::read_to_string(h.settings()).unwrap(), theirs);
+    for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
+        assert!(h.cg(f).exists(), "{f}");
+    }
+}
+
+#[test]
+fn settings_deleted_after_our_write_is_not_set_up() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    let target = h.settings();
+    let err = install_with(&h, move |stage| {
+        if stage == "after_settings_write" {
+            fs::remove_file(&target).unwrap();
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    let InstallError::Failed { reason, rollback } = &err else { panic!("{err:?}") };
+    assert!(reason.contains("removed by another program"), "{reason}");
+    assert_eq!(rollback, &None);
+    assert!(!h.settings().exists(), "not recreated");
+    for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
+        assert!(!h.cg(f).exists(), "{f}");
+    }
+    assert_eq!(h.backups().len(), 1);
+}
+
+#[test]
 fn a_change_just_before_our_write_is_refused_and_kept() {
     let h = Home::new();
     h.write_settings(EXISTING);

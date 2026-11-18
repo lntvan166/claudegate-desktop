@@ -870,8 +870,11 @@ struct Undo {
     replaced: Vec<(PathBuf, Vec<u8>)>,
     /// Folders this call created (removed only while empty).
     dirs: Vec<PathBuf>,
-    /// Our settings write, once it happened.
+    /// Our settings write, once it happened, while it is still ours to undo.
     settings: Option<SettingsUndo>,
+    /// The settings file, once we wrote it. From then on the hook files go only when that file has
+    /// no ClaudeGate entry (`hook_files_may_go`), whether or not its own undo succeeded.
+    written: Option<PathBuf>,
 }
 
 struct SettingsUndo {
@@ -885,9 +888,6 @@ struct SettingsUndo {
     ours: Vec<u8>,
 }
 
-/// The pre-rename check's verdict when the file holds someone else's bytes.
-const CONCURRENT: &str = "settings.json holds another program's write";
-
 fn concurrent_note(backup: Option<&Path>) -> String {
     let copy = match backup {
         Some(b) => format!("Your pre-setup copy is {}.", b.display()),
@@ -896,54 +896,108 @@ fn concurrent_note(backup: Option<&Path>) -> String {
     format!("settings.json was changed by another program right after setup; it was left as is. {copy}")
 }
 
+/// What the settings file says about capture, by the status's own test.
+enum OnDisk {
+    /// A ClaudeGate entry is registered (any spelling `capture_status` counts).
+    Registered,
+    /// Readable, and no entry.
+    NotRegistered,
+    /// The file is gone.
+    Absent,
+    /// Unreadable or unparseable: we cannot tell.
+    Unknown(String),
+}
+
+fn registration_of(target: &Path) -> OnDisk {
+    match fs::read(target) {
+        Ok(b) => match capture_status(Some(&String::from_utf8_lossy(&b)), true, true) {
+            CaptureStatus::SetUpByApp { .. } | CaptureStatus::SetUpByExtension => OnDisk::Registered,
+            CaptureStatus::NotSetUp => OnDisk::NotRegistered,
+            CaptureStatus::SettingsUnreadable(r) => OnDisk::Unknown(r),
+            CaptureStatus::PythonMissing => OnDisk::Unknown("unexpected status".into()),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => OnDisk::Absent,
+        Err(e) => OnDisk::Unknown(format!("could not read it: {e}")),
+    }
+}
+
+/// The one rule for removing hook files once settings.json was written: only when the file now
+/// has no ClaudeGate entry (or is gone). `Err` says why they must stay, so a registered entry is
+/// never left pointing at a deleted hook.
+fn hook_files_may_go(target: &Path) -> Result<(), String> {
+    match registration_of(target) {
+        OnDisk::NotRegistered | OnDisk::Absent => Ok(()),
+        OnDisk::Registered => {
+            Err("the hook files were kept, because settings.json still has a ClaudeGate entry".into())
+        }
+        OnDisk::Unknown(r) => Err(format!(
+            "the hook files were kept, because settings.json could not be checked for a ClaudeGate entry ({r})"
+        )),
+    }
+}
+
 impl Undo {
     /// Best-effort, settings first. Returns what could not be put back, or was left alone.
     fn run(self) -> Option<String> {
         let mut problems = Vec::new();
+        if self.written.is_some() {
+            let _ = install_fault("before_undo");
+        }
         if let Some(su) = self.settings {
             // The "still ours?" compare runs right before the restore's rename (or the unlink).
+            let concurrent = std::cell::Cell::new(false);
             let still_ours = || -> io::Result<()> {
                 match fs::read(&su.target) {
                     Ok(now) if now == su.ours => Ok(()),
-                    Ok(_) => Err(io::Error::other(CONCURRENT)),
+                    Ok(_) => {
+                        concurrent.set(true);
+                        Err(io::Error::other("settings.json holds another program's write"))
+                    }
                     Err(e) => Err(io::Error::new(e.kind(), format!("could not read it: {e}"))),
                 }
             };
             let res = guard_settings_target(&su.home, &su.target).and_then(|()| match &su.backup {
                 Some(b) => fs::read(b)
                     .map_err(|e| io::Error::new(e.kind(), format!("could not read the backup: {e}")))
-                    .and_then(|bytes| atomic_write_checked(&su.target, &bytes, true, still_ours)),
+                    .and_then(|bytes| atomic_write_checked(&su.target, &bytes, true, &still_ours)),
                 None => match fs::symlink_metadata(&su.target) {
                     Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
                     _ => still_ours().and_then(|()| fs::remove_file(&su.target)),
                 },
             });
-            let res = match res {
-                Err(e) if e.to_string() == CONCURRENT => {
-                    problems.push(concurrent_note(su.backup.as_deref()));
-                    Ok(())
-                }
-                other => other,
-            };
-            if let Err(e) = res {
-                let from = su.backup.map(|b| format!("; your previous settings are in {}", b.display())).unwrap_or_default();
-                problems.push(format!("could not restore {}: {e}{from}", su.target.display()));
-            }
-        }
-        for (p, ours) in self.created.into_iter().rev() {
-            if fs::read(&p).is_ok_and(|now| now == ours) {
-                if let Err(e) = fs::remove_file(&p) {
-                    problems.push(format!("could not remove {}: {e}", p.display()));
+            match res {
+                Ok(()) => {}
+                Err(_) if concurrent.get() => problems.push(concurrent_note(su.backup.as_deref())),
+                Err(e) => {
+                    let from =
+                        su.backup.map(|b| format!("; your previous settings are in {}", b.display())).unwrap_or_default();
+                    problems.push(format!("could not restore {}: {e}{from}", su.target.display()));
                 }
             }
         }
-        for (p, old) in self.replaced {
-            if let Err(e) = atomic_write_bytes(&p, &old, true) {
-                problems.push(format!("could not restore {}: {e}", p.display()));
+        let files_may_go = match &self.written {
+            Some(target) => hook_files_may_go(target),
+            None => Ok(()),
+        };
+        match files_may_go {
+            Ok(()) => {
+                for (p, ours) in self.created.into_iter().rev() {
+                    if fs::read(&p).is_ok_and(|now| now == ours) {
+                        if let Err(e) = fs::remove_file(&p) {
+                            problems.push(format!("could not remove {}: {e}", p.display()));
+                        }
+                    }
+                }
+                for (p, old) in self.replaced {
+                    if let Err(e) = atomic_write_bytes(&p, &old, true) {
+                        problems.push(format!("could not restore {}: {e}", p.display()));
+                    }
+                }
+                for d in self.dirs.into_iter().rev() {
+                    let _ = fs::remove_dir(d); // only succeeds while empty
+                }
             }
-        }
-        for d in self.dirs.into_iter().rev() {
-            let _ = fs::remove_dir(d); // only succeeds while empty
+            Err(kept) => problems.push(kept),
         }
         (!problems.is_empty()).then(|| problems.join("; "))
     }
@@ -1192,6 +1246,7 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
         return Err(failed(undo, why));
     }
     undo.settings = Some(SettingsUndo { home: home.to_path_buf(), target: target.clone(), backup: backup.clone(), ours: ours.clone() });
+    undo.written = Some(target.clone());
     if let Err(e) = install_fault("after_settings_write") {
         return Err(failed(undo, e));
     }
@@ -1203,6 +1258,15 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
     let report = |note| InstallReport { settings: target.clone(), backup: backup.clone(), created: created.clone(), version: version.to_owned(), note };
     let after = match fs::read(&target) {
         Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            // Deleted since our write: no entry, so capture is not set up. Nothing to restore over.
+            undo.settings = None;
+            let rollback = undo.run();
+            return Err(InstallError::Failed {
+                reason: "settings.json was removed by another program right after setup, so capture is not set up".into(),
+                rollback,
+            });
+        }
         // We cannot tell what is there, so we cannot tell whether our entry is: keep everything.
         Err(e) => {
             return Ok(report(Some(format!(
@@ -1212,17 +1276,15 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
         }
     };
     if after != ours {
-        // Another program's write: never restored over. Whether capture is on is decided by the
-        // status test itself (any PreToolUse entry mentioning claudegate), so a registered entry
-        // is never left pointing at hook files we deleted.
+        // Another program's write: never restored over. Whether setup held is the status's own
+        // test; the hook files go (in `Undo::run`, by `hook_files_may_go`) only without an entry.
         let note = concurrent_note(backup.as_deref());
-        let text = String::from_utf8_lossy(&after);
-        match capture_status(Some(&text), true, true) {
-            CaptureStatus::SetUpByApp { .. } | CaptureStatus::SetUpByExtension => {
+        match registration_of(&target) {
+            OnDisk::Registered => {
                 prune_settings_backups(&literal);
                 return Ok(report(Some(note)));
             }
-            CaptureStatus::NotSetUp => {
+            OnDisk::NotRegistered | OnDisk::Absent => {
                 undo.settings = None; // theirs now: leave it
                 let rollback = undo.run();
                 return Err(InstallError::Failed {
@@ -1230,9 +1292,9 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
                     rollback,
                 });
             }
-            _ => {
+            OnDisk::Unknown(r) => {
                 return Ok(report(Some(format!(
-                    "{note} It could not be checked for ClaudeGate's entry, so the hook files were kept; \
+                    "{note} It could not be checked for ClaudeGate's entry ({r}), so the hook files were kept; \
                      check capture status before relying on it."
                 ))))
             }
