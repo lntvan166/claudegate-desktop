@@ -89,7 +89,7 @@ describe("detail", () => {
     expect(detail(v("vscode"))).not.toMatch(/now manages/);
   });
   it("does not claim the app keeps the extension's hook updated", () => {
-    expect(detail(v("vscode", { takenOver: true }))).toContain("The VS Code extension's hook is in place; this app leaves it alone.");
+    expect(detail(v("vscode", { takenOver: true }))).toContain("the extension has since replaced its hook, and this app leaves it alone.");
     expect(detail(v("vscode", { takenOver: true }))).not.toMatch(/keeps it up to date/);
   });
   it("says to add a project when there are none, only while capturing", () => {

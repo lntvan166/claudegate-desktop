@@ -63,7 +63,7 @@ export function detail(v: CaptureView, projectCount: number | null = null): stri
   switch (v.status) {
     case "vscode":
       if (v.takenOver) {
-        return `The VS Code extension now manages the hook. This app set capture up first; the extension has since replaced its hook. The VS Code extension's hook is in place; this app leaves it alone.${noProjects(projectCount)}`;
+        return `The VS Code extension now manages the hook. This app set capture up first; the extension has since replaced its hook, and this app leaves it alone.${noProjects(projectCount)}`;
       }
       return `The ClaudeGate VS Code extension set up the hook, so Claude Code's edits are captured. The extension keeps it up to date.${noProjects(projectCount)}`;
     case "app":

@@ -988,7 +988,7 @@
     </div>
     <div class="status">
       {#if usingMock}<span class="hint">Fixture data</span>{/if}
-      <CaptureChip {readOnly} projectCount={projects.length} />
+      <CaptureChip {readOnly} projectCount={loadingList || listError ? null : projects.length} />
       <button
         class="chip"
         class:on={readOnly}
