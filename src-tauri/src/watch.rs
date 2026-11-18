@@ -194,6 +194,10 @@ pub fn start(app: tauri::AppHandle, home: PathBuf, known: KnownMap) {
         known,
         Some(config.clone()),
         move |p| {
+            // A project's session changed: keep it up if the app owns it (rate-limited).
+            for r in &p.roots {
+                crate::upkeep::trigger(&app, r);
+            }
             let _ = app.emit(CHANGED_EVENT, p);
         },
         // The extension rewrites workspace-roots.json without a lock and can drop a root the app

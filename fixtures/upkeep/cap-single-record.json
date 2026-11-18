@@ -1,0 +1,26 @@
+{
+  "op": "capAcceptedBytes",
+  "maxBytes": 10,
+  "session": {
+    "sessionId": "2026-01-01T00:00:00.000Z",
+    "status": "reviewed",
+    "files": {},
+    "accepted": [
+      {
+        "id": "2026-01-01T00:00:01.000Z::/w/f1.ts",
+        "path": "/w/f1.ts",
+        "before": "b1",
+        "after": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "decidedAt": "2026-01-01T00:00:01.000Z",
+        "sessionId": "s1"
+      }
+    ],
+    "rejected": {}
+  },
+  "expected": {
+    "dropped": 0,
+    "acceptedIds": [
+      "2026-01-01T00:00:01.000Z::/w/f1.ts"
+    ]
+  }
+}

@@ -1,5 +1,5 @@
 use crate::excludes::{read_excludes, ExcludeMatcher};
-use crate::model::{has_real_change, parse_session, ReviewRecord, Session, Shape};
+use crate::model::{has_real_change, parse_session, FileEntry, ReviewRecord, Session, Shape};
 use crate::paths::{resolve_root, session_file_for};
 use crate::roots::read_roots;
 use crate::time::{now_ms, parse_iso_ms};
@@ -258,13 +258,18 @@ pub fn pending_state(
     }
 }
 
+/// Port of `shouldPruneNoOp`: the entry is a no-op that has out-aged its settle window.
+pub fn should_prune_no_op(entry: &FileEntry, disk: Option<&str>, now_ms: i64) -> bool {
+    pending_state(entry.original_content.as_deref(), disk, entry.captured_at.as_deref(), now_ms) == PendingState::Hidden
+}
+
 /// The project's scopes: the primary root first, then every nested worktree (sorted).
 /// `primary` must already be resolved (`resolve_root`).
 pub(crate) fn project_scopes(primary: &Path) -> Vec<PathBuf> {
     project_scopes_max(primary, MAX_WORKTREES)
 }
 
-fn project_scopes_max(primary: &Path, max_attached: usize) -> Vec<PathBuf> {
+pub(crate) fn project_scopes_max(primary: &Path, max_attached: usize) -> Vec<PathBuf> {
     let mut scopes = vec![primary.to_path_buf()];
     scopes.extend(nested_worktrees_under_max(primary, max_attached));
     scopes

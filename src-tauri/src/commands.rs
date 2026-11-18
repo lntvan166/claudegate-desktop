@@ -269,16 +269,28 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 }
 
 #[tauri::command]
-pub async fn list_projects(known: State<'_, KnownMap>) -> Result<Vec<ProjectSummary>, String> {
+pub async fn list_projects(known: State<'_, KnownMap>, app: tauri::AppHandle) -> Result<Vec<ProjectSummary>, String> {
     let known = known.inner().clone();
-    blocking(move || list_projects_for(&claudegate_home(), &known, &crate::config::config_path(), &ext_sources())).await
+    blocking(move || {
+        let list = list_projects_for(&claudegate_home(), &known, &crate::config::config_path(), &ext_sources());
+        // Keep up the sessions of the projects the app owns (a no-op for the rest).
+        for p in &list {
+            crate::upkeep::trigger(&app, &p.root);
+        }
+        list
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn get_project(root: String, known: State<'_, KnownMap>) -> Result<ProjectView, String> {
+pub async fn get_project(root: String, known: State<'_, KnownMap>, app: tauri::AppHandle) -> Result<ProjectView, String> {
     let known = known.inner().clone();
-    blocking(move || get_project_for(&claudegate_home(), &known, &crate::config::config_path(), &root, &ext_sources()))
-        .await
+    blocking(move || {
+        let view = get_project_for(&claudegate_home(), &known, &crate::config::config_path(), &root, &ext_sources());
+        crate::upkeep::trigger(&app, &view.root);
+        view
+    })
+    .await
 }
 
 #[tauri::command]

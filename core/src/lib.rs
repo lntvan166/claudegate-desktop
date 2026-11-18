@@ -13,3 +13,4 @@ pub mod decide;
 pub mod workspace_write;
 pub mod jsonc;
 pub mod settings;
+pub mod upkeep;

@@ -341,6 +341,34 @@ pub fn cap_accepted_log(s: &mut Session) -> bool {
     true
 }
 
+/// Port of `capAcceptedBytes`: drop the oldest `accepted[]` records until the newest ones fit
+/// `max_bytes`, each measured as its compact JSON (`Buffer.byteLength(JSON.stringify(rec))`).
+/// Always keeps the newest record. Returns the number dropped.
+///
+/// One known difference: a record whose `sessionId` was `null` on disk is measured without it
+/// (we read it as absent), 17 bytes short of what the TS counts.
+pub fn cap_accepted_bytes(s: &mut Session, max_bytes: usize) -> usize {
+    let n = s.accepted.len();
+    if n <= 1 {
+        return 0;
+    }
+    let mut total = 0usize;
+    let mut keep_from = 0;
+    for i in (0..n).rev() {
+        total += serde_json::to_string(&s.accepted[i]).map(|t| t.len()).unwrap_or(0);
+        if total > max_bytes {
+            keep_from = i + 1;
+            break;
+        }
+    }
+    keep_from = keep_from.min(n - 1);
+    if keep_from == 0 {
+        return 0;
+    }
+    s.accepted.drain(..keep_from);
+    keep_from
+}
+
 /// `new Date().toISOString()` stand-in, used only when a session has no `sessionId`.
 fn now_iso() -> String {
     let d = std::time::SystemTime::now()

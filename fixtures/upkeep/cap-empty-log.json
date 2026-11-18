@@ -1,0 +1,15 @@
+{
+  "op": "capAcceptedBytes",
+  "maxBytes": 1,
+  "session": {
+    "sessionId": "2026-01-01T00:00:00.000Z",
+    "status": "reviewed",
+    "files": {},
+    "accepted": [],
+    "rejected": {}
+  },
+  "expected": {
+    "dropped": 0,
+    "acceptedIds": []
+  }
+}

@@ -2,6 +2,7 @@ pub mod commands;
 pub mod config;
 pub mod editor;
 pub mod tray;
+pub mod upkeep;
 pub mod watch;
 
 use tauri::Manager;
@@ -11,6 +12,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(watch::KnownMap::default())
         .manage(commands::WriteLock::default())
+        .manage(upkeep::UpkeepState::default())
         .setup(|app| {
             let known = app.state::<watch::KnownMap>().inner().clone();
             // Re-add any of the app's projects the extension dropped while we were not running.

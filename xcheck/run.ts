@@ -2,9 +2,11 @@ import * as fs from "fs";
 import * as path from "path";
 import {
   acceptEntry,
+  capAcceptedBytes,
   mergeFreshCaptures,
   migrateSession,
   rejectEntry,
+  shouldPruneNoOp,
   type MergeGuards,
 } from "../.xcheck-cache/claudegate/src/reviewModel";
 import { DEFAULT_EXCLUDES, DEFAULT_PROTECTED, ExcludeMatcher } from "../.xcheck-cache/claudegate/src/excludeMatcher";
@@ -76,6 +78,46 @@ for (const f of mergeFiles) {
   if (d) fail(`merge ${f}: ${d}`);
 }
 
+// Upkeep fixtures: capAcceptedBytes over a migrated session, and shouldPruneNoOp cases.
+const upkeepDir = path.join(fixtures, "upkeep");
+const upkeepFiles = fs.readdirSync(upkeepDir).filter((f) => f.endsWith(".json")).sort();
+let upkeepCases = 0;
+for (const f of upkeepFiles) {
+  const fx = JSON.parse(fs.readFileSync(path.join(upkeepDir, f), "utf8"));
+  if (fx.op === "capAcceptedBytes") {
+    const s = session(fx.session);
+    const dropped = capAcceptedBytes(s, fx.maxBytes);
+    const d = firstDiff({ dropped, acceptedIds: s.accepted.map((r) => r.id) }, fx.expected);
+    if (d) fail(`upkeep ${f}: ${d}`);
+    upkeepCases++;
+  } else if (fx.op === "shouldPruneNoOp") {
+    for (const c of fx.cases) {
+      const got = shouldPruneNoOp({ reviewStatus: "pending", ...c.entry }, c.disk, c.nowMs);
+      if (got !== c.prune) fail(`upkeep ${f} "${c.name}": extension=${got}, fixture=${c.prune}`);
+      upkeepCases++;
+    }
+  } else fail(`upkeep ${f}: unknown op ${fx.op}`);
+}
+
+// Upkeep constants: core's copies must equal the extension's source.
+{
+  const num = (t: string | undefined) => (t === undefined ? undefined : Number(t.replace(/_/g, "")));
+  const rsConst = (file: string, name: string) =>
+    num(fs.readFileSync(path.join(root, "core", "src", file), "utf8").match(new RegExp(`pub const ${name}: \\w+ = ([\\d_]+);`))?.[1]);
+  const tsConst = (file: string, name: string) =>
+    num(fs.readFileSync(path.join(root, ".xcheck-cache", "claudegate", "src", file), "utf8").match(new RegExp(`const ${name} = ([\\d_]+);`))?.[1]);
+  for (const [rs, ts, name] of [
+    ["upkeep.rs", "sessionManager.ts", "SESSION_SIZE_WARN_BYTES"],
+    ["upkeep.rs", "sessionManager.ts", "MAX_ACCEPTED_BYTES"],
+    ["project.rs", "reviewModel.ts", "NOOP_SETTLE_MS"],
+    ["project.rs", "reviewModel.ts", "NEW_FILE_ABSENT_MS"],
+    ["model.rs", "reviewModel.ts", "MAX_ACCEPTED_RECORDS"],
+  ]) {
+    const a = rsConst(rs, name), b = tsConst(ts, name);
+    if (a === undefined || a !== b) fail(`upkeep constant ${name}: core=${a}, extension=${b}`);
+  }
+}
+
 // Settings defaults: the constants copied into core/src/settings.rs must equal the extension's.
 {
   const rs = fs.readFileSync(path.join(root, "core", "src", "settings.rs"), "utf8");
@@ -108,4 +150,4 @@ if (failures) {
   console.error(`${failures} mismatch(es)`);
   process.exit(1);
 }
-console.log(`ok - ${sessionFiles.length} session cases, ${ex.cases.length} exclude cases, ${mergeFiles.length} merge cases`);
+console.log(`ok - ${sessionFiles.length} session cases, ${ex.cases.length} exclude cases, ${mergeFiles.length} merge cases, ${upkeepCases} upkeep cases`);

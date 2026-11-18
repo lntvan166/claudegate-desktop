@@ -1,0 +1,45 @@
+{
+  "op": "capAcceptedBytes",
+  "maxBytes": 723,
+  "session": {
+    "sessionId": "2026-01-01T00:00:00.000Z",
+    "status": "reviewed",
+    "files": {},
+    "accepted": [
+      {
+        "id": "2026-01-01T00:00:01.000Z::/w/f1.ts",
+        "path": "/w/f1.ts",
+        "before": "b1",
+        "after": "é😀\"\\\n\t\u0001/<>& é😀\"\\\n\t\u0001/<>& é😀\"\\\n\t\u0001/<>& é😀\"\\\n\t\u0001/<>& ",
+        "decidedAt": "2026-01-01T00:00:01.000Z",
+        "sessionId": "s1"
+      },
+      {
+        "id": "2026-01-01T00:00:02.000Z::/w/f2.ts",
+        "path": "/w/f2.ts",
+        "before": "b2",
+        "after": "é😀\"\\\n\t\u0001/<>& é😀\"\\\n\t\u0001/<>& é😀\"\\\n\t\u0001/<>& é😀\"\\\n\t\u0001/<>& ",
+        "decidedAt": "2026-01-01T00:00:02.000Z",
+        "sessionId": "s1",
+        "newFile": true
+      },
+      {
+        "id": "2026-01-01T00:00:03.000Z::/w/f3.ts",
+        "path": "/w/f3.ts",
+        "before": "b3",
+        "after": "é😀\"\\\n\t\u0001/<>& é😀\"\\\n\t\u0001/<>& é😀\"\\\n\t\u0001/<>& é😀\"\\\n\t\u0001/<>& ",
+        "decidedAt": "2026-01-01T00:00:03.000Z",
+        "sessionId": "s1",
+        "reason": "nope é"
+      }
+    ],
+    "rejected": {}
+  },
+  "expected": {
+    "dropped": 1,
+    "acceptedIds": [
+      "2026-01-01T00:00:02.000Z::/w/f2.ts",
+      "2026-01-01T00:00:03.000Z::/w/f3.ts"
+    ]
+  }
+}

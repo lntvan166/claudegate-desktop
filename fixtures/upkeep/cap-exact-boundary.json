@@ -1,0 +1,43 @@
+{
+  "op": "capAcceptedBytes",
+  "maxBytes": 288,
+  "session": {
+    "sessionId": "2026-01-01T00:00:00.000Z",
+    "status": "reviewed",
+    "files": {},
+    "accepted": [
+      {
+        "id": "2026-01-01T00:00:01.000Z::/w/f1.ts",
+        "path": "/w/f1.ts",
+        "before": "b1",
+        "after": "a1",
+        "decidedAt": "2026-01-01T00:00:01.000Z",
+        "sessionId": "s1"
+      },
+      {
+        "id": "2026-01-01T00:00:02.000Z::/w/f2.ts",
+        "path": "/w/f2.ts",
+        "before": "b2",
+        "after": "a2",
+        "decidedAt": "2026-01-01T00:00:02.000Z",
+        "sessionId": "s1"
+      },
+      {
+        "id": "2026-01-01T00:00:03.000Z::/w/f3.ts",
+        "path": "/w/f3.ts",
+        "before": "b3",
+        "after": "a3",
+        "decidedAt": "2026-01-01T00:00:03.000Z",
+        "sessionId": "s1"
+      }
+    ],
+    "rejected": {}
+  },
+  "expected": {
+    "dropped": 1,
+    "acceptedIds": [
+      "2026-01-01T00:00:02.000Z::/w/f2.ts",
+      "2026-01-01T00:00:03.000Z::/w/f3.ts"
+    ]
+  }
+}

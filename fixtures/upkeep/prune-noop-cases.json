@@ -1,0 +1,164 @@
+{
+  "op": "shouldPruneNoOp",
+  "cases": [
+    {
+      "name": "real change kept however old",
+      "entry": {
+        "originalContent": "a",
+        "capturedAt": "2025-12-31T21:14:20.000Z"
+      },
+      "disk": "b",
+      "nowMs": 1767225660000,
+      "prune": false
+    },
+    {
+      "name": "new file on disk kept",
+      "entry": {
+        "originalContent": null,
+        "capturedAt": "2025-12-31T21:14:20.000Z"
+      },
+      "disk": "x",
+      "nowMs": 1767225660000,
+      "prune": false
+    },
+    {
+      "name": "noop at 15000 kept",
+      "entry": {
+        "originalContent": "a",
+        "capturedAt": "2026-01-01T00:00:45.000Z"
+      },
+      "disk": "a",
+      "nowMs": 1767225660000,
+      "prune": false
+    },
+    {
+      "name": "noop at 15001 pruned",
+      "entry": {
+        "originalContent": "a",
+        "capturedAt": "2026-01-01T00:00:44.999Z"
+      },
+      "disk": "a",
+      "nowMs": 1767225660000,
+      "prune": true
+    },
+    {
+      "name": "noop young kept",
+      "entry": {
+        "originalContent": "a",
+        "capturedAt": "2026-01-01T00:00:59.000Z"
+      },
+      "disk": "a",
+      "nowMs": 1767225660000,
+      "prune": false
+    },
+    {
+      "name": "absent new file at 45000 kept",
+      "entry": {
+        "originalContent": null,
+        "capturedAt": "2026-01-01T00:00:15.000Z"
+      },
+      "disk": null,
+      "nowMs": 1767225660000,
+      "prune": false
+    },
+    {
+      "name": "absent new file at 45001 pruned",
+      "entry": {
+        "originalContent": null,
+        "capturedAt": "2026-01-01T00:00:14.999Z"
+      },
+      "disk": null,
+      "nowMs": 1767225660000,
+      "prune": true
+    },
+    {
+      "name": "absent new file at 20000 kept",
+      "entry": {
+        "originalContent": null,
+        "capturedAt": "2026-01-01T00:00:40.000Z"
+      },
+      "disk": null,
+      "nowMs": 1767225660000,
+      "prune": false
+    },
+    {
+      "name": "no capturedAt pruned",
+      "entry": {
+        "originalContent": "a"
+      },
+      "disk": "a",
+      "nowMs": 1767225660000,
+      "prune": true
+    },
+    {
+      "name": "empty capturedAt pruned",
+      "entry": {
+        "originalContent": "a",
+        "capturedAt": ""
+      },
+      "disk": "a",
+      "nowMs": 1767225660000,
+      "prune": true
+    },
+    {
+      "name": "garbage capturedAt pruned",
+      "entry": {
+        "originalContent": "a",
+        "capturedAt": "yesterday"
+      },
+      "disk": "a",
+      "nowMs": 1767225660000,
+      "prune": true
+    },
+    {
+      "name": "hook micros offset young kept",
+      "entry": {
+        "originalContent": "a",
+        "capturedAt": "2026-01-01T00:00:50.123456+00:00"
+      },
+      "disk": "a",
+      "nowMs": 1767225660000,
+      "prune": false
+    },
+    {
+      "name": "hook micros offset old pruned",
+      "entry": {
+        "originalContent": "a",
+        "capturedAt": "2026-01-01T00:00:40.123456+00:00"
+      },
+      "disk": "a",
+      "nowMs": 1767225660000,
+      "prune": true
+    },
+    {
+      "name": "future capturedAt kept",
+      "entry": {
+        "originalContent": "a",
+        "capturedAt": "2026-01-01T00:02:00.000Z"
+      },
+      "disk": "a",
+      "nowMs": 1767225660000,
+      "prune": false
+    },
+    {
+      "name": "baseline file deleted is real",
+      "entry": {
+        "originalContent": "a",
+        "capturedAt": "2025-12-31T21:14:20.000Z"
+      },
+      "disk": null,
+      "nowMs": 1767225660000,
+      "prune": false
+    },
+    {
+      "name": "empty baseline vs empty disk noop pruned",
+      "entry": {
+        "originalContent": "",
+        "capturedAt": "2026-01-01T00:00:40.000Z"
+      },
+      "disk": "",
+      "nowMs": 1767225660000,
+      "prune": true
+    }
+  ]
+}
