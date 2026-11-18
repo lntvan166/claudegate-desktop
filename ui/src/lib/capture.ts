@@ -38,9 +38,19 @@ const LABELS: Record<CaptureStatus, string> = {
   "python-missing": "Capture: python3 not found",
 };
 
-/** `failed`: the status could not be read at all (shown instead of "checking…" forever). */
-export function chipLabel(v: CaptureView | null, failed = false): string {
+/** Hook-based setup is unix-only for now (core `InstallError::Unsupported`); Windows is the known miss. */
+export function setupSupported(platform: string = typeof navigator === "undefined" ? "" : navigator.platform): boolean {
+  return !/^Win/i.test(platform);
+}
+
+/** Shown in place of the Set up action when `setupSupported()` is false. */
+export const UNSUPPORTED_TEXT = "Setup isn't supported on this platform yet.";
+
+/** `failed`: the status could not be read at all (shown instead of "checking…" forever).
+ *  `readOnly`: setup is off the table, so a not-set-up chip must not offer "Set up". */
+export function chipLabel(v: CaptureView | null, failed = false, readOnly = false): string {
   if (!v) return failed ? "Capture: couldn't check" : "Capture: checking…";
+  if (v.status === "not-set-up" && readOnly) return "Not capturing";
   return LABELS[v.status] ?? "Capture: unknown";
 }
 
@@ -49,18 +59,24 @@ export function capturing(v: CaptureView | null): boolean {
 }
 
 /** What the popover says about the state. */
-export function detail(v: CaptureView): string {
+export function detail(v: CaptureView, projectCount: number | null = null): string {
   switch (v.status) {
     case "vscode":
       if (v.takenOver) {
-        return "The VS Code extension now manages the hook. This app set capture up first; the extension has since replaced its hook, and keeps it up to date.";
+        return `The VS Code extension now manages the hook. This app set capture up first; the extension has since replaced its hook. The VS Code extension's hook is in place; this app leaves it alone.${noProjects(projectCount)}`;
       }
-      return "The ClaudeGate VS Code extension set up the hook, so Claude Code's edits are captured. The extension keeps it up to date.";
+      return `The ClaudeGate VS Code extension set up the hook, so Claude Code's edits are captured. The extension keeps it up to date.${noProjects(projectCount)}`;
     case "app":
-      return `This app set up the hook${v.version ? ` (${v.version})` : ""}, so Claude Code's edits are captured. The app updates its own hook when it starts.`;
+      return `This app set up the hook${v.version ? ` (${v.version})` : ""}, so Claude Code's edits are captured. The app updates its own hook when it starts.${noProjects(projectCount)}`;
     default:
       return explanation(v) ?? "";
   }
+}
+
+/** The hook only captures under registered project roots, so "capturing" with none is empty. */
+const NO_PROJECTS = "Add a project to start capturing its edits.";
+function noProjects(count: number | null): string {
+  return count === 0 ? ` ${NO_PROJECTS}` : "";
 }
 
 /** The short explanation for a state that is not capturing; null while capturing. */
@@ -77,8 +93,8 @@ export function explanation(v: CaptureView | null): string | null {
   }
 }
 
-export function canSetUp(v: CaptureView | null, readOnly: boolean): boolean {
-  return v?.status === "not-set-up" && !readOnly;
+export function canSetUp(v: CaptureView | null, readOnly: boolean, supported = true): boolean {
+  return v?.status === "not-set-up" && !readOnly && supported;
 }
 
 export function canRecheck(v: CaptureView | null): boolean {
@@ -94,11 +110,12 @@ export function pythonWarning(v: CaptureView | null): string | null {
 
 export type SetupResult = { tone: "success" | "warning"; text: string };
 
-export function setupResult(r: InstallView): SetupResult {
+export function setupResult(r: InstallView, projectCount: number | null = null): SetupResult {
   const backup = r.backup ? `Your previous settings are in ${r.backup}.` : "There was no settings.json before setup.";
-  if (r.note) return { tone: "warning", text: `Capture is set up, with a warning: ${r.note} ${backup}` };
+  // The note already names the backup (core `concurrent_note`), so it is not repeated.
+  if (r.note) return { tone: "warning", text: `Capture is set up, with a warning: ${r.note}` };
   if (!capturing(r.capture)) {
     return { tone: "warning", text: `Setup finished, but the status now reads “${chipLabel(r.capture)}”. ${backup}` };
   }
-  return { tone: "success", text: `Capture is set up. ${backup}` };
+  return { tone: "success", text: `Capture is set up. ${backup}${noProjects(projectCount)}` };
 }

@@ -9,6 +9,7 @@ import {
   explanation,
   pythonWarning,
   setupResult,
+  setupSupported,
   type CaptureView,
   type InstallView,
 } from "./capture";
@@ -27,6 +28,7 @@ describe("chipLabel", () => {
     expect(chipLabel(v("vscode"))).toBe("Capturing (VS Code)");
     expect(chipLabel(v("app", { version: "v1.16.1" }))).toBe("Capturing (this app)");
     expect(chipLabel(v("not-set-up"))).toBe("Not capturing — Set up");
+    expect(chipLabel(v("not-set-up"), false, true)).toBe("Not capturing");
     expect(chipLabel(v("settings-unreadable", { note: "x" }))).toBe("Capture: settings unreadable");
     expect(chipLabel(v("python-missing"))).toBe("Capture: python3 not found");
   });
@@ -86,6 +88,18 @@ describe("detail", () => {
     expect(detail(v("vscode", { takenOver: true }))).toMatch(/^The VS Code extension now manages the hook\./);
     expect(detail(v("vscode"))).not.toMatch(/now manages/);
   });
+  it("does not claim the app keeps the extension's hook updated", () => {
+    expect(detail(v("vscode", { takenOver: true }))).toContain("The VS Code extension's hook is in place; this app leaves it alone.");
+    expect(detail(v("vscode", { takenOver: true }))).not.toMatch(/keeps it up to date/);
+  });
+  it("says to add a project when there are none, only while capturing", () => {
+    const hint = "Add a project to start capturing its edits.";
+    expect(detail(v("app"), 0)).toContain(hint);
+    expect(detail(v("vscode"), 0)).toContain(hint);
+    expect(detail(v("app"), 2)).not.toContain(hint);
+    expect(detail(v("app"))).not.toContain(hint);
+    expect(detail(v("not-set-up"), 0)).not.toContain(hint);
+  });
 });
 
 describe("actions", () => {
@@ -96,6 +110,12 @@ describe("actions", () => {
       expect(canSetUp(v(s), false)).toBe(false);
     }
     expect(canSetUp(null, false)).toBe(false);
+  });
+  it("offers no Set up where setup is unsupported", () => {
+    expect(canSetUp(v("not-set-up"), false, false)).toBe(false);
+    expect(setupSupported("Win32")).toBe(false);
+    expect(setupSupported("Linux x86_64")).toBe(true);
+    expect(setupSupported("MacIntel")).toBe(true);
   });
   it("offers Check again for the non-capturing states", () => {
     expect(canRecheck(v("python-missing"))).toBe(true);
@@ -137,7 +157,16 @@ describe("setupResult", () => {
     const r = setupResult({ ...ok, note: "settings.json was changed by another program" });
     expect(r.tone).toBe("warning");
     expect(r.text).toContain("changed by another program");
-    expect(r.text).toContain(ok.backup!);
+  });
+  it("does not repeat the backup sentence when the note already names it", () => {
+    const note = `settings.json was changed by another program right after setup. Your pre-setup copy is ${ok.backup}.`;
+    const r = setupResult({ ...ok, note });
+    expect(r.text.split(ok.backup!).length - 1).toBe(1);
+    expect(r.text).not.toContain("Your previous settings are in");
+  });
+  it("tells a capturing setup with no projects to add one", () => {
+    expect(setupResult(ok, 0).text).toContain("Add a project to start capturing its edits.");
+    expect(setupResult(ok, 1).text).not.toContain("Add a project");
   });
   it("is a warning when the status read afterwards is not capturing", () => {
     const r = setupResult({ ...ok, capture: v("not-set-up") });

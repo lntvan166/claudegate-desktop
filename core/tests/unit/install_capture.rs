@@ -225,7 +225,7 @@ fn a_failed_restore_keeps_the_files_while_the_entry_is_registered() {
     assert!(reason.contains("top-level key \"model\" was lost"), "{reason}");
     let rollback = rollback.as_deref().unwrap_or_default();
     assert!(rollback.contains("could not read the backup"), "{rollback}");
-    assert!(rollback.contains("the hook files were kept"), "{rollback}");
+    assert!(rollback.contains("the hook files and marker were kept"), "{rollback}");
     for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
         assert!(h.cg(f).exists(), "{f}");
     }
@@ -251,7 +251,7 @@ fn a_foreign_rewrite_before_undo_that_keeps_an_entry_keeps_the_files() {
     let InstallError::Failed { rollback, .. } = &err else { panic!("{err:?}") };
     let rollback = rollback.as_deref().unwrap_or_default();
     assert!(rollback.contains("was changed by another program right after setup; it was left as is"), "{rollback}");
-    assert!(rollback.contains("the hook files were kept"), "{rollback}");
+    assert!(rollback.contains("the hook files and marker were kept"), "{rollback}");
     assert_eq!(fs::read_to_string(h.settings()).unwrap(), theirs);
     for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
         assert!(h.cg(f).exists(), "{f}");

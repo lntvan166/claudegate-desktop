@@ -6,6 +6,8 @@
     canRecheck,
     canSetUp,
     capturing,
+    UNSUPPORTED_TEXT,
+    setupSupported,
     chipLabel,
     detail,
     pythonWarning,
@@ -14,7 +16,8 @@
     type SetupResult,
   } from "../lib/capture";
 
-  let { readOnly }: { readOnly: boolean } = $props();
+  let { readOnly, projectCount = null }: { readOnly: boolean; projectCount?: number | null } = $props();
+  const supported = setupSupported();
 
   let view: CaptureView | null = $state(null);
   let open = $state(false);
@@ -77,7 +80,7 @@
     try {
       const r = await setUpCapture();
       view = r.capture;
-      result = setupResult(r);
+      result = setupResult(r, projectCount);
       void refresh();
     } catch (e) {
       error = String(e);
@@ -143,7 +146,7 @@
     onclick={toggle}
   >
     <span class="dot {tone}" aria-hidden="true"></span>
-    {chipLabel(view, failed)}
+    {chipLabel(view, failed, readOnly)}
   </button>
 
   {#if open}
@@ -168,13 +171,16 @@
           <p class="body muted">Reading ~/.claude/settings.json…</p>
         {/if}
       {:else}
-        <p class="title"><span class="dot {tone}" aria-hidden="true"></span>{chipLabel(view)}</p>
-        <p class="body">{detail(view)}</p>
+        <p class="title"><span class="dot {tone}" aria-hidden="true"></span>{chipLabel(view, false, readOnly)}</p>
+        <p class="body">{detail(view, projectCount)}</p>
         {#if pythonWarning(view)}
           <p class="banner warning">{pythonWarning(view)}</p>
         {/if}
         {#if view.status === "not-set-up" && readOnly}
           <p class="body muted">Read-only mode is on. Turn it off to set up capture.</p>
+        {/if}
+        {#if view.status === "not-set-up" && !readOnly && !supported}
+          <p class="body muted">{UNSUPPORTED_TEXT}</p>
         {/if}
         {#if result}
           <p class="banner {result.tone}" role="status">{result.text}</p>
@@ -182,9 +188,9 @@
         {#if error}
           <p class="banner error" role="alert">{error}</p>
         {/if}
-        {#if canSetUp(view, readOnly) || canRecheck(view)}
+        {#if canSetUp(view, readOnly, supported) || canRecheck(view)}
           <div class="buttons">
-            {#if canSetUp(view, readOnly)}
+            {#if canSetUp(view, readOnly, supported)}
               <button class="btn go" data-setup disabled={busy} onclick={() => void askSetUp()}>Set up…</button>
             {/if}
             {#if canRecheck(view)}

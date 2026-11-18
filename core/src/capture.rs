@@ -41,7 +41,7 @@ fn registered(settings: &Value) -> bool {
 /// hook outranks a missing python3, which only sets the `python_missing` warning there.
 /// `marker` means "this app owns the setup": callers pass `app_owns_hook`, not the marker's mere
 /// presence. `settings_text: None` is a missing file; an empty/whitespace file counts as missing
-/// too (the extension's installer treats it as a fresh install). Strict JSON only.
+/// too (the extension's installer treats it as a fresh install; same choice here, for parity). Strict JSON only.
 pub fn capture_status(settings_text: Option<&str>, marker: bool, python3: bool) -> CaptureStatus {
     let not_set_up = if python3 { CaptureStatus::NotSetUp } else { CaptureStatus::PythonMissing };
     let Some(text) = settings_text else { return not_set_up };
@@ -284,7 +284,7 @@ impl std::fmt::Display for InstallError {
             InstallError::HookFilesExist => write!(
                 f,
                 "ClaudeGate's hook files already exist (likely from the VS Code extension). \
-                 Reinstall the extension or remove ~/.claudegate/hook.py first."
+                 Run \"Claude Gate: Setup Hook\" in VS Code, or remove ~/.claudegate/hook.py if the extension is gone."
             ),
             InstallError::HookFilesFromApp => write!(
                 f,

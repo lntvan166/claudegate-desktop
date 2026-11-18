@@ -408,7 +408,7 @@ fn existing_hook_py_is_refused_and_left_alone() {
     assert_eq!(
         err.to_string(),
         "ClaudeGate's hook files already exist (likely from the VS Code extension). \
-         Reinstall the extension or remove ~/.claudegate/hook.py first."
+         Run \"Claude Gate: Setup Hook\" in VS Code, or remove ~/.claudegate/hook.py if the extension is gone."
     );
     assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), "the extension's hook");
     assert_eq!(fs::read_to_string(h.settings()).unwrap(), EXISTING);

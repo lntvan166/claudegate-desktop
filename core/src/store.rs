@@ -728,7 +728,7 @@ thread_local! {
 }
 
 /// Test seam: called at each install stage (`before_hook_py`, `after_hooks`, `before_backup`,
-/// `before_write`, `after_settings_write`); an error aborts the install there.
+/// `before_write`, `after_settings_write`, `before_undo`); an error aborts the install there.
 #[cfg(test)]
 pub(crate) fn set_install_fault(f: Option<Box<dyn FnMut(&str) -> io::Result<()>>>) {
     INSTALL_FAULT.with(|r| *r.borrow_mut() = f);
@@ -928,10 +928,10 @@ fn hook_files_may_go(target: &Path) -> Result<(), String> {
     match registration_of(target) {
         OnDisk::NotRegistered | OnDisk::Absent => Ok(()),
         OnDisk::Registered => {
-            Err("the hook files were kept, because settings.json still has a ClaudeGate entry".into())
+            Err("the hook files and marker were kept, because settings.json still has a ClaudeGate entry".into())
         }
         OnDisk::Unknown(r) => Err(format!(
-            "the hook files were kept, because settings.json could not be checked for a ClaudeGate entry ({r})"
+            "the hook files and marker were kept, because settings.json could not be checked for a ClaudeGate entry ({r})"
         )),
     }
 }
