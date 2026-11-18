@@ -310,6 +310,13 @@ pub fn vscode_uses_root(home: &Path, root: &Path, written: &[Vec<String>], stora
             return true;
         }
     }
+    open_in_editor(&root, storage_files)
+}
+
+/// The storage half of `vscode_uses_root`: VS Code's or Cursor's `storage.json` lists `root` as
+/// an open (or recently open) folder. Read only; anything unreadable is no evidence.
+pub fn open_in_editor(root: &Path, storage_files: &[PathBuf]) -> bool {
+    let root = resolve_root(root);
     storage_files.iter().any(|f| open_folders(f).iter().any(|p| resolve_root(p) == root))
 }
 

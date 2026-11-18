@@ -53,7 +53,10 @@ impl Fx {
         serde_json::from_str::<Value>(&self.raw()).unwrap()["files"].as_object().unwrap().len()
     }
     fn run(&self, lock: &Mutex<()>) -> bool {
-        run_upkeep_with(lock, &self.paths, &self.cfg, &self.root(), 256, claudegate_core::time::now_ms())
+        self.run_with_storage(lock, &[])
+    }
+    fn run_with_storage(&self, lock: &Mutex<()>, storage: &[PathBuf]) -> bool {
+        run_upkeep_with(lock, &self.paths, &self.cfg, &self.root(), 256, storage, claudegate_core::time::now_ms())
             .is_some_and(|r| r.wrote())
     }
 }
@@ -114,6 +117,41 @@ fn an_unreadable_config_counts_as_read_only() {
     let before = fx.raw();
     assert!(!fx.run(&Mutex::new(())));
     assert_eq!(fx.raw(), before);
+}
+
+/// A `storage.json` as VS Code writes it, listing `root` as an open window's folder.
+fn storage_listing(dir: &std::path::Path, root: &str) -> PathBuf {
+    let f = dir.join("Code/User/globalStorage/storage.json");
+    fs::create_dir_all(f.parent().unwrap()).unwrap();
+    let uri = format!("file://{}", root.replace(' ', "%20"));
+    fs::write(&f, json!({ "windowsState": { "openedWindows": [{ "folder": uri }] } }).to_string()).unwrap();
+    f
+}
+
+/// M6: when VS Code or Cursor uses the root (its storage.json lists the folder), its own
+/// SessionManager keeps the session; the app must never prune rows VS Code is showing.
+#[test]
+fn a_root_open_in_vs_code_is_never_touched() {
+    let fx = Fx::new();
+    fx.seed();
+    mark_added_by_app(&fx.cfg, &fx.root(), None).unwrap();
+    let storage = storage_listing(fx._tmp.path(), &fx.root());
+    let before = fx.raw();
+    assert!(!fx.run_with_storage(&Mutex::new(()), &[storage]));
+    assert_eq!(fx.raw(), before);
+}
+
+/// Only the storage.json evidence gates upkeep: a storage file that lists another folder (or is
+/// missing) does not.
+#[test]
+fn storage_listing_another_folder_does_not_gate_upkeep() {
+    let fx = Fx::new();
+    fx.seed();
+    mark_added_by_app(&fx.cfg, &fx.root(), None).unwrap();
+    let storage = storage_listing(fx._tmp.path(), "/somewhere/else");
+    let missing = fx._tmp.path().join("Cursor/User/globalStorage/storage.json");
+    assert!(fx.run_with_storage(&Mutex::new(()), &[storage, missing]));
+    assert_eq!(fx.pending(), 1);
 }
 
 #[test]

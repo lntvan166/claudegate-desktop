@@ -1,5 +1,6 @@
 //! Runs the core's session upkeep for the projects the app owns: after the app loads a project and
-//! on that project's session events. At most once per `UPKEEP_MIN_INTERVAL` per root; a trigger
+//! on that project's session events, unless VS Code or Cursor has the folder open (storage.json
+//! evidence; their own extension keeps it). At most once per `UPKEEP_MIN_INTERVAL` per root; a trigger
 //! inside the window queues one trailing run at its end. Each run happens on the blocking pool
 //! holding the app's write lock, with read-only mode read afresh (an unreadable config counts as
 //! read-only).
@@ -10,7 +11,7 @@
 use claudegate_core::decide::DecidePaths;
 use claudegate_core::upkeep::{upkeep, UpkeepOpts, UpkeepReport};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -68,20 +69,27 @@ impl Debouncer {
 #[derive(Default, Clone)]
 pub struct UpkeepState(pub Arc<Mutex<Debouncer>>);
 
-/// One upkeep of `root` minus Tauri. `None` when the root is not owned or the app's home is not
-/// usable for backups. Ownership is checked before taking `lock` (cheap, and most roots are VS
-/// Code's), then again under it with read-only mode read afresh.
+/// One upkeep of `root` minus Tauri. `None` when the root is not owned, when VS Code or Cursor
+/// uses it (`storage_files` lists it as an open folder: their own SessionManager keeps that
+/// session, and the app must never prune rows a VS Code window is showing), or when the app's
+/// home is not usable for backups. Only the storage.json evidence counts here, not excludes.json
+/// (an app-owned root's key is the app's own write). These checks are cheap reads made before
+/// taking `lock`; ownership is read again under it with read-only mode read afresh.
 pub fn run_upkeep_with(
     lock: &Mutex<()>,
     paths: &DecidePaths,
     config_path: &Path,
     root: &str,
     max_attached: usize,
+    storage_files: &[PathBuf],
     now_ms: i64,
 ) -> Option<UpkeepReport> {
     let root = claudegate_core::paths::resolve_root(Path::new(root));
     let key = root.to_string_lossy();
     if !crate::config::project_record(config_path, &key).owned() {
+        return None;
+    }
+    if claudegate_core::projects::open_in_editor(&root, storage_files) {
         return None;
     }
     crate::commands::desktop_home_for(config_path, &paths.home).ok()?;
@@ -97,21 +105,30 @@ pub fn run_upkeep_with(
     Some(report)
 }
 
-/// `run_upkeep_with` for the running app.
+/// `run_upkeep_with` for the running app. Ownership is checked first, from config.json alone:
+/// most roots are VS Code's, and for those nothing else is read (no user or workspace
+/// settings.json, no JSONC parse, no storage.json).
 fn run_now(app: &tauri::AppHandle, root: &str) {
     use tauri::Manager;
-    let home = claudegate_core::paths::claudegate_home();
     let cfg = crate::config::config_path();
+    let resolved = claudegate_core::paths::resolve_root(Path::new(root));
+    if !crate::config::project_record(&cfg, &resolved.to_string_lossy()).owned() {
+        return;
+    }
+    let home = claudegate_core::paths::claudegate_home();
     let Ok(desktop_home) = crate::commands::desktop_home_for(&cfg, &home) else { return };
-    let max = crate::commands::max_attached_for(&cfg, Path::new(root), &crate::commands::ext_sources());
+    let sources = crate::commands::ext_sources();
+    let storage = claudegate_core::projects::storage_files(&sources);
+    let max = crate::commands::max_attached_for(&cfg, &resolved, &sources);
     let lock = app.state::<crate::commands::WriteLock>();
     let paths = DecidePaths { home, desktop_home };
-    run_upkeep_with(&lock.0, &paths, &cfg, root, max, claudegate_core::time::now_ms());
+    run_upkeep_with(&lock.0, &paths, &cfg, root, max, &storage, claudegate_core::time::now_ms());
 }
 
 /// Upkeep `root` soon, within the rate limit, if the app owns it. Never blocks the caller and does
-/// no I/O on its thread (the watcher's or a command's): ownership is read from the config by the
-/// job on the blocking pool, behind the debouncer, so a burst of events costs one config read.
+/// no I/O on its thread (the watcher's or a command's): the job runs on the blocking pool, behind
+/// the debouncer, and reads ownership from config.json before anything else (`run_now`), so a
+/// burst of events for a root the app does not own costs one config read and nothing more.
 pub fn trigger(app: &tauri::AppHandle, root: &str) {
     use tauri::Manager;
     let state = app.state::<UpkeepState>().inner().clone();
