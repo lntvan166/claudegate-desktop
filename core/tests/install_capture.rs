@@ -258,6 +258,18 @@ fn dangling_settings_symlink_is_refused() {
     assert!(!h.cg("hook.py").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn a_symlinked_home_installs() {
+    use std::os::unix::fs::symlink;
+    let h = Home::new();
+    let link = h.home.parent().unwrap().join("linkhome");
+    symlink(&h.home, &link).unwrap();
+    let report = set_up_capture(&link, HOOK, true, false).unwrap();
+    assert_eq!(report.settings, fs::canonicalize(h.settings()).unwrap());
+    assert!(fs::read_to_string(h.settings()).unwrap().contains("hook.sh"));
+}
+
 #[test]
 fn missing_settings_gets_a_file_with_only_the_hooks_block() {
     let h = Home::new();

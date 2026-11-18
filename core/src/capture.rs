@@ -223,12 +223,6 @@ fn entry_landed(settings: &Value, hook_command: &str) -> bool {
         })
 }
 
-/// Whether `settings_text` carries a PreToolUse hook running exactly `hook_command` (the
-/// "landed" half of `verify_settings_content`). Unparseable text carries nothing.
-pub fn has_hook_entry(settings_text: &str, hook_command: &str) -> bool {
-    serde_json::from_str::<Value>(settings_text).is_ok_and(|v| entry_landed(&v, hook_command))
-}
-
 /// What a successful setup wrote.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InstallReport {

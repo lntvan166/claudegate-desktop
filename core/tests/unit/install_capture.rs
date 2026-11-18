@@ -141,6 +141,63 @@ fn a_foreign_write_that_keeps_our_entry_is_a_successful_setup() {
 }
 
 #[test]
+fn a_foreign_write_with_a_differently_spelled_entry_keeps_the_files() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    let target = h.settings();
+    let theirs = r#"{"hooks":{"PreToolUse":[{"matcher":"Write","hooks":[{"type":"command","command":"$HOME/.claudegate/hook.sh"}]}]}}"#;
+    let report = install_with(&h, move |stage| {
+        if stage == "after_settings_write" {
+            fs::write(&target, theirs).unwrap();
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert!(report.note.as_deref().is_some_and(|n| n.contains("left as is")), "{report:?}");
+    assert_eq!(fs::read_to_string(h.settings()).unwrap(), theirs);
+    for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
+        assert!(h.cg(f).exists(), "{f}: an entry is registered, so its files stay");
+    }
+}
+
+#[test]
+fn a_read_error_after_our_write_keeps_the_files_and_says_so() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    let target = h.settings();
+    let report = install_with(&h, move |stage| {
+        if stage == "after_settings_write" {
+            fs::remove_file(&target).unwrap();
+            fs::create_dir(&target).unwrap(); // reading it now fails
+        }
+        Ok(())
+    })
+    .unwrap();
+    let note = report.note.unwrap_or_default();
+    assert!(note.contains("could not read it back to check it"), "{note}");
+    assert!(!note.contains("another program"), "{note}");
+    for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
+        assert!(h.cg(f).exists(), "{f}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_home_does_not_trip_the_guard_on_rollback() {
+    use std::os::unix::fs::symlink;
+    let h = Home::new();
+    let link = h.home.parent().unwrap().join("linkhome");
+    symlink(&h.home, &link).unwrap();
+    set_install_corrupt(Some(Box::new(|b: &mut Vec<u8>| *b = b"[]".to_vec())));
+    let r = install_capture(&link, HOOK, true, false);
+    set_install_corrupt(None);
+    let err = r.unwrap_err();
+    assert!(matches!(err, InstallError::Failed { rollback: None, .. }), "{err:?}");
+    assert!(!h.settings().exists(), "the fresh file this call wrote was removed");
+    assert!(!h.home.join(".claudegate").exists());
+}
+
+#[test]
 fn a_change_just_before_our_write_is_refused_and_kept() {
     let h = Home::new();
     h.write_settings(EXISTING);

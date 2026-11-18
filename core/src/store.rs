@@ -148,6 +148,19 @@ pub(crate) fn atomic_write(target: &Path, content: &str, preserve_existing: bool
 
 /// `atomic_write` for bytes (a settings.json restored from its backup byte for byte).
 pub(crate) fn atomic_write_bytes(target: &Path, content: &[u8], preserve_existing: bool) -> io::Result<()> {
+    atomic_write_checked(target, content, preserve_existing, || Ok(()))
+}
+
+/// `atomic_write_bytes` that runs `check` after the temp file is written and synced and
+/// immediately before the rename; an error from `check` abandons the write. The settings writer
+/// uses it to compare the target with what it read as late as possible: what remains is the
+/// window between that compare and the rename syscall itself.
+fn atomic_write_checked(
+    target: &Path,
+    content: &[u8],
+    preserve_existing: bool,
+    check: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     let mut target = target.to_path_buf();
     let mut perms = None;
     if preserve_existing {
@@ -170,6 +183,7 @@ pub(crate) fn atomic_write_bytes(target: &Path, content: &[u8], preserve_existin
         if let Some(p) = perms {
             fs::set_permissions(&tmp, p)?;
         }
+        check()?;
         fs::rename(&tmp, &target)
     })();
     if result.is_err() {
@@ -768,7 +782,22 @@ fn settings_literal(home: &Path) -> PathBuf {
 fn settings_target(home: &Path) -> io::Result<PathBuf> {
     let literal = settings_literal(home);
     match fs::symlink_metadata(&literal) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(literal),
+        // Nothing there yet: the path the new file's realpath will have, from the realpath of the
+        // nearest existing folder (`~/.claude`, or HOME itself), so a symlinked HOME or ~/.claude
+        // names the same file before and after it exists.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let claude = home.join(".claude");
+            match fs::canonicalize(&claude) {
+                Ok(dir) => Ok(dir.join("settings.json")),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    if fs::symlink_metadata(&claude).is_ok() {
+                        return Err(io::Error::new(e.kind(), format!("{} is a link to nothing", claude.display())));
+                    }
+                    Ok(fs::canonicalize(home)?.join(".claude").join("settings.json"))
+                }
+                Err(e) => Err(e),
+            }
+        }
         Err(e) => Err(e),
         Ok(_) => fs::canonicalize(&literal).map_err(|e| {
             io::Error::new(e.kind(), format!("{} is a link to nothing ({e})", literal.display()))
@@ -856,6 +885,9 @@ struct SettingsUndo {
     ours: Vec<u8>,
 }
 
+/// The pre-rename check's verdict when the file holds someone else's bytes.
+const CONCURRENT: &str = "settings.json holds another program's write";
+
 fn concurrent_note(backup: Option<&Path>) -> String {
     let copy = match backup {
         Some(b) => format!("Your pre-setup copy is {}.", b.display()),
@@ -869,17 +901,30 @@ impl Undo {
     fn run(self) -> Option<String> {
         let mut problems = Vec::new();
         if let Some(su) = self.settings {
-            let res = guard_settings_target(&su.home, &su.target).and_then(|()| match fs::read(&su.target) {
-                Ok(now) if now == su.ours => match &su.backup {
-                    Some(b) => fs::read(b).and_then(|bytes| atomic_write_bytes(&su.target, &bytes, true)),
-                    None => fs::remove_file(&su.target),
+            // The "still ours?" compare runs right before the restore's rename (or the unlink).
+            let still_ours = || -> io::Result<()> {
+                match fs::read(&su.target) {
+                    Ok(now) if now == su.ours => Ok(()),
+                    Ok(_) => Err(io::Error::other(CONCURRENT)),
+                    Err(e) => Err(io::Error::new(e.kind(), format!("could not read it: {e}"))),
+                }
+            };
+            let res = guard_settings_target(&su.home, &su.target).and_then(|()| match &su.backup {
+                Some(b) => fs::read(b)
+                    .map_err(|e| io::Error::new(e.kind(), format!("could not read the backup: {e}")))
+                    .and_then(|bytes| atomic_write_checked(&su.target, &bytes, true, still_ours)),
+                None => match fs::symlink_metadata(&su.target) {
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                    _ => still_ours().and_then(|()| fs::remove_file(&su.target)),
                 },
-                Err(e) if e.kind() == io::ErrorKind::NotFound && su.backup.is_none() => Ok(()),
-                _ => {
+            });
+            let res = match res {
+                Err(e) if e.to_string() == CONCURRENT => {
                     problems.push(concurrent_note(su.backup.as_deref()));
                     Ok(())
                 }
-            });
+                other => other,
+            };
             if let Err(e) = res {
                 let from = su.backup.map(|b| format!("; your previous settings are in {}", b.display())).unwrap_or_default();
                 problems.push(format!("could not restore {}: {e}{from}", su.target.display()));
@@ -1106,8 +1151,11 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
             (Some(text), Ok(now)) if now == text.as_bytes() => Ok(()),
             (Some(_), Ok(_)) => Err(format!("settings.json changed {what}; try again")),
             (Some(_), Err(e)) => Err(format!("could not re-read settings.json: {e}")),
-            (None, _) if fs::symlink_metadata(&literal).is_err() => Ok(()),
-            (None, _) => Err(format!("settings.json appeared {what}; try again")),
+            (None, _) => match fs::symlink_metadata(&literal) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(format!("could not check settings.json: {e}")),
+                Ok(_) => Err(format!("settings.json appeared {what}; try again")),
+            },
         }
     };
     if let Err(why) = unchanged_since_read("while setting up") {
@@ -1121,10 +1169,11 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
         },
     };
 
-    // 4. Write to the realpath. The compare against what we read is the last step before the
-    //    rename. A window remains between that compare and the rename (well under a millisecond,
-    //    no lock exists for this file): a write by Claude Code landing inside it is replaced by
-    //    ours. Its pre-setup state is in the backup; the README notes this.
+    // 4. Write to the realpath. The compare against what we read runs inside the atomic write,
+    //    after the temp file is written and synced, immediately before the rename. What remains
+    //    is the gap between that read and the rename syscall (microseconds; this file has no
+    //    lock): a write by Claude Code landing inside it is replaced by ours. The backup holds the
+    //    file as it was before setup; the README notes this.
     if let Err(e) = guard_settings_target(home, &target) {
         return Err(failed(undo, e));
     }
@@ -1133,11 +1182,14 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
     if let Err(e) = install_fault("before_write") {
         return Err(failed(undo, e));
     }
-    if let Err(why) = unchanged_since_read("while setting up") {
+    let refused_why = std::cell::RefCell::new(None);
+    let check = || unchanged_since_read("while setting up").map_err(|why| {
+        *refused_why.borrow_mut() = Some(why.clone());
+        io::Error::other(why)
+    });
+    if let Err(e) = atomic_write_checked(&target, &ours, true, check) {
+        let why = refused_why.borrow_mut().take().unwrap_or_else(|| format!("could not write settings.json: {e}"));
         return Err(failed(undo, why));
-    }
-    if let Err(e) = atomic_write_bytes(&target, &ours, true) {
-        return Err(failed(undo, format!("could not write settings.json: {e}")));
     }
     undo.settings = Some(SettingsUndo { home: home.to_path_buf(), target: target.clone(), backup: backup.clone(), ours: ours.clone() });
     if let Err(e) = install_fault("after_settings_write") {
@@ -1147,22 +1199,44 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
     // 5. Verify what is on disk now. Bytes other than ours are another program's write: never
     //    restore over it. Setup worked if that write kept our entry; otherwise it did not, and the
     //    hook files this call created go.
-    let after = fs::read(&target).unwrap_or_default();
     let created: Vec<PathBuf> = undo.created.iter().map(|(p, _)| p.clone()).filter(|p| p != &marker).collect();
     let report = |note| InstallReport { settings: target.clone(), backup: backup.clone(), created: created.clone(), version: version.to_owned(), note };
+    let after = match fs::read(&target) {
+        Ok(b) => b,
+        // We cannot tell what is there, so we cannot tell whether our entry is: keep everything.
+        Err(e) => {
+            return Ok(report(Some(format!(
+                "Setup wrote settings.json but could not read it back to check it ({e}). The hook files were kept; \
+                 check capture status before relying on it."
+            ))))
+        }
+    };
     if after != ours {
+        // Another program's write: never restored over. Whether capture is on is decided by the
+        // status test itself (any PreToolUse entry mentioning claudegate), so a registered entry
+        // is never left pointing at hook files we deleted.
         let note = concurrent_note(backup.as_deref());
         let text = String::from_utf8_lossy(&after);
-        if crate::capture::has_hook_entry(&text, &hook_command) {
-            prune_settings_backups(&literal);
-            return Ok(report(Some(note)));
+        match capture_status(Some(&text), true, true) {
+            CaptureStatus::SetUpByApp { .. } | CaptureStatus::SetUpByExtension => {
+                prune_settings_backups(&literal);
+                return Ok(report(Some(note)));
+            }
+            CaptureStatus::NotSetUp => {
+                undo.settings = None; // theirs now: leave it
+                let rollback = undo.run();
+                return Err(InstallError::Failed {
+                    reason: format!("{note} It no longer has ClaudeGate's entry, so capture is not set up"),
+                    rollback,
+                });
+            }
+            _ => {
+                return Ok(report(Some(format!(
+                    "{note} It could not be checked for ClaudeGate's entry, so the hook files were kept; \
+                     check capture status before relying on it."
+                ))))
+            }
         }
-        undo.settings = None; // theirs now: leave it
-        let rollback = undo.run();
-        return Err(InstallError::Failed {
-            reason: format!("{note} It no longer has ClaudeGate's entry, so capture is not set up"),
-            rollback,
-        });
     }
     let text = String::from_utf8_lossy(&after);
     if let Some(problem) = verify_settings_content(&text, raw.as_deref().unwrap_or(""), &hook_command) {
