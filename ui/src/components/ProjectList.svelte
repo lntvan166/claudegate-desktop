@@ -16,6 +16,8 @@
     onpick = async () => null,
     onadd = async () => null,
     onremove = async () => {},
+    oninvscode = async () => false,
+    readOnly = false,
   }: {
     projects: ProjectSummary[];
     selected: string | null;
@@ -35,7 +37,13 @@
     /** Adds and selects the project; resolves to an error message, or null on success. */
     onadd?: (path: string) => Promise<string | null>;
     onremove?: (root: string) => Promise<void>;
+    /** Whether VS Code or Cursor also uses the folder (Remove then leaves capture on). */
+    oninvscode?: (root: string) => Promise<boolean>;
+    /** Add and Remove write a shared file, so read-only mode blocks them. */
+    readOnly?: boolean;
   } = $props();
+
+  const READ_ONLY = "Read-only mode is on. Turn it off in Settings to add or remove projects.";
 
   let showHidden = $state(false);
 
@@ -48,11 +56,17 @@
   /** The project whose Remove is awaiting confirmation. */
   let confirming = $state<string | null>(null);
   let cancelButton = $state<HTMLButtonElement | null>(null);
+  /** For the confirmation's wording: null while being checked. */
+  let confirmInVsCode = $state<boolean | null>(null);
 
   const isAppAdded = (root: string) => appRoots.includes(root);
 
   async function submit(path: string) {
     if (!path.trim() || busy) return;
+    if (readOnly) {
+      addError = READ_ONLY;
+      return;
+    }
     busy = true;
     addError = null;
     try {
@@ -73,6 +87,11 @@
   async function chooseFolder() {
     if (busy) return;
     if (collapsed) ontoggle();
+    if (readOnly) {
+      addError = READ_ONLY;
+      adding = true;
+      return;
+    }
     let path: string | null = null;
     try {
       path = await onpick();
@@ -98,6 +117,17 @@
 
   function askRemove(root: string) {
     confirming = root;
+    confirmInVsCode = null;
+    if (!readOnly) {
+      oninvscode(root).then(
+        (v) => {
+          if (confirming === root) confirmInVsCode = v;
+        },
+        () => {
+          if (confirming === root) confirmInVsCode = false;
+        },
+      );
+    }
     // Cancel takes focus: the safe answer is the default.
     queueMicrotask(() => cancelButton?.focus());
   }
@@ -132,6 +162,40 @@
     return path.replace(/^\/(?:home|Users)\/[^/]+(?=\/|$)/, "~").replace(/^[A-Za-z]:\\Users\\[^\\]+/, "~");
   }
 </script>
+
+{#snippet confirmBox(p: ProjectSummary, i: number)}
+  <div
+    class="confirm"
+    role="alertdialog"
+    aria-labelledby="confirm-{i}"
+    tabindex="-1"
+    onkeydown={(e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        confirming = null;
+      }
+    }}
+  >
+    {#if readOnly}
+      <p id="confirm-{i}">{READ_ONLY}</p>
+    {:else if confirmInVsCode}
+      <p id="confirm-{i}">
+        Remove {p.name} from the app's projects? VS Code also uses this folder, so capture stays on. Its review history is kept.
+      </p>
+    {:else}
+      <p id="confirm-{i}">
+        Stop capturing Claude's edits in {p.name}? Its review history is kept.
+        <span class="confirm-warn">If this folder is open in VS Code or Cursor, capture there stops until you reload that window.</span>
+      </p>
+    {/if}
+    <div class="confirm-actions">
+      <button class="btn" bind:this={cancelButton} onclick={() => (confirming = null)}>Cancel</button>
+      {#if !readOnly}
+        <button class="btn danger" disabled={confirmInVsCode === null} onclick={() => void confirmRemove(p.root)}>Remove</button>
+      {/if}
+    </div>
+  </div>
+{/snippet}
 
 <nav class="projects" class:rail={collapsed} aria-label="Projects">
   <header>
@@ -192,7 +256,7 @@
         <p class="empty-body">Open a folder in VS Code with ClaudeGate installed, or add one below, and it will show up here.</p>
       </div>
     {:else}
-      {#each projects as p (p.root)}
+      {#each projects as p, i (p.root)}
         <div class="item">
           <button
             class="project"
@@ -236,26 +300,7 @@
             </svg>
           </button>
         </div>
-        {#if confirming === p.root}
-          <div
-            class="confirm"
-            role="alertdialog"
-            aria-labelledby="confirm-{p.name}"
-            tabindex="-1"
-            onkeydown={(e) => {
-              if (e.key === "Escape") {
-                e.stopPropagation();
-                confirming = null;
-              }
-            }}
-          >
-            <p id="confirm-{p.name}">Stop capturing Claude's edits in {p.name}? Its review history is kept.</p>
-            <div class="confirm-actions">
-              <button class="btn" bind:this={cancelButton} onclick={() => (confirming = null)}>Cancel</button>
-              <button class="btn danger" onclick={() => void confirmRemove(p.root)}>Remove</button>
-            </div>
-          </div>
-        {/if}
+        {#if confirming === p.root}{@render confirmBox(p, i)}{/if}
       {/each}
     {/if}
   </div>
@@ -269,11 +314,15 @@
       </button>
       {#if showHidden}
         <ul class="hidden-list">
-          {#each hidden as p (p.root)}
+          {#each hidden as p, i (p.root)}
             <li>
               <button class="hidden-name" class:active={p.root === selected} title={p.root} onclick={() => onselect(p.root)}>{p.name}</button>
+              {#if isAppAdded(p.root)}
+                <button class="show" aria-label="Remove {p.name}" title="Remove this project" onclick={() => askRemove(p.root)}>Remove</button>
+              {/if}
               <button class="show" aria-label="Show {p.name}" title="Show this project again" onclick={() => onshow(p.root)}>Show</button>
             </li>
+            {#if confirming === p.root}<li class="confirm-row">{@render confirmBox(p, projects.length + i)}</li>{/if}
           {/each}
         </ul>
       {/if}
@@ -522,6 +571,14 @@
     margin: 0 0 8px;
     font-size: var(--fs-small);
     line-height: 1.45;
+  }
+  .confirm-warn {
+    display: block;
+    margin-top: 4px;
+    color: var(--muted);
+  }
+  .hidden-list li.confirm-row {
+    display: block;
   }
   .confirm-actions,
   .add-actions {

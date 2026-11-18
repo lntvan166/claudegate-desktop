@@ -31,6 +31,7 @@ pub fn run() {
             commands::add_project,
             commands::remove_project,
             commands::pick_folder,
+            commands::project_in_vs_code,
             config::get_config,
             config::set_editor,
             config::set_read_only,

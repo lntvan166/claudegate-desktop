@@ -12,7 +12,7 @@
 
 use crate::merge::{merge_fresh_captures, MergeGuards};
 use crate::model::{parse_session, Session, Shape, Status};
-use crate::roots::RootsError;
+use crate::roots::{check_new_root, RootsError};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -501,10 +501,14 @@ fn same_root(v: &serde_json::Value, root: &Path) -> bool {
 
 /// Read, edit, write: re-reads immediately before the rename and starts over if the file changed
 /// since the read (the extension writes it without a lock), so its entry and ours both survive.
-/// `edit` returns false when there is nothing to change; then nothing is written. The target is
-/// always exactly `<home>/workspace-roots.json`, written atomically as 2-space pretty JSON (the
-/// extension's `JSON.stringify(_, null, 2)`).
-fn update_roots(home: &Path, edit: impl Fn(&mut Vec<serde_json::Value>) -> bool) -> Result<bool, RootsError> {
+/// `edit` sees the freshly read list on every attempt; it returns `Ok(false)` when there is
+/// nothing to change (nothing is written) and an error to refuse. The target is always exactly
+/// `<home>/workspace-roots.json`, written atomically as 2-space pretty JSON (the extension's
+/// `JSON.stringify(_, null, 2)`).
+fn update_roots(
+    home: &Path,
+    mut edit: impl FnMut(&mut Vec<serde_json::Value>) -> Result<bool, RootsError>,
+) -> Result<bool, RootsError> {
     if home.as_os_str().is_empty() || !home.is_absolute() {
         return Err(roots_io("the ClaudeGate folder is not an absolute path"));
     }
@@ -512,7 +516,7 @@ fn update_roots(home: &Path, edit: impl Fn(&mut Vec<serde_json::Value>) -> bool)
     for _ in 0..ROOTS_ATTEMPTS {
         let raw = read_roots_raw(&target)?;
         let mut list = parse_roots_raw(raw.as_deref())?;
-        if !edit(&mut list) {
+        if !edit(&mut list)? {
             return Ok(false);
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Array(list)).map_err(roots_io)?;
@@ -526,26 +530,44 @@ fn update_roots(home: &Path, edit: impl Fn(&mut Vec<serde_json::Value>) -> bool)
     Err(roots_io("another program kept changing it; try again"))
 }
 
-/// Appends each of `roots` (resolved) that is not already listed. Every other entry is kept,
-/// unchanged and in order, including roots that no longer exist: pruning those is the
-/// extension's job. Returns whether the file was written.
-pub(crate) fn roots_append(home: &Path, roots: &[PathBuf]) -> Result<bool, RootsError> {
-    let roots: Vec<PathBuf> = roots.iter().map(|r| crate::paths::resolve_root(r)).collect();
-    update_roots(home, |list| {
-        let mut changed = false;
-        for r in &roots {
-            if !list.iter().any(|v| same_root(v, r)) {
-                list.push(serde_json::Value::String(r.to_string_lossy().into_owned()));
-                changed = true;
-            }
-        }
-        changed
-    })
+/// The string entries of a roots list, as paths (for the nesting guard).
+fn listed_paths(list: &[serde_json::Value]) -> Vec<PathBuf> {
+    list.iter().filter_map(|v| v.as_str().map(PathBuf::from)).collect()
 }
 
-/// Appends one root; see `roots_append`.
-pub(crate) fn roots_add(home: &Path, root: &Path) -> Result<(), RootsError> {
-    roots_append(home, &[root.to_path_buf()]).map(|_| ())
+/// Appends each of `roots` (resolved) that is not already listed and passes the nesting guard
+/// against the freshly read list (others are skipped). Every other entry is kept, unchanged and
+/// in order, including roots that no longer exist: pruning those is the extension's job.
+/// Returns the roots appended.
+pub(crate) fn roots_append(home: &Path, roots: &[PathBuf]) -> Result<Vec<PathBuf>, RootsError> {
+    let roots: Vec<PathBuf> = roots.iter().map(|r| crate::paths::resolve_root(r)).collect();
+    let mut appended = Vec::new();
+    update_roots(home, |list| {
+        appended.clear();
+        for r in &roots {
+            if list.iter().any(|v| same_root(v, r)) || check_new_root(&listed_paths(list), r).is_err() {
+                continue;
+            }
+            list.push(serde_json::Value::String(r.to_string_lossy().into_owned()));
+            appended.push(r.clone());
+        }
+        Ok(!appended.is_empty())
+    })?;
+    Ok(appended)
+}
+
+/// Appends one root after the nesting guard, run against the list as read right before the
+/// write. `Ok(false)`: it was already listed, nothing written.
+pub(crate) fn roots_add(home: &Path, root: &Path) -> Result<bool, RootsError> {
+    let root = crate::paths::resolve_root(root);
+    update_roots(home, |list| {
+        if list.iter().any(|v| same_root(v, &root)) {
+            return Ok(false);
+        }
+        check_new_root(&listed_paths(list), &root)?;
+        list.push(serde_json::Value::String(root.to_string_lossy().into_owned()));
+        Ok(true)
+    })
 }
 
 /// Removes `root` (every entry that resolves to it) and nothing else. A root that is not listed
@@ -555,7 +577,7 @@ pub(crate) fn roots_remove(home: &Path, root: &Path) -> Result<(), RootsError> {
     update_roots(home, |list| {
         let before = list.len();
         list.retain(|v| !same_root(v, &root));
-        list.len() != before
+        Ok(list.len() != before)
     })
     .map(|_| ())
 }

@@ -85,3 +85,22 @@ fn only_the_roots_file_in_the_given_home_is_written() {
     roots_remove(&home, Path::new("/ws/other")).unwrap();
     assert_eq!(fs::metadata(file(&home)).unwrap().modified().unwrap(), before);
 }
+
+#[test]
+fn the_nesting_guard_sees_a_root_written_between_read_and_rename() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().to_path_buf();
+    fs::write(file(&home), "[]").unwrap();
+    let h = home.clone();
+    let mut fired = 0;
+    set_roots_race_hook(Some(Box::new(move || {
+        fired += 1;
+        if fired == 1 {
+            fs::write(file(&h), r#"["/ws"]"#).unwrap();
+        }
+    })));
+    let r = roots_add(&home, Path::new("/ws/app"));
+    set_roots_race_hook(None);
+    assert!(matches!(r, Err(crate::roots::RootsError::Nested { ref existing, .. }) if existing == "/ws"), "{r:?}");
+    assert_eq!(roots(&home), vec!["/ws"]);
+}

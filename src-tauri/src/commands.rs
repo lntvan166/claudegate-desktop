@@ -445,20 +445,46 @@ fn roots_guard() -> std::sync::MutexGuard<'static, ()> {
     ROOTS_LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// `add_project` minus Tauri: registers `path` in `<cg_home>/workspace-roots.json` and records it
-/// in `config_path` as added by the app. The error is a message for the user (it names the
-/// conflicting root for a nested or containing folder).
-pub fn add_project_with(cg_home: &Path, config_path: &Path, path: &str) -> Result<claudegate_core::projects::Added, String> {
-    let _g = roots_guard();
-    let mut cfg = crate::config::ConfigProjects { path: config_path, guard: Some(cg_home) };
-    claudegate_core::projects::add_project(cg_home, &mut cfg, path).map_err(|e| e.to_string())
+pub const READ_ONLY_PROJECTS: &str =
+    "Read-only mode is on. Turn it off in Settings to add or remove projects.";
+
+/// Add and Remove write the shared roots file, so read-only mode blocks them (fail closed on an
+/// unreadable config).
+fn check_writable(config_path: &Path) -> Result<(), String> {
+    match crate::config::read_only_strict(config_path) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(READ_ONLY_PROJECTS.into()),
+        Err(_) => Err(SETTINGS_UNREADABLE_MESSAGE.into()),
+    }
 }
 
-/// `remove_project` minus Tauri. Only roots the app added; the session file is kept.
-pub fn remove_project_with(cg_home: &Path, config_path: &Path, root: &str) -> Result<(), String> {
+/// `add_project` minus Tauri: registers `path` in `<cg_home>/workspace-roots.json`, records it in
+/// `config_path` as added by the app and unhides it. The error is a message for the user (it
+/// names the conflicting root for a nested or containing folder).
+pub fn add_project_with(cg_home: &Path, config_path: &Path, path: &str) -> Result<claudegate_core::projects::Added, String> {
+    check_writable(config_path)?;
     let _g = roots_guard();
     let mut cfg = crate::config::ConfigProjects { path: config_path, guard: Some(cg_home) };
-    claudegate_core::projects::remove_project(cg_home, &mut cfg, root).map_err(|e| e.to_string())
+    let added = claudegate_core::projects::add_project(cg_home, &mut cfg, path).map_err(|e| e.to_string())?;
+    if let Err(e) = crate::config::unhide_project(config_path, &added.root, Some(cg_home)) {
+        eprintln!("claudegate: couldn't unhide {}: {e}", added.root);
+    }
+    Ok(added)
+}
+
+/// `remove_project` minus Tauri. Only roots the app added; the session file is kept. When VS Code
+/// or Cursor also uses the folder (per `storage`, their `storage.json` files, and excludes.json)
+/// only the app's record is dropped and capture stays on.
+pub fn remove_project_with(
+    cg_home: &Path,
+    config_path: &Path,
+    root: &str,
+    storage: &[PathBuf],
+) -> Result<claudegate_core::projects::Removed, String> {
+    check_writable(config_path)?;
+    let _g = roots_guard();
+    let mut cfg = crate::config::ConfigProjects { path: config_path, guard: Some(cg_home) };
+    claudegate_core::projects::remove_project(cg_home, &mut cfg, root, storage).map_err(|e| e.to_string())
 }
 
 /// Re-adds the app's roots that the extension's unlocked write dropped. Returns what it re-added;
@@ -481,8 +507,23 @@ pub async fn add_project(path: String) -> Result<claudegate_core::projects::Adde
 }
 
 #[tauri::command]
-pub async fn remove_project(root: String) -> Result<(), String> {
-    blocking(move || remove_project_with(&claudegate_home(), &crate::config::config_path(), &root)).await?
+pub async fn remove_project(root: String) -> Result<claudegate_core::projects::Removed, String> {
+    blocking(move || {
+        let storage = claudegate_core::projects::storage_files(&ext_sources());
+        remove_project_with(&claudegate_home(), &crate::config::config_path(), &root, &storage)
+    })
+    .await?
+}
+
+/// Whether VS Code or Cursor also uses `root`, so Remove would leave capture on. Read only; the
+/// confirmation words itself on it.
+#[tauri::command]
+pub async fn project_in_vs_code(root: String) -> Result<bool, String> {
+    blocking(move || {
+        let storage = claudegate_core::projects::storage_files(&ext_sources());
+        claudegate_core::projects::vscode_uses_root(&claudegate_home(), Path::new(&root), &storage)
+    })
+    .await
 }
 
 /// The native folder picker: one directory, or `None` when cancelled.

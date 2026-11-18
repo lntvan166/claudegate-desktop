@@ -388,6 +388,8 @@ const handlers = new Set<(p: ChangedPayload) => void>();
 (globalThis as Record<string, unknown>).__mock = {
   /** What the next "Choose folder" returns (null: cancelled). */
   nextPick: "/home/dev/src/kelp-forest" as string | null,
+  /** Roots "open in VS Code": Remove only forgets them. */
+  inVsCode: [] as string[],
   /** The next decide fails as a store error after "changing" the files. */
   failStore: false,
   /** Marks a project's primary session unreadable, as a permission error would. */
@@ -479,17 +481,32 @@ export const mockApi: Api = {
   },
   addProject: async (path) => {
     await delay(null);
-    return mockAdd(path);
+    if (config.readOnly) throw "Read-only mode is on. Turn it off in Settings to add or remove projects.";
+    const r = mockAdd(path);
+    config = { ...config, hiddenProjects: (config.hiddenProjects ?? []).filter((h) => h !== r.root) };
+    return r;
   },
   removeProject: async (root) => {
     await delay(null);
     if (!(config.appRoots ?? []).includes(root))
       throw "This project comes from VS Code. Remove it there; the app only removes projects it added.";
-    rootsList.splice(rootsList.indexOf(root), 1);
-    config = { ...config, appRoots: (config.appRoots ?? []).filter((r) => r !== root) };
+    if (config.readOnly) throw "Read-only mode is on. Turn it off in Settings to add or remove projects.";
+    const vs = mockState().inVsCode.includes(root);
+    if (!vs) rootsList.splice(rootsList.indexOf(root), 1);
+    config = {
+      ...config,
+      appRoots: (config.appRoots ?? []).filter((r) => r !== root),
+      hiddenProjects: (config.hiddenProjects ?? []).filter((r) => r !== root),
+    };
+    return { root, unregistered: !vs };
   },
-  pickFolder: () => delay(((globalThis as Record<string, unknown>).__mock as { nextPick: string | null }).nextPick),
+  projectInVsCode: (root) => delay(mockState().inVsCode.includes(root)),
+  pickFolder: () => delay(mockState().nextPick),
 };
+
+function mockState(): { nextPick: string | null; inVsCode: string[] } {
+  return (globalThis as Record<string, unknown>).__mock as { nextPick: string | null; inVsCode: string[] };
+}
 
 const UNKNOWN = "This project was written by a newer ClaudeGate. Update the app to make decisions here.";
 const fail = (kind: string, message: string) => JSON.stringify({ kind, message });

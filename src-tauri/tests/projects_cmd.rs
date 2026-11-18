@@ -73,14 +73,14 @@ fn remove_refuses_vs_code_roots_and_drops_the_app_record() {
     let f = fx();
     let vs = f.dir("vs");
     fs::write(f.cg.join("workspace-roots.json"), json!([vs]).to_string()).unwrap();
-    let err = remove_project_with(&f.cg, &f.cfg, &vs).unwrap_err();
+    let err = remove_project_with(&f.cg, &f.cfg, &vs, &[]).unwrap_err();
     assert!(err.contains("VS Code"), "{err}");
     assert_eq!(f.roots(), json!([vs]));
 
     let app = f.dir("app");
     add_project_with(&f.cg, &f.cfg, &app).unwrap();
     claudegate_desktop_lib::config::save_extra_hide(&f.cfg, &app, &["x".into()], None).unwrap();
-    remove_project_with(&f.cg, &f.cfg, &app).unwrap();
+    assert!(remove_project_with(&f.cg, &f.cfg, &app, &[]).unwrap().unregistered);
     assert_eq!(f.roots(), json!([vs]));
     assert!(f.config()["projects"].get(&app).is_none());
     assert!(app_roots(&f.cfg).is_empty());
@@ -104,4 +104,48 @@ fn ensure_with_no_config_writes_nothing() {
     assert!(ensure_roots_with(&f.cg, Path::new(&f.cfg)).is_empty());
     assert!(!f.cg.join("workspace-roots.json").exists());
     assert!(!f.cfg.exists());
+}
+
+#[test]
+fn read_only_blocks_add_and_remove() {
+    let f = fx();
+    let app = f.dir("app");
+    add_project_with(&f.cg, &f.cfg, &app).unwrap();
+    claudegate_desktop_lib::config::save_read_only(&f.cfg, true, None).unwrap();
+    let before = f.roots();
+    let other = f.dir("other");
+    assert!(add_project_with(&f.cg, &f.cfg, &other).unwrap_err().contains("Read-only mode is on"));
+    assert!(remove_project_with(&f.cg, &f.cfg, &app, &[]).unwrap_err().contains("Read-only mode is on"));
+    assert_eq!(f.roots(), before);
+    assert_eq!(app_roots(&f.cfg), vec![app]);
+}
+
+#[test]
+fn add_unhides_and_remove_clears_hidden_and_every_spelling() {
+    let f = fx();
+    let app = f.dir("app");
+    let keep = f.dir("keep");
+    claudegate_desktop_lib::config::save_hidden_projects(&f.cfg, &[app.clone(), keep.clone()], None).unwrap();
+    add_project_with(&f.cg, &f.cfg, &app).unwrap();
+    assert_eq!(f.config()["hiddenProjects"], json!([keep]));
+    // Hidden again, plus a second spelling of the same root in projects.
+    claudegate_desktop_lib::config::save_hidden_projects(&f.cfg, &[app.clone(), keep.clone()], None).unwrap();
+    claudegate_desktop_lib::config::save_extra_hide(&f.cfg, &format!("{app}/"), &["x".into()], None).unwrap();
+    remove_project_with(&f.cg, &f.cfg, &app, &[]).unwrap();
+    let c = f.config();
+    assert_eq!(c["hiddenProjects"], json!([keep]));
+    assert_eq!(c["projects"], json!({}));
+}
+
+#[test]
+fn remove_of_a_root_vs_code_uses_keeps_it_registered() {
+    let f = fx();
+    let app = f.dir("app");
+    add_project_with(&f.cg, &f.cfg, &app).unwrap();
+    let storage = f.ws.join("storage.json");
+    fs::write(&storage, json!({ "windowsState": { "lastActiveWindow": { "folder": format!("file://{app}") } } }).to_string()).unwrap();
+    let r = remove_project_with(&f.cg, &f.cfg, &app, &[storage]).unwrap();
+    assert!(!r.unregistered);
+    assert_eq!(f.roots(), json!([app]));
+    assert!(app_roots(&f.cfg).is_empty());
 }

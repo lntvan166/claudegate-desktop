@@ -336,15 +336,46 @@ pub fn mark_added_by_app(path: &Path, root: &str, guard: Option<&Path>) -> Resul
     .map(|_| ())
 }
 
-/// Drops the app's whole record of `root` (`projects[root]`), after Remove.
+fn same_root(a: &str, root: &str) -> bool {
+    use claudegate_core::paths::resolve_root;
+    resolve_root(Path::new(a)) == resolve_root(Path::new(root))
+}
+
+/// Drops the app's whole record of `root` after Remove: every `projects` key that resolves to it,
+/// and the root in `hiddenProjects`.
 pub fn forget_project(path: &Path, root: &str, guard: Option<&Path>) -> Result<(), String> {
     update_config(path, guard, |obj, _| {
         if let Some(p) = obj.get_mut("projects").and_then(|p| p.as_object_mut()) {
-            p.remove(root);
+            p.retain(|k, _| !same_root(k, root));
+        }
+        if let Some(h) = obj.get_mut("hiddenProjects").and_then(|h| h.as_array_mut()) {
+            h.retain(|r| !r.as_str().is_some_and(|r| same_root(r, root)));
         }
         Ok(())
     })
     .map(|_| ())
+}
+
+/// Takes `root` out of `hiddenProjects` (an added project is shown). Writes only when it is there.
+pub fn unhide_project(path: &Path, root: &str, guard: Option<&Path>) -> Result<(), String> {
+    if !load_hidden(path).iter().any(|r| same_root(r, root)) {
+        return Ok(());
+    }
+    update_config(path, guard, |obj, _| {
+        if let Some(h) = obj.get_mut("hiddenProjects").and_then(|h| h.as_array_mut()) {
+            h.retain(|r| !r.as_str().is_some_and(|r| same_root(r, root)));
+        }
+        Ok(())
+    })
+    .map(|_| ())
+}
+
+fn load_hidden(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .map(|v| from_value(&v).hidden_projects)
+        .unwrap_or_default()
 }
 
 /// `projects[root].addedByApp` in config.json, as the core's add/remove/ensure read and write it.

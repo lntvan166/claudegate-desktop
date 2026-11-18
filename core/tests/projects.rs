@@ -1,7 +1,7 @@
 //! Add and remove projects: `workspace-roots.json` is appended to, never rewritten, and only the
 //! roots the app added can be removed. Temp homes only.
 
-use claudegate_core::projects::{add_project, ensure_app_roots_present, remove_project, AppProjects};
+use claudegate_core::projects::{add_project, ensure_app_roots_present, remove_project, vscode_uses_root, AppProjects};
 use claudegate_core::roots::{check_new_root, read_roots, RootsError};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -210,7 +210,7 @@ fn removing_a_vs_code_root_is_refused() {
     e.set_roots(&serde_json::to_string(&[&a]).unwrap());
     let before = e.raw();
     let mut cfg = Cfg::default();
-    assert!(matches!(remove_project(&e.home, &mut cfg, &a), Err(RootsError::NotAppAdded)));
+    assert!(matches!(remove_project(&e.home, &mut cfg, &a, &[]), Err(RootsError::NotAppAdded)));
     assert_eq!(e.raw(), before);
 }
 
@@ -225,7 +225,8 @@ fn remove_drops_only_the_app_root_and_keeps_the_session() {
     let session = claudegate_core::paths::session_file_for(&e.home, Path::new(&b));
     fs::create_dir_all(session.parent().unwrap()).unwrap();
     fs::write(&session, "{}").unwrap();
-    remove_project(&e.home, &mut cfg, &b).unwrap();
+    let r = remove_project(&e.home, &mut cfg, &b, &[]).unwrap();
+    assert!(r.unregistered);
     assert_eq!(e.roots(), serde_json::json!([a, "/gone/x"]).as_array().unwrap().clone());
     assert!(cfg.roots.is_empty());
     assert!(session.exists(), "review history is kept");
@@ -273,4 +274,57 @@ fn re_adding_skips_a_root_that_would_now_nest() {
     // VS Code since registered the parent folder; re-adding b would pull captures out of it.
     e.set_roots(&serde_json::to_string(&[e.ws.to_string_lossy()]).unwrap());
     assert!(ensure_app_roots_present(&e.home, &cfg).unwrap().is_empty());
+}
+
+#[test]
+fn remove_only_forgets_when_vs_code_has_an_excludes_key_for_the_root() {
+    let e = env();
+    let b = e.dir("b");
+    let mut cfg = Cfg::default();
+    add_project(&e.home, &mut cfg, &b).unwrap();
+    fs::write(e.home.join("excludes.json"), serde_json::json!({ b.clone(): ["**/x"] }).to_string()).unwrap();
+    let before = e.raw();
+    let r = remove_project(&e.home, &mut cfg, &b, &[]).unwrap();
+    assert!(!r.unregistered);
+    assert_eq!(e.raw(), before, "capture stays on");
+    assert!(cfg.roots.is_empty(), "now a VS Code project");
+}
+
+#[test]
+fn remove_only_forgets_when_the_folder_is_open_in_vs_code() {
+    let e = env();
+    let b = e.dir("my proj");
+    let mut cfg = Cfg::default();
+    add_project(&e.home, &mut cfg, &b).unwrap();
+    let storage = e.ws.join("Code/User/globalStorage/storage.json");
+    fs::create_dir_all(storage.parent().unwrap()).unwrap();
+    let uri = format!("file://{}", b.replace(' ', "%20"));
+    for v in [
+        serde_json::json!({ "windowsState": { "lastActiveWindow": { "folder": uri } } }),
+        serde_json::json!({ "windowsState": { "openedWindows": [{ "folder": "vscode-remote://x/y" }, { "folder": uri }] } }),
+        serde_json::json!({ "backupWorkspaces": { "folders": [{ "folderUri": uri }] } }),
+    ] {
+        fs::write(&storage, v.to_string()).unwrap();
+        assert!(vscode_uses_root(&e.home, Path::new(&b), &[storage.clone()]), "{v}");
+    }
+    let before = e.raw();
+    let r = remove_project(&e.home, &mut cfg, &b, &[e.ws.join("absent.json"), storage.clone()]).unwrap();
+    assert!(!r.unregistered);
+    assert_eq!(e.raw(), before);
+}
+
+#[test]
+fn no_evidence_unregisters_and_bad_storage_is_no_evidence() {
+    let e = env();
+    let b = e.dir("b");
+    let other = e.dir("other");
+    let storage = e.ws.join("storage.json");
+    let mut cfg = Cfg::default();
+    add_project(&e.home, &mut cfg, &b).unwrap();
+    fs::write(e.home.join("excludes.json"), serde_json::json!({ other.clone(): [] }).to_string()).unwrap();
+    fs::write(&storage, "{ not json").unwrap();
+    assert!(!vscode_uses_root(&e.home, Path::new(&b), &[storage.clone()]));
+    let r = remove_project(&e.home, &mut cfg, &b, &[storage]).unwrap();
+    assert!(r.unregistered);
+    assert!(read_roots(&e.home).is_empty());
 }

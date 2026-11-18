@@ -16,6 +16,7 @@
     getConfig,
     getProject,
     pickFolder,
+    projectInVsCode,
     removeProject,
     getSettings,
     setExtraHide,
@@ -585,10 +586,14 @@
   async function removeProjectAt(root: string) {
     const name = projects.find((p) => p.root === root)?.name ?? basename(root);
     try {
-      await removeProject(root);
+      const r = await removeProject(root);
       config = await getConfig();
       await loadProjects();
-      announce(`${name} removed; its review history is kept`);
+      announce(
+        r.unregistered
+          ? `${name} removed; its review history is kept`
+          : `${name} removed from the app. VS Code also uses this folder, so capture stays on.`,
+      );
     } catch (e) {
       show({ text: `Couldn't remove ${name}: ${e}`, tone: "error" });
     }
@@ -949,6 +954,8 @@
     onpick={pickFolder}
     onadd={addProjectAt}
     onremove={removeProjectAt}
+    oninvscode={projectInVsCode}
+    {readOnly}
     {selected}
     loading={loadingList}
     collapsed={railed}

@@ -79,6 +79,8 @@ export const CHANGED_EVENT = "claudegate://changed";
 
 /** core `projects::Added`: the root as listed; `already` when it was a project before. */
 export type AddedProject = { root: string; already: boolean };
+/** core `projects::Removed`: `unregistered` false when VS Code also uses the folder (capture stays on). */
+export type RemovedProject = { root: string; unregistered: boolean };
 
 export interface Api {
   listProjects(): Promise<ProjectSummary[]>;
@@ -115,7 +117,9 @@ export interface Api {
    */
   addProject(path: string): Promise<AddedProject>;
   /** Unregisters a project the app added. Its review history (session file) is kept. */
-  removeProject(root: string): Promise<void>;
+  removeProject(root: string): Promise<RemovedProject>;
+  /** Whether VS Code or Cursor also uses the folder, so Remove leaves capture on. Read only. */
+  projectInVsCode(root: string): Promise<boolean>;
   /** The native folder picker; null when cancelled. */
   pickFolder(): Promise<string | null>;
 }
@@ -137,7 +141,8 @@ const tauriApi: Api = {
   setHookLog: (on, root) => invoke<SettingsView>("set_hook_log", { on, root }),
   setExtraHide: (root, patterns) => invoke<SettingsView>("set_extra_hide", { root, patterns }),
   addProject: (path) => invoke<AddedProject>("add_project", { path }),
-  removeProject: (root) => invoke<void>("remove_project", { root }),
+  removeProject: (root) => invoke<RemovedProject>("remove_project", { root }),
+  projectInVsCode: (root) => invoke<boolean>("project_in_vs_code", { root }),
   pickFolder: () => invoke<string | null>("pick_folder"),
 };
 
@@ -180,3 +185,4 @@ export const setExtraHide = async (root: string, patterns: string[]) => (await a
 export const addProject = async (path: string) => (await api()).addProject(path);
 export const removeProject = async (root: string) => (await api()).removeProject(root);
 export const pickFolder = async () => (await api()).pickFolder();
+export const projectInVsCode = async (root: string) => (await api()).projectInVsCode(root);
