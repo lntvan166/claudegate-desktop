@@ -5,7 +5,9 @@ import {
   canSetUp,
   capturing,
   chipLabel,
+  detail,
   explanation,
+  pythonWarning,
   setupResult,
   type CaptureView,
   type InstallView,
@@ -15,6 +17,8 @@ const v = (status: CaptureView["status"], extra: Partial<CaptureView> = {}): Cap
   status,
   version: null,
   note: null,
+  pythonMissing: false,
+  takenOver: false,
   ...extra,
 });
 
@@ -29,6 +33,14 @@ describe("chipLabel", () => {
   it("says checking before the first answer, and something for an unknown state", () => {
     expect(chipLabel(null)).toBe("Capture: checking…");
     expect(chipLabel(v("weird" as CaptureView["status"]))).toBe("Capture: unknown");
+  });
+  it("says the check failed instead of checking forever", () => {
+    expect(chipLabel(null, true)).toBe("Capture: couldn't check");
+    expect(chipLabel(v("vscode"), true)).toBe("Capturing (VS Code)");
+  });
+  it("keeps the capturing label when python3 is missing", () => {
+    expect(chipLabel(v("vscode", { pythonMissing: true }))).toBe("Capturing (VS Code)");
+    expect(chipLabel(v("app", { pythonMissing: true }))).toBe("Capturing (this app)");
   });
 });
 
@@ -57,6 +69,25 @@ describe("explanation", () => {
   });
 });
 
+describe("pythonWarning", () => {
+  it("notes a missing python3 next to a capturing state only", () => {
+    const w =
+      "python3 wasn't found from this app; capture runs under Claude Code's environment, so it may still work";
+    expect(pythonWarning(v("vscode", { pythonMissing: true }))).toBe(w);
+    expect(pythonWarning(v("app", { pythonMissing: true }))).toBe(w);
+    expect(pythonWarning(v("vscode"))).toBeNull();
+    expect(pythonWarning(v("python-missing"))).toBeNull();
+    expect(pythonWarning(null)).toBeNull();
+  });
+});
+
+describe("detail", () => {
+  it("says the extension took over when it replaced the app's hook", () => {
+    expect(detail(v("vscode", { takenOver: true }))).toMatch(/^The VS Code extension now manages the hook\./);
+    expect(detail(v("vscode"))).not.toMatch(/now manages/);
+  });
+});
+
 describe("actions", () => {
   it("offers Set up only when not set up and writes are allowed", () => {
     expect(canSetUp(v("not-set-up"), false)).toBe(true);
@@ -72,6 +103,7 @@ describe("actions", () => {
     expect(canRecheck(v("not-set-up"))).toBe(true);
     expect(canRecheck(v("vscode"))).toBe(false);
     expect(canRecheck(v("app"))).toBe(false);
+    expect(canRecheck(v("app", { pythonMissing: true }))).toBe(true);
   });
 });
 

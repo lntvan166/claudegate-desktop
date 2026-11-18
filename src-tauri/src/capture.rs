@@ -6,7 +6,12 @@
 //! use a temp folder. The writes themselves are `claudegate_core`'s (`store.rs`).
 
 use crate::commands::{blocking, check_writable_for};
-use claudegate_core::capture::{capture_status as core_status, CaptureStatus, HookUpdate, InstallError, InstallReport, MARKER_FILE};
+use crate::editor::{fallback_dirs, is_executable};
+use claudegate_core::capture::{
+    app_owns_hook, capture_status as core_status, CaptureStatus, HookUpdate, InstallError, InstallReport, HOOK_PY_FILE,
+    MARKER_FILE,
+};
+use std::ffi::OsStr;
 use serde::Serialize;
 use std::fs;
 use std::io;
@@ -28,6 +33,11 @@ pub struct CaptureView {
     pub version: Option<String>,
     /// Why, for `settings-unreadable`.
     pub note: Option<String>,
+    /// For `vscode`/`app`: python3 was not found from this app. A warning only: the hook runs
+    /// under Claude Code's environment.
+    pub python_missing: bool,
+    /// For `vscode`: this app set capture up, and the extension has since replaced hook.py.
+    pub taken_over: bool,
 }
 
 /// A successful `set_up_capture`, with the status read right after it.
@@ -45,7 +55,7 @@ pub struct InstallView {
 
 pub fn status_key(s: &CaptureStatus) -> &'static str {
     match s {
-        CaptureStatus::SetUpByExtension => "vscode",
+        CaptureStatus::SetUpByExtension { .. } => "vscode",
         CaptureStatus::SetUpByApp { .. } => "app",
         CaptureStatus::NotSetUp => "not-set-up",
         CaptureStatus::SettingsUnreadable(_) => "settings-unreadable",
@@ -53,49 +63,76 @@ pub fn status_key(s: &CaptureStatus) -> &'static str {
     }
 }
 
-/// The capture status under `home`, with the marker's version for `SetUpByApp`. Read only.
-pub fn read_status(home: &Path, python3: bool) -> CaptureStatus {
+/// What `read_status` saw beyond the status itself.
+struct Read {
+    status: CaptureStatus,
+    taken_over: bool,
+}
+
+fn read_full(home: &Path, python3: bool) -> Read {
     let literal = home.join(".claude").join("settings.json");
+    let unreadable = |r: String| Read { status: CaptureStatus::SettingsUnreadable(r), taken_over: false };
     let text = match fs::read(&literal) {
         Ok(b) => match String::from_utf8(b) {
             Ok(t) => Some(t),
-            Err(_) => return CaptureStatus::SettingsUnreadable("not UTF-8 text".into()),
+            Err(_) => return unreadable("not UTF-8 text".into()),
         },
         // A link to nothing is not "no settings": setup would refuse it, so say why now.
         Err(e) if e.kind() == io::ErrorKind::NotFound && fs::symlink_metadata(&literal).is_ok() => {
-            return CaptureStatus::SettingsUnreadable(format!("{} is a link to nothing", literal.display()))
+            return unreadable(format!("{} is a link to nothing", literal.display()))
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return CaptureStatus::SettingsUnreadable(format!("could not read it: {e}")),
+        Err(e) => return unreadable(format!("could not read it: {e}")),
     };
-    let marker_path = home.join(".claudegate").join(MARKER_FILE);
-    let marker = fs::read(&marker_path).ok();
-    match core_status(text.as_deref(), fs::symlink_metadata(&marker_path).is_ok(), python3) {
-        CaptureStatus::SetUpByApp { .. } => CaptureStatus::SetUpByApp {
-            version: marker.map(|b| String::from_utf8_lossy(&b).trim().to_owned()).filter(|v| !v.is_empty()),
+    let cg = home.join(".claudegate");
+    let marker_path = cg.join(MARKER_FILE);
+    let marker_there = fs::symlink_metadata(&marker_path).is_ok();
+    // The same ownership test the startup update uses: the marker, and our stamp in hook.py.
+    let ours = app_owns_hook(marker_there, fs::read(cg.join(HOOK_PY_FILE)).ok().as_deref());
+    let status = match core_status(text.as_deref(), ours, python3) {
+        CaptureStatus::SetUpByApp { python_missing, .. } => CaptureStatus::SetUpByApp {
+            version: fs::read(&marker_path)
+                .ok()
+                .map(|b| String::from_utf8_lossy(&b).trim().to_owned())
+                .filter(|v| !v.is_empty()),
+            python_missing,
         },
         other => other,
-    }
+    };
+    let taken_over = marker_there && matches!(status, CaptureStatus::SetUpByExtension { .. });
+    Read { status, taken_over }
+}
+
+/// The capture status under `home`, with the marker's version for `SetUpByApp`. Read only.
+pub fn read_status(home: &Path, python3: bool) -> CaptureStatus {
+    read_full(home, python3).status
 }
 
 pub fn view_of(s: &CaptureStatus) -> CaptureView {
-    let (version, note) = match s {
-        CaptureStatus::SetUpByApp { version } => (version.clone(), None),
-        CaptureStatus::SettingsUnreadable(r) => (None, Some(r.clone())),
-        _ => (None, None),
+    let (version, note, python_missing) = match s {
+        CaptureStatus::SetUpByApp { version, python_missing } => (version.clone(), None, *python_missing),
+        CaptureStatus::SetUpByExtension { python_missing } => (None, None, *python_missing),
+        CaptureStatus::SettingsUnreadable(r) => (None, Some(r.clone()), false),
+        _ => (None, None, false),
     };
-    CaptureView { status: status_key(s).to_owned(), version, note }
+    CaptureView { status: status_key(s).to_owned(), version, note, python_missing, taken_over: false }
 }
 
 pub fn capture_view_for(home: &Path, python3: bool) -> CaptureView {
-    view_of(&read_status(home, python3))
+    let r = read_full(home, python3);
+    CaptureView { taken_over: r.taken_over, ..view_of(&r.status) }
 }
 
 /// Whether `<program> --version` runs and exits 0 within `timeout`. No shell: `program` is
 /// exec'd as is, found on PATH. A program still running at the deadline is killed.
 pub fn python3_available_with(program: &str, timeout: Duration) -> bool {
+    python3_available_with_args(program, &["--version"], timeout)
+}
+
+/// `program args…` exits 0 within `timeout`; no shell, null stdio, killed at the deadline.
+fn python3_available_with_args(program: &str, args: &[&str], timeout: Duration) -> bool {
     let child = Command::new(program)
-        .arg("--version")
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -115,16 +152,42 @@ pub fn python3_available_with(program: &str, timeout: Duration) -> bool {
     }
 }
 
+/// Where python3 is, searched the way the editor launcher searches (`editor::resolve_program`):
+/// each PATH entry, then `editor::fallback_dirs` (a GUI app's PATH is often bare). On macOS
+/// `/usr/bin/python3` is a stub that opens the Command Line Tools installer when they are
+/// missing, so it counts only when `clt_installed()` (`xcode-select -p`) says they are there; that
+/// check runs at most once per search, and never off macOS.
+pub fn pick_python3(
+    path_var: Option<&OsStr>,
+    home: Option<&Path>,
+    is_exec: &dyn Fn(&Path) -> bool,
+    macos: bool,
+    clt_installed: &dyn Fn() -> bool,
+) -> Option<PathBuf> {
+    let stub = Path::new("/usr/bin/python3");
+    let clt = std::cell::OnceCell::new();
+    let mut dirs: Vec<PathBuf> = path_var.map(|v| std::env::split_paths(v).collect()).unwrap_or_default();
+    dirs.extend(fallback_dirs(home));
+    dirs.into_iter().map(|d| d.join("python3")).find(|c| {
+        is_exec(c) && !(macos && c.as_path() == stub && !*clt.get_or_init(clt_installed))
+    })
+}
+
 const PYTHON_TIMEOUT: Duration = Duration::from_secs(3);
 static PYTHON3: Mutex<Option<bool>> = Mutex::new(None);
 
-/// `python3 --version`, checked once per session; `recheck` ("Check again") runs it again.
+/// python3 found (`pick_python3`) and its `--version` run by absolute path, checked once per
+/// session; `recheck` ("Check again", and every setup) runs it again.
 pub fn python3_cached(recheck: bool) -> bool {
     let mut g = PYTHON3.lock().unwrap_or_else(|p| p.into_inner());
     match *g {
         Some(found) if !recheck => found,
         _ => {
-            let found = python3_available_with("python3", PYTHON_TIMEOUT);
+            let home = dirs::home_dir();
+            let clt = || python3_available_with_args("/usr/bin/xcode-select", &["-p"], PYTHON_TIMEOUT);
+            let path_var = std::env::var_os("PATH");
+            let found = pick_python3(path_var.as_deref(), home.as_deref(), &is_executable, cfg!(target_os = "macos"), &clt)
+                .is_some_and(|p| python3_available_with(&p.to_string_lossy(), PYTHON_TIMEOUT));
             *g = Some(found);
             found
         }
@@ -133,7 +196,7 @@ pub fn python3_cached(recheck: bool) -> bool {
 
 pub fn install_error_text(e: &InstallError) -> String {
     match e {
-        InstallError::AlreadySetUp(CaptureStatus::SetUpByExtension) => {
+        InstallError::AlreadySetUp(CaptureStatus::SetUpByExtension { .. }) => {
             "Capture is already set up by VS Code; nothing was changed.".into()
         }
         InstallError::AlreadySetUp(CaptureStatus::SetUpByApp { .. }) => {

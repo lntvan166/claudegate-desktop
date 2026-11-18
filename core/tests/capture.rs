@@ -1,4 +1,4 @@
-use claudegate_core::capture::{capture_status, CaptureStatus};
+use claudegate_core::capture::{app_owns_hook, capture_status, CaptureStatus};
 
 const CMD: &str = "/home/u/.claudegate/hook.sh";
 
@@ -13,7 +13,7 @@ fn registered_under_any_matcher_is_extension() {
     for m in ["^(Write|Edit|MultiEdit|Bash)$", "Write|Edit", "^Bash$", "", "*"] {
         assert_eq!(
             capture_status(Some(&settings(m, CMD)), false, true),
-            CaptureStatus::SetUpByExtension,
+            CaptureStatus::SetUpByExtension { python_missing: false },
             "matcher {m:?}"
         );
     }
@@ -24,7 +24,7 @@ fn home_and_windows_forms_are_registered() {
     for c in ["$HOME/.claudegate/hook.sh", "~/.claudegate/hook.sh", "C:\\\\Users\\\\u\\\\.claudegate\\\\hook.bat"] {
         assert_eq!(
             capture_status(Some(&settings("x", c)), false, true),
-            CaptureStatus::SetUpByExtension,
+            CaptureStatus::SetUpByExtension { python_missing: false },
             "{c}"
         );
     }
@@ -34,7 +34,7 @@ fn home_and_windows_forms_are_registered() {
 fn marker_means_app() {
     assert_eq!(
         capture_status(Some(&settings("x", CMD)), true, true),
-        CaptureStatus::SetUpByApp { version: None }
+        CaptureStatus::SetUpByApp { version: None, python_missing: false }
     );
 }
 
@@ -43,7 +43,7 @@ fn other_hooks_alongside_ours() {
     let s = r#"{"model":"x","hooks":{"PostToolUse":[{"hooks":[{"command":"/a/.claudegate/hook.sh"}]}],
       "PreToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"/usr/bin/other"}]},
       {"matcher":"Write","hooks":[{"type":"command","command":"/x"},{"type":"command","command":"/home/u/.claudegate/hook.sh"}]}]}}"#;
-    assert_eq!(capture_status(Some(s), false, true), CaptureStatus::SetUpByExtension);
+    assert_eq!(capture_status(Some(s), false, true), CaptureStatus::SetUpByExtension { python_missing: false });
 }
 
 #[test]
@@ -71,10 +71,38 @@ fn unreadable_settings() {
 }
 
 #[test]
-fn python_missing_wins_over_everything() {
+fn python_missing_blocks_only_when_not_set_up() {
     assert_eq!(capture_status(None, false, false), CaptureStatus::PythonMissing);
-    assert_eq!(capture_status(Some("{ bad"), true, false), CaptureStatus::PythonMissing);
-    assert_eq!(capture_status(Some(&settings("x", CMD)), true, false), CaptureStatus::PythonMissing);
+    assert_eq!(capture_status(Some("{}"), true, false), CaptureStatus::PythonMissing);
+    assert_eq!(capture_status(Some("  "), false, false), CaptureStatus::PythonMissing);
+}
+
+#[test]
+fn a_registered_hook_wins_over_python_with_a_warning() {
+    assert_eq!(
+        capture_status(Some(&settings("x", CMD)), false, false),
+        CaptureStatus::SetUpByExtension { python_missing: true }
+    );
+    assert_eq!(
+        capture_status(Some(&settings("x", CMD)), true, false),
+        CaptureStatus::SetUpByApp { version: None, python_missing: true }
+    );
+}
+
+#[test]
+fn unreadable_settings_win_over_python() {
+    // Whether a hook is set up cannot be told, so python3 is not the blocking reason.
+    assert!(matches!(capture_status(Some("{ bad"), true, false), CaptureStatus::SettingsUnreadable(_)));
+}
+
+#[test]
+fn ownership_is_the_stamp() {
+    let stamped = b"#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.16.1\n";
+    assert!(app_owns_hook(true, Some(stamped)));
+    assert!(app_owns_hook(true, None), "marker and no hook.py: still the app's setup");
+    assert!(!app_owns_hook(true, Some(b"# the extension's hook\n")), "unstamped: the extension replaced it");
+    assert!(!app_owns_hook(false, Some(stamped)), "no marker: never the app's");
+    assert!(!app_owns_hook(false, None));
 }
 
 #[test]
@@ -98,7 +126,7 @@ fn any_claudegate_mention_in_pretooluse_counts() {
     ] {
         assert_eq!(
             capture_status(Some(&settings("x", c)), false, true),
-            CaptureStatus::SetUpByExtension,
+            CaptureStatus::SetUpByExtension { python_missing: false },
             "{c}"
         );
     }

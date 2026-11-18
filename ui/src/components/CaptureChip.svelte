@@ -8,6 +8,7 @@
     capturing,
     chipLabel,
     detail,
+    pythonWarning,
     setupResult,
     type CaptureView,
     type SetupResult,
@@ -20,6 +21,8 @@
   let confirming = $state(false);
   let busy = $state(false);
   let error: string | null = $state(null);
+  /** The last status read failed (with no status yet, the chip says so instead of "checking…"). */
+  let failed = $state(false);
   let result: SetupResult | null = $state(null);
 
   let wrap: HTMLDivElement | undefined = $state();
@@ -32,8 +35,10 @@
   async function refresh(recheck = false) {
     try {
       view = await captureStatus(recheck);
+      failed = false;
       if (recheck) error = null;
     } catch (e) {
+      failed = true;
       error = `Couldn't read the capture status: ${e}`;
     }
   }
@@ -81,6 +86,9 @@
       busy = false;
       confirming = false;
     }
+    // The confirmation's buttons are gone: hand focus to the popover's first control, else the chip.
+    await tick();
+    (pop?.querySelector<HTMLButtonElement>("button:not(:disabled)") ?? chip)?.focus();
   }
 
   async function checkAgain() {
@@ -135,10 +143,10 @@
     onclick={toggle}
   >
     <span class="dot {tone}" aria-hidden="true"></span>
-    {chipLabel(view)}
+    {chipLabel(view, failed)}
   </button>
 
-  {#if open && view}
+  {#if open}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div class="pop" role="dialog" aria-label="Capture" data-confirm tabindex="-1" bind:this={pop} {onkeydown}>
       {#if confirming}
@@ -147,11 +155,24 @@
           <button class="btn go" data-answer disabled={busy} onclick={() => void confirmSetUp()}>
             {busy ? "Setting up…" : "Set up"}
           </button>
-          <button class="btn" data-answer bind:this={cancelBtn} onclick={() => void cancelConfirm()}>Cancel</button>
+          <button class="btn" data-answer disabled={busy} bind:this={cancelBtn} onclick={() => void cancelConfirm()}>Cancel</button>
         </div>
+      {:else if !view}
+        <p class="title"><span class="dot {tone}" aria-hidden="true"></span>{chipLabel(view, failed)}</p>
+        {#if error}
+          <p class="banner error" role="alert">{error}</p>
+          <div class="buttons">
+            <button class="btn" disabled={busy} onclick={() => void checkAgain()}>Check again</button>
+          </div>
+        {:else}
+          <p class="body muted">Reading ~/.claude/settings.json…</p>
+        {/if}
       {:else}
         <p class="title"><span class="dot {tone}" aria-hidden="true"></span>{chipLabel(view)}</p>
         <p class="body">{detail(view)}</p>
+        {#if pythonWarning(view)}
+          <p class="banner warning">{pythonWarning(view)}</p>
+        {/if}
         {#if view.status === "not-set-up" && readOnly}
           <p class="body muted">Read-only mode is on. Turn it off to set up capture.</p>
         {/if}

@@ -569,15 +569,22 @@ export const mockApi: Api = {
   projectInVsCode: (root) => delay(mockState().inVsCode.includes(root)),
   pickFolder: () => delay(mockState().nextPick),
   captureStatus: (recheck) => {
+    // `?capture=fail`: the status call fails, until Check again.
+    if (captureFails && !recheck) return Promise.reject("couldn't read ~/.claude/settings.json: permission denied");
+    if (captureFails) {
+      captureFails = false;
+      capture = { ...capture, status: "not-set-up" };
+    }
     // "Check again" finds python3 in the preview, so the state can be walked through.
-    if (recheck && capture.status === "python-missing") capture = { status: "not-set-up", version: null, note: null };
+    if (recheck && capture.status === "python-missing") capture = { ...capture, status: "not-set-up" };
+    if (recheck) capture = { ...capture, pythonMissing: false };
     return delay({ ...capture });
   },
   setUpCapture: async () => {
     await delay(null);
     if (config.readOnly) throw "Read-only mode is on. Turn it off in Settings to set up capture.";
     if (capture.status !== "not-set-up") throw "Capture is already set up; nothing was changed.";
-    capture = { status: "app", version: "v1.16.1", note: null };
+    capture = { status: "app", version: "v1.16.1", note: null, pythonMissing: false, takenOver: false };
     return {
       settings: "/home/dev/.claude/settings.json",
       backup: "/home/dev/.claude/settings.json.claudegate-2026-11-18T10-20-30.123Z.bak",
@@ -589,14 +596,21 @@ export const mockApi: Api = {
   },
 };
 
-/** The capture state the preview starts in: `?capture=vscode|app|not-set-up|settings-unreadable|python-missing`. */
+/**
+ * The capture state the preview starts in: `?capture=vscode|app|not-set-up|settings-unreadable|python-missing`,
+ * plus `&capturePython=missing` (the warning next to a capturing state) and `&captureTakenOver=1`.
+ */
+let captureFails = typeof location !== "undefined" && new URLSearchParams(location.search).get("capture") === "fail";
 let capture: CaptureView = (() => {
-  const s = (typeof location === "undefined" ? null : new URLSearchParams(location.search).get("capture")) ?? "not-set-up";
+  const q = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
+  const s = q.get("capture") ?? "not-set-up";
   const status = (["vscode", "app", "not-set-up", "settings-unreadable", "python-missing"].includes(s) ? s : "not-set-up") as CaptureView["status"];
   return {
     status,
     version: status === "app" ? "v1.16.1" : null,
     note: status === "settings-unreadable" ? "not valid JSON: expected value at line 4 column 3" : null,
+    pythonMissing: (status === "vscode" || status === "app") && q.get("capturePython") === "missing",
+    takenOver: status === "vscode" && q.get("captureTakenOver") === "1",
   };
 })();
 

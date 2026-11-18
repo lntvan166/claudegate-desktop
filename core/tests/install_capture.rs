@@ -205,7 +205,7 @@ fn fresh_install_appends_our_entry_and_keeps_everything_else() {
         h.cg(".installed-by-desktop").exists(),
         true,
     );
-    assert_eq!(status, CaptureStatus::SetUpByApp { version: None });
+    assert_eq!(status, CaptureStatus::SetUpByApp { version: None, python_missing: false });
 }
 
 #[test]
@@ -310,7 +310,7 @@ fn extension_registration_is_refused() {
     let text = serde_json::to_string(&json!({ "hooks": { "PreToolUse": [our_entry("/elsewhere/.claudegate/hook.sh")] } })).unwrap();
     h.write_settings(&text);
     let err = h.install().unwrap_err();
-    assert!(matches!(err, InstallError::AlreadySetUp(CaptureStatus::SetUpByExtension)), "{err:?}");
+    assert!(matches!(err, InstallError::AlreadySetUp(CaptureStatus::SetUpByExtension { .. })), "{err:?}");
     assert_eq!(fs::read_to_string(h.settings()).unwrap(), text);
     assert!(!h.home.join(".claudegate").exists());
 }

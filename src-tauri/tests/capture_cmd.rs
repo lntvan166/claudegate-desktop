@@ -3,7 +3,7 @@
 //! never touched.
 use claudegate_core::capture::{bundled_hook_version, version_newer, CaptureStatus, HookUpdate, InstallError};
 use claudegate_desktop_lib::capture::{
-    capture_view_for, install_error_text, python3_available_with, read_status, set_up_capture_with, status_key,
+    capture_view_for, install_error_text, pick_python3, python3_available_with, read_status, set_up_capture_with, status_key,
     update_hook_with, CaptureView, BUNDLED_HOOK,
 };
 use claudegate_desktop_lib::config::{config_path_in, save_read_only};
@@ -50,6 +50,11 @@ impl Fx {
         set_up_capture_with(&self.home, &self.cfg, true).unwrap();
         fs::write(self.cg(".installed-by-desktop"), marker).unwrap();
     }
+    /// The installed hook.py, stamped older than the bundled one, so only the guard under test
+    /// stands between it and an update.
+    fn old_hook(&self) {
+        fs::write(self.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\nold\n").unwrap();
+    }
 }
 
 fn bundled() -> String {
@@ -60,8 +65,8 @@ fn bundled() -> String {
 
 #[test]
 fn status_keys_cover_every_variant() {
-    assert_eq!(status_key(&CaptureStatus::SetUpByExtension), "vscode");
-    assert_eq!(status_key(&CaptureStatus::SetUpByApp { version: None }), "app");
+    assert_eq!(status_key(&CaptureStatus::SetUpByExtension { python_missing: false }), "vscode");
+    assert_eq!(status_key(&CaptureStatus::SetUpByApp { version: None, python_missing: true }), "app");
     assert_eq!(status_key(&CaptureStatus::NotSetUp), "not-set-up");
     assert_eq!(status_key(&CaptureStatus::SettingsUnreadable("x".into())), "settings-unreadable");
     assert_eq!(status_key(&CaptureStatus::PythonMissing), "python-missing");
@@ -71,7 +76,7 @@ fn status_keys_cover_every_variant() {
 fn not_set_up_when_settings_absent_or_without_entry() {
     let f = fx();
     let v = capture_view_for(&f.home, true);
-    assert_eq!(v, CaptureView { status: "not-set-up".into(), version: None, note: None });
+    assert_eq!(v, CaptureView { status: "not-set-up".into(), version: None, note: None, python_missing: false, taken_over: false });
     f.write_settings(r#"{"model":"x","hooks":{"PreToolUse":[]}}"#);
     assert_eq!(capture_view_for(&f.home, true).status, "not-set-up");
 }
@@ -80,17 +85,24 @@ fn not_set_up_when_settings_absent_or_without_entry() {
 fn vscode_when_entry_without_marker() {
     let f = fx();
     f.as_extension();
-    assert_eq!(read_status(&f.home, true), CaptureStatus::SetUpByExtension);
-    assert_eq!(capture_view_for(&f.home, true).status, "vscode");
+    assert_eq!(read_status(&f.home, true), CaptureStatus::SetUpByExtension { python_missing: false });
+    let v = capture_view_for(&f.home, true);
+    assert_eq!((v.status.as_str(), v.taken_over), ("vscode", false));
 }
 
 #[test]
 fn app_with_trimmed_marker_version() {
     let f = fx();
     f.as_app("v1.2.3\n");
-    assert_eq!(read_status(&f.home, true), CaptureStatus::SetUpByApp { version: Some("v1.2.3".into()) });
+    assert_eq!(
+        read_status(&f.home, true),
+        CaptureStatus::SetUpByApp { version: Some("v1.2.3".into()), python_missing: false }
+    );
     let v = capture_view_for(&f.home, true);
-    assert_eq!(v, CaptureView { status: "app".into(), version: Some("v1.2.3".into()), note: None });
+    assert_eq!(
+        v,
+        CaptureView { status: "app".into(), version: Some("v1.2.3".into()), note: None, python_missing: false, taken_over: false }
+    );
 }
 
 #[test]
@@ -110,10 +122,40 @@ fn dangling_settings_link_is_unreadable_not_absent() {
 }
 
 #[test]
-fn python_missing_wins() {
+fn python_missing_blocks_only_when_not_set_up() {
     let f = fx();
-    f.as_extension();
     assert_eq!(capture_view_for(&f.home, false).status, "python-missing");
+    f.as_extension();
+    let v = capture_view_for(&f.home, false);
+    assert_eq!((v.status.as_str(), v.python_missing), ("vscode", true));
+    let g = fx();
+    g.as_app("v1.16.1");
+    let v = capture_view_for(&g.home, false);
+    assert_eq!((v.status.as_str(), v.python_missing), ("app", true));
+    // Set up refuses either way: already set up.
+    let e = set_up_capture_with(&g.home, &g.cfg, false).unwrap_err();
+    assert!(e.contains("already set up"), "{e}");
+}
+
+#[test]
+fn marker_with_an_unstamped_hook_is_the_extensions() {
+    // The app set up, then the extension replaced hook.py (it carries no stamp).
+    let f = fx();
+    f.as_app("v1.16.1");
+    fs::write(f.cg("hook.py"), "# the extension's hook, unstamped\n").unwrap();
+    assert_eq!(read_status(&f.home, true), CaptureStatus::SetUpByExtension { python_missing: false });
+    let v = capture_view_for(&f.home, true);
+    assert_eq!((v.status.as_str(), v.taken_over), ("vscode", true));
+    let e = set_up_capture_with(&f.home, &f.cfg, true).unwrap_err();
+    assert!(e.contains("VS Code"), "{e}");
+}
+
+#[test]
+fn marker_without_hook_py_stays_the_apps() {
+    let f = fx();
+    f.as_app("v1.16.1");
+    fs::remove_file(f.cg("hook.py")).unwrap();
+    assert_eq!(capture_view_for(&f.home, true).status, "app");
 }
 
 #[test]
@@ -127,7 +169,7 @@ fn status_reads_home_not_claudegate_home() {
     std::env::set_var("CLAUDEGATE_HOME", &other);
     let s = read_status(&f.home, true);
     std::env::remove_var("CLAUDEGATE_HOME");
-    assert_eq!(s, CaptureStatus::SetUpByExtension);
+    assert_eq!(s, CaptureStatus::SetUpByExtension { python_missing: false });
 }
 
 // ---- python3 detection -----------------------------------------------------------------------
@@ -241,8 +283,8 @@ fn leftover_hook_files_get_clear_messages() {
 
 #[test]
 fn already_set_up_text_names_who() {
-    assert!(install_error_text(&InstallError::AlreadySetUp(CaptureStatus::SetUpByExtension)).contains("VS Code"));
-    let t = install_error_text(&InstallError::AlreadySetUp(CaptureStatus::SetUpByApp { version: None }));
+    assert!(install_error_text(&InstallError::AlreadySetUp(CaptureStatus::SetUpByExtension { python_missing: false })).contains("VS Code"));
+    let t = install_error_text(&InstallError::AlreadySetUp(CaptureStatus::SetUpByApp { version: None, python_missing: false }));
     assert!(t.contains("this app") && !t.contains("SetUpByApp"), "{t}");
 }
 
@@ -298,6 +340,13 @@ fn update_skips_when_not_newer() {
     let h = fx();
     h.as_app("not a version");
     assert_untouched(&h, || update_hook_with(&h.home, &h.cfg, true));
+    // The installed hook's own stamp decides: newer or unparsable is never replaced.
+    for stamp in ["v99.0.0", "not a version"] {
+        let k = fx();
+        k.as_app("v1.0.0");
+        fs::write(k.cg("hook.py"), format!("# CLAUDEGATE_HOOK_VERSION={stamp}\n")).unwrap();
+        assert_untouched(&k, || update_hook_with(&k.home, &k.cfg, true));
+    }
 }
 
 #[test]
@@ -322,8 +371,24 @@ fn update_skips_when_the_entry_is_gone() {
     // Marker left behind, settings entry removed: the status is NotSetUp, not ours to update.
     let f = fx();
     f.as_app("v1.0.0");
+    f.old_hook();
     f.write_settings("{}");
     assert_untouched(&f, || update_hook_with(&f.home, &f.cfg, true));
+}
+
+#[test]
+fn update_compares_with_the_installed_stamp_not_the_marker() {
+    // Marker says old, but hook.py is already the bundled version: nothing to do.
+    let f = fx();
+    f.as_app("v1.0.0");
+    assert_untouched(&f, || update_hook_with(&f.home, &f.cfg, true));
+    // Marker says current, but hook.py is stamped older: update it.
+    let g = fx();
+    g.as_app(&bundled());
+    fs::write(g.cg("hook.py"), "# CLAUDEGATE_HOOK_VERSION=v1.2.0\n").unwrap();
+    let r = update_hook_with(&g.home, &g.cfg, true).unwrap();
+    assert_eq!(r, HookUpdate::Updated { from: "v1.2.0".into(), to: bundled() });
+    assert_eq!(fs::read_to_string(g.cg("hook.py")).unwrap(), BUNDLED_HOOK);
 }
 
 #[test]
@@ -348,11 +413,13 @@ fn update_skips_a_missing_hook_py() {
 fn update_is_blocked_by_read_only_and_an_unreadable_config() {
     let f = fx();
     f.as_app("v1.0.0");
+    f.old_hook();
     save_read_only(&f.cfg, true, None).unwrap();
     assert_untouched(&f, || update_hook_with(&f.home, &f.cfg, true));
 
     let g = fx();
     g.as_app("v1.0.0");
+    g.old_hook();
     fs::create_dir_all(g.cfg.parent().unwrap()).unwrap();
     fs::write(&g.cfg, "{ nope").unwrap();
     assert_untouched(&g, || update_hook_with(&g.home, &g.cfg, true));
@@ -362,6 +429,7 @@ fn update_is_blocked_by_read_only_and_an_unreadable_config() {
 fn update_skips_when_python_is_missing() {
     let f = fx();
     f.as_app("v1.0.0");
+    fs::write(f.cg("hook.py"), "# CLAUDEGATE_HOOK_VERSION=v1.0.0\n").unwrap();
     assert_untouched(&f, || update_hook_with(&f.home, &f.cfg, false));
 }
 
@@ -374,4 +442,51 @@ fn update_keeps_hook_py_mode() {
     fs::set_permissions(f.cg("hook.py"), fs::Permissions::from_mode(0o640)).unwrap();
     assert!(matches!(update_hook_with(&f.home, &f.cfg, true).unwrap(), HookUpdate::Updated { .. }));
     assert_eq!(fs::metadata(f.cg("hook.py")).unwrap().permissions().mode() & 0o777, 0o640);
+}
+
+// ---- python3 resolution ----------------------------------------------------------------------
+
+fn exec_set(paths: &'static [&'static str]) -> impl Fn(&Path) -> bool {
+    move |p: &Path| paths.iter().any(|x| Path::new(x) == p)
+}
+
+#[test]
+fn python3_is_found_on_path_then_in_the_fallback_dirs() {
+    let path = std::ffi::OsString::from("/opt/py/bin:/usr/bin");
+    let home = Path::new("/home/u");
+    let found = pick_python3(Some(&path), Some(home), &exec_set(&["/opt/py/bin/python3", "/usr/bin/python3"]), false, &|| true);
+    assert_eq!(found.as_deref(), Some(Path::new("/opt/py/bin/python3")));
+    // A GUI PATH without it: the usual install dirs are searched after PATH.
+    let bare = std::ffi::OsString::from("/usr/sbin");
+    let found = pick_python3(Some(&bare), Some(home), &exec_set(&["/home/u/.local/bin/python3"]), false, &|| true);
+    assert_eq!(found.as_deref(), Some(Path::new("/home/u/.local/bin/python3")));
+    let found = pick_python3(Some(&bare), Some(home), &exec_set(&["/opt/homebrew/bin/python3"]), false, &|| true);
+    assert_eq!(found.as_deref(), Some(Path::new("/opt/homebrew/bin/python3")));
+    assert_eq!(pick_python3(None, None, &exec_set(&[]), false, &|| true), None);
+}
+
+#[test]
+fn macos_usr_bin_python3_needs_the_command_line_tools() {
+    let path = std::ffi::OsString::from("/usr/bin:/bin");
+    let only_stub = exec_set(&["/usr/bin/python3"]);
+    let asked = std::cell::Cell::new(0);
+    let no_clt = || {
+        asked.set(asked.get() + 1);
+        false
+    };
+    assert_eq!(pick_python3(Some(&path), None, &only_stub, true, &no_clt), None, "the stub would open an install dialog");
+    assert!(asked.get() >= 1);
+    assert_eq!(
+        pick_python3(Some(&path), None, &only_stub, true, &|| true).as_deref(),
+        Some(Path::new("/usr/bin/python3"))
+    );
+    // Not macOS: /usr/bin/python3 is a plain python, and the check is never asked.
+    let never = || panic!("xcode-select asked off macOS");
+    assert_eq!(pick_python3(Some(&path), None, &only_stub, false, &never).as_deref(), Some(Path::new("/usr/bin/python3")));
+    // A brew python later on the list is still found on macOS.
+    let both = exec_set(&["/usr/bin/python3", "/opt/homebrew/bin/python3"]);
+    assert_eq!(
+        pick_python3(Some(&path), None, &both, true, &|| false).as_deref(),
+        Some(Path::new("/opt/homebrew/bin/python3"))
+    );
 }

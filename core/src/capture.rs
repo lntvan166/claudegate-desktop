@@ -12,9 +12,11 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureStatus {
-    SetUpByExtension,
+    /// `python_missing`: a warning only. The hook runs under Claude Code's environment, where
+    /// python3 may well be found even though this app could not find it.
+    SetUpByExtension { python_missing: bool },
     /// `version` is None when the caller has not read the marker's content.
-    SetUpByApp { version: Option<String> },
+    SetUpByApp { version: Option<String>, python_missing: bool },
     NotSetUp,
     SettingsUnreadable(String),
     PythonMissing,
@@ -34,16 +36,17 @@ fn registered(settings: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// Precedence: PythonMissing, SettingsUnreadable, registered+marker, registered, NotSetUp.
-/// `settings_text: None` is a missing file; an empty/whitespace file counts as missing
+/// Precedence: SettingsUnreadable; registered+marker (`SetUpByApp`); registered
+/// (`SetUpByExtension`); then, with no hook registered, PythonMissing; NotSetUp. A registered
+/// hook outranks a missing python3, which only sets the `python_missing` warning there.
+/// `marker` means "this app owns the setup": callers pass `app_owns_hook`, not the marker's mere
+/// presence. `settings_text: None` is a missing file; an empty/whitespace file counts as missing
 /// too (the extension's installer treats it as a fresh install). Strict JSON only.
 pub fn capture_status(settings_text: Option<&str>, marker: bool, python3: bool) -> CaptureStatus {
-    if !python3 {
-        return CaptureStatus::PythonMissing;
-    }
-    let Some(text) = settings_text else { return CaptureStatus::NotSetUp };
+    let not_set_up = if python3 { CaptureStatus::NotSetUp } else { CaptureStatus::PythonMissing };
+    let Some(text) = settings_text else { return not_set_up };
     if text.trim().is_empty() {
-        return CaptureStatus::NotSetUp;
+        return not_set_up;
     }
     let parsed: Value = match serde_json::from_str(text) {
         Ok(v) => v,
@@ -52,11 +55,20 @@ pub fn capture_status(settings_text: Option<&str>, marker: bool, python3: bool) 
     if !parsed.is_object() {
         return CaptureStatus::SettingsUnreadable("not a JSON object".to_string());
     }
+    let python_missing = !python3;
     match (registered(&parsed), marker) {
-        (true, true) => CaptureStatus::SetUpByApp { version: None },
-        (true, false) => CaptureStatus::SetUpByExtension,
-        _ => CaptureStatus::NotSetUp,
+        (true, true) => CaptureStatus::SetUpByApp { version: None, python_missing },
+        (true, false) => CaptureStatus::SetUpByExtension { python_missing },
+        _ => not_set_up,
     }
+}
+
+/// Whether this app owns the hook setup: the marker exists, and the installed hook.py (when there
+/// is one) carries the `CLAUDEGATE_HOOK_VERSION` stamp this app's copy has. The extension's
+/// hook.py has none, so a marker next to an unstamped hook.py means the extension has since
+/// replaced the hook. The same test gates the startup update.
+pub fn app_owns_hook(marker: bool, hook_py: Option<&[u8]>) -> bool {
+    marker && hook_py.is_none_or(|b| bundled_hook_version(&String::from_utf8_lossy(b)).is_some())
 }
 
 /// The `PreToolUse` matcher the extension registers (`PRE_TOOL_MATCHER`).

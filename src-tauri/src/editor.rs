@@ -124,7 +124,7 @@ pub fn resolve_with_bundles(
     resolve_program(program, path_var, extra, is_exec).or_else(|| bundled.iter().find(|b| is_exec(b)).cloned())
 }
 
-fn is_executable(p: &Path) -> bool {
+pub fn is_executable(p: &Path) -> bool {
     let Ok(m) = std::fs::metadata(p) else { return false };
     if !m.is_file() {
         return false;

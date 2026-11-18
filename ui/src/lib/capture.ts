@@ -9,6 +9,10 @@ export type CaptureView = {
   version: string | null;
   /** Why, for `settings-unreadable`. */
   note: string | null;
+  /** For `vscode`/`app`: python3 wasn't found from this app (a warning; capture may still work). */
+  pythonMissing: boolean;
+  /** For `vscode`: this app set capture up and the extension has since replaced the hook. */
+  takenOver: boolean;
 };
 
 export type InstallView = {
@@ -34,8 +38,9 @@ const LABELS: Record<CaptureStatus, string> = {
   "python-missing": "Capture: python3 not found",
 };
 
-export function chipLabel(v: CaptureView | null): string {
-  if (!v) return "Capture: checking…";
+/** `failed`: the status could not be read at all (shown instead of "checking…" forever). */
+export function chipLabel(v: CaptureView | null, failed = false): string {
+  if (!v) return failed ? "Capture: couldn't check" : "Capture: checking…";
   return LABELS[v.status] ?? "Capture: unknown";
 }
 
@@ -47,6 +52,9 @@ export function capturing(v: CaptureView | null): boolean {
 export function detail(v: CaptureView): string {
   switch (v.status) {
     case "vscode":
+      if (v.takenOver) {
+        return "The VS Code extension now manages the hook. This app set capture up first; the extension has since replaced its hook, and keeps it up to date.";
+      }
       return "The ClaudeGate VS Code extension set up the hook, so Claude Code's edits are captured. The extension keeps it up to date.";
     case "app":
       return `This app set up the hook${v.version ? ` (${v.version})` : ""}, so Claude Code's edits are captured. The app updates its own hook when it starts.`;
@@ -74,7 +82,14 @@ export function canSetUp(v: CaptureView | null, readOnly: boolean): boolean {
 }
 
 export function canRecheck(v: CaptureView | null): boolean {
-  return !!v && !capturing(v);
+  return !!v && (!capturing(v) || v.pythonMissing);
+}
+
+/** The note next to "Capturing (…)" when this app could not find python3. */
+export function pythonWarning(v: CaptureView | null): string | null {
+  return capturing(v) && v?.pythonMissing
+    ? "python3 wasn't found from this app; capture runs under Claude Code's environment, so it may still work"
+    : null;
 }
 
 export type SetupResult = { tone: "success" | "warning"; text: string };
