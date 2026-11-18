@@ -7,7 +7,7 @@ import {
   rejectEntry,
   type MergeGuards,
 } from "../.xcheck-cache/claudegate/src/reviewModel";
-import { ExcludeMatcher } from "../.xcheck-cache/claudegate/src/excludeMatcher";
+import { DEFAULT_EXCLUDES, DEFAULT_PROTECTED, ExcludeMatcher } from "../.xcheck-cache/claudegate/src/excludeMatcher";
 
 const root = path.resolve(__dirname, "..");
 const fixtures = path.join(root, "fixtures");
@@ -74,6 +74,34 @@ for (const f of mergeFiles) {
   }
   const d = firstDiff(JSON.parse(JSON.stringify(got)), fx.expected);
   if (d) fail(`merge ${f}: ${d}`);
+}
+
+// Settings defaults: the constants copied into core/src/settings.rs must equal the extension's.
+{
+  const rs = fs.readFileSync(path.join(root, "core", "src", "settings.rs"), "utf8");
+  const rsList = (name: string): string[] => {
+    const m = rs.match(new RegExp(`pub const ${name}: &\\[&str\\] = &\\[([^\\]]*)\\];`));
+    return m ? [...m[1].matchAll(/"([^"]*)"/g)].map((x) => x[1]) : [];
+  };
+  const rsScalar = (name: string): string | undefined => rs.match(new RegExp(`pub const ${name}: \\w+ = ([^;]+);`))?.[1].trim();
+  const extPkg = JSON.parse(fs.readFileSync(path.join(root, ".xcheck-cache", "claudegate", "package.json"), "utf8"));
+  const props = extPkg.contributes.configuration.properties;
+  const keysOf = (o: Record<string, boolean>) => Object.keys(o).filter((k) => o[k]);
+  const same = (name: string, a: unknown, b: unknown) => {
+    if (JSON.stringify(a) !== JSON.stringify(b)) fail(`settings default ${name}: core=${JSON.stringify(a)}, extension=${JSON.stringify(b)}`);
+  };
+  same("DEFAULT_EXCLUDES", rsList("DEFAULT_EXCLUDES"), DEFAULT_EXCLUDES);
+  same("DEFAULT_PROTECTED", rsList("DEFAULT_PROTECTED"), DEFAULT_PROTECTED);
+  same("package.json claudegate.exclude", keysOf(props["claudegate.exclude"].default), DEFAULT_EXCLUDES);
+  same("package.json claudegate.protected", keysOf(props["claudegate.protected"].default), DEFAULT_PROTECTED);
+  const scalars: [string, string][] = [
+    ["DEFAULT_AUTO_ADVANCE", "claudegate.autoAdvance"],
+    ["DEFAULT_GROUP_BY_SESSION", "claudegate.groupBySession"],
+    ["DEFAULT_PENDING_AGE_MIN_DAYS", "claudegate.pendingAge.minDays"],
+    ["DEFAULT_MAX_ATTACHED", "claudegate.worktrees.maxAttached"],
+    ["DEFAULT_HOOK_LOG", "claudegate.hookLog.enabled"],
+  ];
+  for (const [c, k] of scalars) same(c, rsScalar(c), String(props[k].default));
 }
 
 if (failures) {

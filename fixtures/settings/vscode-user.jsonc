@@ -1,0 +1,14 @@
+// VS Code user settings (JSONC)
+{
+  "editor.fontSize": 14, // trailing comment
+  /* block
+     comment */
+  "files.exclude": { "**/x": true, },
+  "url": "http://example.com/a//b", // // inside a string is kept
+  "claudegate.autoAdvance": false,
+  "claudegate.pendingAge.minDays": 3,
+  "claudegate.exclude": {
+    "**/*.log": true,
+    "**/off": false,
+  },
+}

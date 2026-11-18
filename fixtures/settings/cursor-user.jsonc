@@ -1,0 +1,5 @@
+{
+  "claudegate.groupBySession": true,
+  "claudegate.autoAdvance": true,
+  "claudegate.worktrees.maxAttached": 8,
+}
