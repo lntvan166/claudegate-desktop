@@ -34,7 +34,7 @@ fn home_and_windows_forms_are_registered() {
 fn marker_means_app() {
     assert_eq!(
         capture_status(Some(&settings("x", CMD)), true, true),
-        CaptureStatus::SetUpByApp { version: String::new() }
+        CaptureStatus::SetUpByApp { version: None }
     );
 }
 
@@ -85,4 +85,29 @@ fn unreadable_wins_over_marker() {
 #[test]
 fn empty_file_is_not_set_up() {
     assert_eq!(capture_status(Some("  \n"), false, true), CaptureStatus::NotSetUp);
+}
+
+#[test]
+fn any_claudegate_mention_in_pretooluse_counts() {
+    for c in [
+        "\\\"/home/u/.claudegate/hook.sh\\\"",
+        "/home/u/.claudegate/hook.sh --verbose",
+        "/home/u/.claudegate/hook.sh  ",
+        "C:/Users/u/.claudegate/hook.bat",
+        "python3 ~/.claudegate/hook.py",
+    ] {
+        assert_eq!(
+            capture_status(Some(&settings("x", c)), false, true),
+            CaptureStatus::SetUpByExtension,
+            "{c}"
+        );
+    }
+}
+
+#[test]
+fn unrelated_hook_is_not_ours() {
+    assert_eq!(
+        capture_status(Some(&settings("Write", "prettier --write")), false, true),
+        CaptureStatus::NotSetUp
+    );
 }

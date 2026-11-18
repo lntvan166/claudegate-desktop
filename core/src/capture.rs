@@ -6,17 +6,13 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureStatus {
     SetUpByExtension,
-    /// `version` is empty when the caller has not read the marker's content.
-    SetUpByApp { version: String },
+    /// `version` is None when the caller has not read the marker's content.
+    SetUpByApp { version: Option<String> },
     NotSetUp,
     SettingsUnreadable(String),
     PythonMissing,
 }
 
-/// A ClaudeGate wrapper command: absolute, `$HOME` or `~` form, `.sh` or `.bat`.
-fn is_ours(command: &str) -> bool {
-    command.ends_with("/.claudegate/hook.sh") || command.ends_with("\\.claudegate\\hook.bat")
-}
 
 fn registered(settings: &Value) -> bool {
     settings
@@ -24,12 +20,9 @@ fn registered(settings: &Value) -> bool {
         .and_then(|h| h.get("PreToolUse"))
         .and_then(Value::as_array)
         .map(|entries| {
-            entries.iter().any(|e| {
-                e.get("hooks").and_then(Value::as_array).is_some_and(|hs| {
-                    hs.iter()
-                        .any(|h| h.get("command").and_then(Value::as_str).is_some_and(is_ours))
-                })
-            })
+            // Same test as the extension's `isOurs`: JSON.stringify(entry).includes("claudegate").
+            // Lean wide: a false negative would let the app install a duplicate entry.
+            entries.iter().any(|e| e.to_string().contains("claudegate"))
         })
         .unwrap_or(false)
 }
@@ -53,7 +46,7 @@ pub fn capture_status(settings_text: Option<&str>, marker: bool, python3: bool) 
         return CaptureStatus::SettingsUnreadable("not a JSON object".to_string());
     }
     match (registered(&parsed), marker) {
-        (true, true) => CaptureStatus::SetUpByApp { version: String::new() },
+        (true, true) => CaptureStatus::SetUpByApp { version: None },
         (true, false) => CaptureStatus::SetUpByExtension,
         _ => CaptureStatus::NotSetUp,
     }
