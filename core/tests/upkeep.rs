@@ -206,7 +206,7 @@ fn settled_no_ops_are_pruned_and_young_ones_kept() {
     want.sort();
     assert_eq!(files_of(&s), want);
     assert_eq!(s["excludeCleanupDone"], json!(true));
-    assert_eq!(fx.backups(&fx.ws), 1, "one write, one backup");
+    assert_eq!(fx.backups(&fx.ws), 0, "settled no-ops and the latch only: no backup");
 }
 
 #[test]
@@ -223,7 +223,7 @@ fn a_second_run_writes_nothing() {
     let r = upkeep(&fx.paths, &fx.ws, &owned(), T0 + 1_000);
     assert_eq!(fx.raw(&fx.ws), after_first);
     assert!(r.scopes.iter().all(|s| !s.written), "{r:?}");
-    assert_eq!(fx.backups(&fx.ws), 1);
+    assert_eq!(fx.backups(&fx.ws), 0);
 }
 
 #[test]
@@ -470,4 +470,87 @@ fn a_hook_capture_landing_mid_upkeep_survives() {
     let s = fx.session(&fx.ws);
     assert_eq!(files_of(&s), vec![fresh.clone()], "the capture survives; the pruned entry stays pruned");
     assert!(!files_of(&s).contains(&same_path_recaptured));
+}
+
+// ---------------------------------------------------------------- backups (fix round 1)
+
+fn latched(files: Value, accepted: Value) -> Value {
+    let mut v = sess(files, accepted);
+    v["excludeCleanupDone"] = json!(true);
+    v
+}
+
+#[test]
+fn a_no_op_only_prune_makes_no_backup() {
+    let fx = Fx::new();
+    let old = fx.file("old.ts", "a");
+    fx.write_session(&fx.ws, &latched(json!({ old: entry(Some("a"), Some(ago(60_000))) }), json!([])));
+    let r = upkeep(&fx.paths, &fx.ws, &owned(), T0);
+    assert!(r.wrote());
+    assert!(files_of(&fx.session(&fx.ws)).is_empty());
+    assert_eq!(fx.backups(&fx.ws), 0);
+}
+
+#[test]
+fn the_excluded_sweep_makes_a_backup() {
+    let fx = Fx::new();
+    let dep = fx.file("node_modules/x.js", "2");
+    fx.write_session(&fx.ws, &sess(json!({ dep: entry(Some("1"), Some(ago(5))) }), json!([])));
+    upkeep(&fx.paths, &fx.ws, &owned(), T0);
+    assert!(files_of(&fx.session(&fx.ws)).is_empty());
+    assert_eq!(fx.backups(&fx.ws), 1);
+}
+
+#[test]
+fn the_outside_prune_makes_a_backup() {
+    let fx = Fx::new();
+    let outside = fx._tmp.path().join("elsewhere.ts");
+    fs::write(&outside, "2").unwrap();
+    let outside = outside.to_string_lossy().into_owned();
+    fx.write_session(&fx.ws, &latched(json!({ outside: entry(Some("1"), Some(ago(5))) }), json!([])));
+    upkeep(&fx.paths, &fx.ws, &owned(), T0);
+    assert!(files_of(&fx.session(&fx.ws)).is_empty());
+    assert_eq!(fx.backups(&fx.ws), 1);
+}
+
+#[test]
+fn the_byte_trim_makes_a_backup() {
+    let fx = Fx::new();
+    let recs: Vec<Value> = (0..25).map(|i| big_record(i, 100_000)).collect();
+    fx.write_session(&fx.ws, &latched(json!({}), json!(recs)));
+    let r = upkeep(&fx.paths, &fx.ws, &owned(), T0);
+    assert!(r.scopes[0].trimmed_accepted > 0);
+    assert_eq!(fx.backups(&fx.ws), 1);
+}
+
+// ---------------------------------------------------------------- non-UTF-8 files (M5)
+
+#[test]
+fn binary_files_are_judged_as_unreadable_like_the_extension() {
+    let fx = Fx::new();
+    // An existing text file Claude turned binary: disk reads as null, a real change, kept.
+    let edited = fx.ws.join("img.dat");
+    fs::write(&edited, [0xff, 0xfe, 0x00, 0x80]).unwrap();
+    let edited = edited.to_string_lossy().into_owned();
+    // Binary new files: null baseline and null disk is a no-op, pruned only after 45 s.
+    let new_old = fx.ws.join("new-old.bin");
+    let new_young = fx.ws.join("new-young.bin");
+    fs::write(&new_old, [0xc3, 0x28]).unwrap();
+    fs::write(&new_young, [0xc3, 0x28]).unwrap();
+    let (new_old, new_young) = (new_old.to_string_lossy().into_owned(), new_young.to_string_lossy().into_owned());
+    fx.write_session(
+        &fx.ws,
+        &latched(
+            json!({
+                edited.clone(): entry(Some("text"), Some(ago(10_000_000))),
+                new_old.clone(): entry(None, Some(ago(45_001))),
+                new_young.clone(): entry(None, Some(ago(30_000))),
+            }),
+            json!([]),
+        ),
+    );
+    upkeep(&fx.paths, &fx.ws, &owned(), T0);
+    let mut want = vec![edited, new_young];
+    want.sort();
+    assert_eq!(files_of(&fx.session(&fx.ws)), want);
 }

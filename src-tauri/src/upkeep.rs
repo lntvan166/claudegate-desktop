@@ -109,13 +109,11 @@ fn run_now(app: &tauri::AppHandle, root: &str) {
     run_upkeep_with(&lock.0, &paths, &cfg, root, max, claudegate_core::time::now_ms());
 }
 
-/// Upkeep `root` soon, if the app owns it, within the rate limit. Never blocks the caller.
+/// Upkeep `root` soon, within the rate limit, if the app owns it. Never blocks the caller and does
+/// no I/O on its thread (the watcher's or a command's): ownership is read from the config by the
+/// job on the blocking pool, behind the debouncer, so a burst of events costs one config read.
 pub fn trigger(app: &tauri::AppHandle, root: &str) {
     use tauri::Manager;
-    let cfg = crate::config::config_path();
-    if !crate::config::project_record(&cfg, root).owned() {
-        return;
-    }
     let state = app.state::<UpkeepState>().inner().clone();
     let plan = state.0.lock().map(|mut d| d.plan(root, Instant::now())).unwrap_or(Plan::Skip);
     let (app, root) = (app.clone(), root.to_owned());

@@ -131,7 +131,16 @@ pub fn upkeep_with(
                 if changed {
                     before_persist(&file);
                     let store = StorePaths { home: paths.home.clone(), desktop_home: paths.desktop_home.clone(), session_file: file };
-                    match persist(&store, session, &guards, true) {
+                    // Backups share one 50-slot ring per session with decisions. Settled no-op
+                    // prunes are frequent and lose nothing (the file on disk equals the baseline,
+                    // or a promised new file never landed), and the latch is just a flag, so a
+                    // write doing only those takes no backup; otherwise routine upkeep would rotate
+                    // the decision backups out within hours. Pruning an outside or excluded entry
+                    // drops a baseline, and the byte trim drops accepted records: those cannot be
+                    // re-derived, so those writes are backed up.
+                    let take_backup =
+                        !su.pruned_outside.is_empty() || !su.pruned_excluded.is_empty() || su.trimmed_accepted > 0;
+                    match persist(&store, session, &guards, take_backup) {
                         Ok(_) => su.written = true,
                         Err(e) => su.error = Some(e.to_string()),
                     }
