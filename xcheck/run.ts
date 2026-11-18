@@ -146,6 +146,16 @@ for (const f of upkeepFiles) {
   for (const [c, k] of scalars) same(c, rsScalar(c), String(props[k].default));
 }
 
+// The bundled hook is committed, not fetched at build time: it must equal the pinned tag's
+// hooks/hook.py once the CLAUDEGATE_HOOK_VERSION stamp line is removed.
+{
+  const stampRe = /^# CLAUDEGATE_HOOK_VERSION=.*\n/m;
+  const bundled = fs.readFileSync(path.join(root, "src-tauri", "resources", "hook.py"), "utf8");
+  const pinned = fs.readFileSync(path.join(root, ".xcheck-cache", "claudegate", "hooks", "hook.py"), "utf8");
+  if (!stampRe.test(bundled)) fail("bundled hook.py has no CLAUDEGATE_HOOK_VERSION stamp");
+  else if (bundled.replace(stampRe, "") !== pinned) fail("bundled hook.py differs from the pinned tag's hooks/hook.py (ignoring the stamp line)");
+}
+
 if (failures) {
   console.error(`${failures} mismatch(es)`);
   process.exit(1);
