@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import ActionBar from "./components/ActionBar.svelte";
   import DiffView from "./components/DiffView.svelte";
   import FileTree from "./components/FileTree.svelte";
   import ProjectList from "./components/ProjectList.svelte";
   import ResultBar from "./components/ResultBar.svelte";
+  import Settings from "./components/Settings.svelte";
   import ReviewTabs from "./components/ReviewTabs.svelte";
   import Shortcuts from "./components/Shortcuts.svelte";
   import Splitter from "./components/Splitter.svelte";
@@ -13,6 +14,11 @@
     decide,
     getConfig,
     getProject,
+    getSettings,
+    setExtraHide,
+    setHookLog,
+    setSetting,
+    type SettingKey,
     listProjects,
     onChanged,
     openInEditor,
@@ -66,6 +72,15 @@
   } from "./lib/panes";
   import { headerTotal, projectLine } from "./lib/counts";
   import { collapseKeysToReveal, fileOrder, visibleItems } from "./lib/visible";
+  import {
+    DEFAULT_SETTINGS,
+    globMatcher,
+    groupsBySession,
+    hideExtra,
+    protectedAmong,
+    protectPrompt,
+    type SettingsView,
+  } from "./lib/settings";
 
   const STORE_KEY = "claudegate.selectedProject";
 
@@ -73,8 +88,26 @@
   let loadingList = $state(true);
   let listError = $state<string | null>(null);
   let selected = $state<string | null>(null);
-  let view = $state<ProjectView | null>(null);
+  /** The project as fetched; `view` is it without the app-only hidden rows. */
+  let rawView = $state<ProjectView | null>(null);
   let viewError = $state<string | null>(null);
+  /** Every setting as it resolves for the selected project (`settingsFor` is that project). */
+  let settings = $state<SettingsView>(DEFAULT_SETTINGS);
+  let settingsFor = $state<string | null>(null);
+  let settingsOpen = $state(false);
+  let settingsButton: HTMLButtonElement | undefined = $state();
+  /** The selected project's app-only hide patterns, once its settings have loaded. */
+  const extraHide = $derived(settingsFor === selected ? settings.extraHide : []);
+  const view = $derived(rawView ? hideExtra(rawView, extraHide) : null);
+  const bySession = $derived(settings.groupBySession.value);
+  /** The tab's groups: by scope, or by Claude session when that setting is on. */
+  function groupsOf(v: ProjectView, kind: DiffKind) {
+    return bySession ? groupsBySession(v, kind) : groupsFor(v, kind);
+  }
+  const isProtected = $derived(globMatcher(view?.root ?? "", settings.protected.value));
+  /** An accept of protected files waiting for its answer. */
+  let protectAsk = $state<{ text: string; go: () => void } | null>(null);
+  let protectEl: HTMLDivElement | undefined = $state();
   let tab = $state<DiffKind>("pending");
   let mode = $state<"tree" | "list">("tree");
   let selectedRow = $state<Row | null>(null);
@@ -118,6 +151,8 @@
   /** Narrow only: the selected file's diff covers the list, full height, until Back or Esc. */
   let narrowDiff = $state(false);
   const narrowDiffOpen = $derived(narrow && narrowDiff && !!selectedRow);
+  /** Narrow only: settings, like a diff, take the full height. */
+  const narrowFull = $derived(narrowDiffOpen || (narrow && settingsOpen));
   const diffShown = $derived(!narrow || narrowDiffOpen);
   // The file left the list (decided, or gone): back to the list, never an empty full-height pane.
   $effect(() => {
@@ -174,7 +209,7 @@
     accepted: view?.accepted.length ?? 0,
     rejected: view?.rejected.length ?? 0,
   });
-  const groups = $derived(view ? groupsFor(view, tab) : []);
+  const groups = $derived(view ? groupsOf(view, tab) : []);
   /** The screen's one finding: what is pending, what isn't written yet, for how long. */
   const finding = $derived(
     !view || view.missing
@@ -233,14 +268,14 @@
     try {
       const v = await getProject(root);
       if (seq !== viewSeq || root !== selected) return v;
-      view = v;
+      rawView = v;
       viewError = null;
       viewVersion++;
       patchSummary(v);
       if (selectedRow) {
         // Keep the selection on the fresh row object so its counts update; drop it if it is gone.
         const key = selectedRow.key;
-        selectedRow = groupsFor(v, tab).flatMap((g) => g.rows).find((r) => r.key === key) ?? null;
+        selectedRow = groupsOf(hideExtra(v, extraHide), tab).flatMap((g) => g.rows).find((r) => r.key === key) ?? null;
       }
       return v;
     } catch (e) {
@@ -286,10 +321,12 @@
       case "select":
         select(next.root);
         if (usingMock) void previewRow();
+        // Dev preview only: `#settings` opens the Settings screen, for screenshots and the inspector.
+        if (usingMock && new URLSearchParams(location.hash.slice(1)).has("settings")) openSettings();
         break;
       case "clear":
         selected = null;
-        view = null;
+        rawView = null;
         break;
     }
   }
@@ -298,7 +335,7 @@
     viewError = null;
     if (root !== selected) {
       selected = root;
-      view = null;
+      rawView = null;
       selectedRow = null;
       result = null;
       settingsBlocked = null;
@@ -314,7 +351,7 @@
     const want = new URLSearchParams(location.hash.slice(1)).get("row");
     if (!want || !selected) return;
     await loadView(selected);
-    const row = view ? groupsFor(view, "pending").flatMap((g) => g.rows).find((r) => r.path.endsWith(want)) : undefined;
+    const row = view ? groupsOf(view, "pending").flatMap((g) => g.rows).find((r) => r.path.endsWith(want)) : undefined;
     if (row) selectedRow = row;
   }
 
@@ -345,7 +382,7 @@
   /** Selects the pending row with `key` in `v` (a fresh fetch), unfolding whatever hides it. */
   function selectPending(v: ProjectView | null, key: string) {
     if (!v || tab !== "pending") return;
-    const row = groupsFor(v, "pending").flatMap((g) => g.rows).find((r) => r.key === key);
+    const row = groupsOf(hideExtra(v, extraHide), "pending").flatMap((g) => g.rows).find((r) => r.key === key);
     if (!row) return;
     for (const k of collapseKeysToReveal(row, "pending", collapsed)) collapsed.delete(k);
     selectedRow = row;
@@ -408,10 +445,19 @@
   async function runDecide(
     action: DecideAction,
     target: DecideTarget,
-    opts: { row?: Row | null; reselect?: string; note?: string } = {},
+    opts: { row?: Row | null; reselect?: string; note?: string; protectedOk?: boolean } = {},
   ) {
     const root = selected;
     if (busy || !root || !view) return;
+    // Accepting a file that looks like a secret asks first, wherever the accept came from.
+    if (action === "accept" && !opts.protectedOk) {
+      const paths = target.kind === "file" ? [target.key] : (target.keys ?? []);
+      const hits = protectedAmong(paths, view.root, settings.protected.value);
+      if (hits.length > 0) {
+        void askProtect(protectPrompt(hits), () => void runDecide(action, target, { ...opts, protectedOk: true }));
+        return;
+      }
+    }
     // A capture whose write has not landed has nothing to decide yet; the controls say so too.
     if (target.kind === "file" && (action === "accept" || action === "reject")) {
       const item = view.pending.find((p) => p.path === target.key && p.scope === target.scope);
@@ -421,8 +467,8 @@
       }
     }
     const advanceFrom =
-      target.kind === "file" && tab === "pending" && opts.row && opts.row.key === selectedRow?.key ? opts.row.key : null;
-    const nextKey = advanceFrom ? nextAfterDecision(fileOrder(groupsFor(view, "pending"), mode), advanceFrom) : null;
+      settings.autoAdvance.value && target.kind === "file" && tab === "pending" && opts.row && opts.row.key === selectedRow?.key ? opts.row.key : null;
+    const nextKey = advanceFrom ? nextAfterDecision(fileOrder(groupsOf(view, "pending"), mode), advanceFrom) : null;
     // Undo of an accept looks for a record stamped at or after this moment, never an older one.
     const since = new Date().toISOString();
     // A bulk or folder accept/reject: the confirmed rows, with their scopes, for its Undo.
@@ -530,10 +576,117 @@
     else settingsBlocked = null;
   }
 
+  const showGroups = $derived(bySession || (view?.scopes.length ?? 0) > 1);
+
+  /** Shows the inline "looks like a secret" question; `go` runs the accept once it is answered yes. */
+  async function askProtect(text: string, go: () => void) {
+    protectReturn = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    protectAsk = { text, go };
+    await tick();
+    // Cancel is the safe default.
+    protectEl?.querySelector<HTMLButtonElement>("[data-cancel]")?.focus();
+  }
+  let protectReturn: HTMLElement | null = null;
+  function answerProtect(yes: boolean) {
+    const a = protectAsk;
+    protectAsk = null;
+    if (yes) a?.go();
+    else protectReturn?.focus();
+  }
+  function protectKeys(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      answerProtect(false);
+      return;
+    }
+    if (e.key !== "Tab" || !protectEl) return;
+    const b = [...protectEl.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+    const i = b.indexOf(document.activeElement as HTMLButtonElement);
+    b[e.shiftKey ? (i <= 0 ? b.length - 1 : i - 1) : i === b.length - 1 ? 0 : i + 1]?.focus();
+    e.preventDefault();
+  }
+  // Another project, another tab or decisions turned off: the question no longer applies.
+  $effect(() => {
+    void selected;
+    void tab;
+    if (!canDecide) protectAsk = null;
+  });
+  $effect(() => {
+    void selected;
+    void tab;
+    return () => (protectAsk = null);
+  });
+
+  async function loadSettings(root: string | null) {
+    try {
+      const s = await getSettings(root);
+      if (root !== selected) return;
+      settings = s;
+      settingsFor = root;
+    } catch {}
+  }
+  $effect(() => {
+    void loadSettings(selected);
+  });
+
+  /** Saves through `save`, keeps what it returns, and reloads what the change affects. */
+  async function applySettings(save: () => Promise<SettingsView>, what: string, reload = false): Promise<boolean> {
+    try {
+      const s = await save();
+      settings = s;
+      settingsFor = selected;
+      if (reload) {
+        if (selected) await loadView(selected);
+        void loadProjects();
+      }
+      return true;
+    } catch (e) {
+      show({ text: `Couldn't change ${what}: ${e}`, tone: "error" });
+      return false;
+    }
+  }
+  const SETTING_NAMES: Record<SettingKey, string> = {
+    autoAdvance: "auto-advance",
+    groupBySession: "grouping",
+    pendingAgeMinDays: "the age setting",
+    maxAttached: "the worktree limit",
+    protected: "the secret file patterns",
+  };
+  const changeSetting = (key: SettingKey, value: unknown) =>
+    applySettings(() => setSetting(key, value, selected), SETTING_NAMES[key], key === "maxAttached");
+  const changeHookLog = (on: boolean) => applySettings(() => setHookLog(on, selected), "the hook log");
+  const changeExtraHide = (patterns: string[]) =>
+    selected ? applySettings(() => setExtraHide(selected!, patterns), "the hidden patterns") : Promise.resolve(false);
+
+  function openSettings() {
+    settingsOpen = true;
+    void loadSettings(selected);
+  }
+  async function closeSettings() {
+    settingsOpen = false;
+    await tick();
+    settingsButton?.focus();
+  }
+
   const lineFor = (row: Row) => (row.key === selectedRow?.key ? firstLine : 1);
 
   function onKey(e: KeyboardEvent) {
     if (e.defaultPrevented || e.repeat && e.key === "o") return;
+    if ((e.ctrlKey || e.metaKey) && e.key === ",") {
+      e.preventDefault();
+      if (settingsOpen) void closeSettings();
+      else openSettings();
+      return;
+    }
+    // The settings screen answers Esc itself; review keys are off while it is open.
+    if (settingsOpen) {
+      if (e.key === "Escape" && !document.querySelector('[role="menu"], [data-confirm]')) {
+        e.preventDefault();
+        void closeSettings();
+      }
+      return;
+    }
     // Esc leaves the narrow full-height diff, wherever focus is (Monaco included), unless a menu
     // or a confirmation is up: Esc answers those first.
     if (e.key === "Escape" && narrow && narrowDiff && !document.querySelector('[role="menu"], [data-confirm]')) {
@@ -589,7 +742,7 @@
     if (!a || !view || view.missing) return;
     switch (a.type) {
       case "row": {
-        const files = visibleItems(groups, { mode, showGroups: view.scopes.length > 1, tab, collapsed }).filter(
+        const files = visibleItems(groups, { mode, showGroups, tab, collapsed }).filter(
           (i) => i.kind === "file",
         );
         const i = nextIndex(
@@ -601,7 +754,7 @@
         break;
       }
       case "pending": {
-        const order = fileOrder(groupsFor(view, "pending"), mode);
+        const order = fileOrder(groupsOf(view, "pending"), mode);
         const cur = tab === "pending" ? order.findIndex((r) => r.key === selectedRow?.key) : -1;
         const i = nextIndex(cur, order.length, a.dir);
         if (i < 0) break;
@@ -677,6 +830,23 @@
 
 <svelte:window bind:innerWidth />
 
+{#snippet protectBar()}
+  {#if protectAsk}
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div class="protect" role="group" aria-label="Confirm accept" data-confirm bind:this={protectEl} onkeydown={protectKeys}>
+      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+        <rect x="3.5" y="7" width="9" height="6.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3" />
+        <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.3" />
+      </svg>
+      <p class="protect-text">{protectAsk.text}</p>
+      <div class="protect-buttons">
+        <button class="protect-btn go" disabled={busy} onclick={() => answerProtect(true)}>Accept anyway</button>
+        <button class="protect-btn" data-cancel onclick={() => answerProtect(false)}>Cancel</button>
+      </div>
+    </div>
+  {/if}
+{/snippet}
+
 {#if helpOpen}
   <Shortcuts editorName={editorLabel(config.editor)} onclose={() => (helpOpen = false)} />
 {/if}
@@ -688,7 +858,7 @@
   {/if}
 </div>
 
-<div class="app" class:animate={animatePanes} class:narrow-diff={narrowDiffOpen} style:--sidebar-w="{panes.projects}px" style:--tree-w="{panes.tree}px">
+<div class="app" class:animate={animatePanes} class:narrow-diff={narrowFull} style:--sidebar-w="{panes.projects}px" style:--tree-w="{panes.tree}px">
   <header class="toolbar">
     <div class="brand">
       <img class="mark" src="/claudegate.png" width="20" height="20" alt="" draggable="false" />
@@ -714,6 +884,27 @@
         Read-only
       </button>
       <span class="total" class:none={totalPending === 0}>{headerTotal(split.visible)}</span>
+      <button
+        class="chip gear"
+        class:on={settingsOpen}
+        bind:this={settingsButton}
+        aria-pressed={settingsOpen}
+        aria-label="Settings"
+        title="Settings (Ctrl+,)"
+        onclick={() => (settingsOpen ? void closeSettings() : openSettings())}
+      >
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3" />
+          <path
+            d="M8 1.8v1.6M8 12.6v1.6M14.2 8h-1.6M3.4 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7 3.6 3.6"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.3"
+            stroke-linecap="round"
+          />
+          <circle cx="8" cy="8" r="4.6" fill="none" stroke="currentColor" stroke-width="1.3" />
+        </svg>
+      </button>
     </div>
   </header>
 
@@ -744,7 +935,7 @@
   </div>
   {/if}
 
-  <div class="sheet" class:narrow-diff={narrowDiffOpen}>
+  <div class="sheet" class:narrow-diff={narrowFull}>
     <section class="review" aria-label="Changes">
       {#if listError}
         <div class="state">
@@ -797,6 +988,7 @@
             <ActionBar bind:this={actionBar} {tab} keys={bulk} {busy} outcomes={rejectOutcomes} tabCount={counts[tab]} onaction={runBulk} />
           {/key}
         {/if}
+        {#if !narrowDiffOpen}{@render protectBar()}{/if}
         <div class="scroll">
           {#if viewError}
             <div class="state small">
@@ -822,7 +1014,9 @@
           {:else}
             <FileTree
               {groups}
-              showGroups={view.scopes.length > 1}
+              {showGroups}
+              isProtected={(p) => isProtected(p)}
+              ageMinDays={settings.pendingAgeMinDays.value}
               {tab}
               {mode}
               {theme}
@@ -862,6 +1056,22 @@
       />
     </div>
 
+    {#if settingsOpen}
+    <Settings
+      {settings}
+      {config}
+      project={current ? { root: current.root, name: current.name } : null}
+      hidden={split.hidden.map((p) => ({ root: p.root, name: p.name }))}
+      onset={changeSetting}
+      onhooklog={changeHookLog}
+      onextrahide={changeExtraHide}
+      oneditor={(t) => void setEditor(t).then((c) => (config = c), (e) => show({ text: `Couldn't change the editor: ${e}`, tone: "error" }))}
+      onreadonly={(on) => void changeReadOnly(on)}
+      onshow={(r) => void setHidden(r, false)}
+      onclose={() => void closeSettings()}
+      full={narrow}
+    />
+    {:else}
     <DiffView
       row={selectedRow}
       kind={tab}
@@ -887,11 +1097,13 @@
       onback={narrow ? closeNarrowDiff : null}
     >
       {#snippet footer()}
+        {#if narrowDiffOpen}{@render protectBar()}{/if}
         {#if !narrow || narrowDiffOpen}
           <ResultBar result={shownResult} {busy} ondismiss={() => (result = null)} />
         {/if}
       {/snippet}
     </DiffView>
+    {/if}
   </div>
 </div>
 
@@ -976,6 +1188,7 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
+    white-space: nowrap;
     height: 24px;
     padding: 0 8px;
     border-radius: var(--radius-control);
@@ -992,6 +1205,60 @@
     color: var(--warning-ink);
     background: var(--warning-bg);
     font-weight: 500;
+  }
+
+  .gear {
+    width: 28px;
+    padding: 0;
+    justify-content: center;
+  }
+  .chip.gear.on {
+    color: var(--text);
+    background: var(--active);
+    font-weight: 400;
+  }
+
+  /* "This looks like a secret file": inline, before any accept of a protected file. */
+  .protect {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 10px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--rule);
+    font-size: var(--fs-small);
+    color: var(--warning-ink);
+    background: var(--warning-bg);
+    flex: none;
+  }
+  .protect > svg {
+    flex: none;
+  }
+  .protect-text {
+    flex: 1 1 200px;
+    min-width: 0;
+    line-height: 1.45;
+    font-weight: 500;
+  }
+  .protect-buttons {
+    display: flex;
+    gap: 6px;
+  }
+  .protect-btn {
+    height: 26px;
+    padding: 0 10px;
+    border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+    border-radius: var(--radius-control);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .protect-btn:hover {
+    background: color-mix(in srgb, currentColor 10%, transparent);
+  }
+  .protect-btn.go {
+    color: var(--on-primary);
+    background: var(--primary);
+    border-color: var(--primary);
   }
 
   .total {
@@ -1227,6 +1494,7 @@
       border-right: 0;
     }
     .sheet > :global(.diff),
+    .sheet > :global(.settings),
     .split {
       display: none;
     }
@@ -1240,7 +1508,8 @@
     .sheet.narrow-diff > .review {
       display: none;
     }
-    .sheet.narrow-diff > :global(.diff) {
+    .sheet.narrow-diff > :global(.diff),
+    .sheet.narrow-diff > :global(.settings) {
       display: flex;
     }
   }

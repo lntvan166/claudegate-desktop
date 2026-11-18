@@ -8,8 +8,9 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { DecideAction, DecideReport, DecideTarget, RejectOutcome } from "./decide";
 import type { EditorConfig } from "./editors";
+import type { SettingKey, SettingsView } from "./settings";
 
-export type { DecideAction, DecideReport, DecideTarget, EditorConfig };
+export type { DecideAction, DecideReport, DecideTarget, EditorConfig, SettingKey, SettingsView };
 
 export type ProjectSummary = {
   root: string;
@@ -26,6 +27,8 @@ export type PendingItem = {
   scope: string;
   newFile: boolean;
   capturedAt: string | null;
+  /** The Claude session that captured it; null when the hook had none. */
+  sessionId?: string | null;
   added: number;
   removed: number;
   /** No change on disk yet, inside the settle window: Claude's write may still be on its way. */
@@ -40,6 +43,7 @@ export type RecordItem = {
   rel: string;
   scope: string;
   decidedAt: string;
+  sessionId?: string | null;
   added: number;
   removed: number;
 };
@@ -94,6 +98,14 @@ export interface Api {
   setReadOnly(on: boolean): Promise<EditorConfig>;
   /** The hidden project roots in ~/.claudegate-desktop/config.json (never workspace-roots.json). */
   setHiddenProjects(roots: string[]): Promise<EditorConfig>;
+  /** Every setting as it resolves for `root` (app, then the extension, then the default). */
+  getSettings(root: string | null): Promise<SettingsView>;
+  /** One app override; `null` drops it. Resolves to the settings as they now stand for `root`. */
+  setSetting(key: SettingKey, value: unknown, root: string | null): Promise<SettingsView>;
+  /** Creates or deletes ~/.claudegate/hooklog.enabled, the switch the extension shares. */
+  setHookLog(on: boolean, root: string | null): Promise<SettingsView>;
+  /** The project's app-only hide patterns. */
+  setExtraHide(root: string, patterns: string[]): Promise<SettingsView>;
 }
 
 const tauriApi: Api = {
@@ -108,6 +120,10 @@ const tauriApi: Api = {
   decide: (root, action, target) => invoke<DecideReport>("decide", { root, action, target }),
   setReadOnly: (on) => invoke<EditorConfig>("set_read_only", { on }),
   setHiddenProjects: (roots) => invoke<EditorConfig>("set_hidden_projects", { roots }),
+  getSettings: (root) => invoke<SettingsView>("get_settings", { root }),
+  setSetting: (key, value, root) => invoke<SettingsView>("set_setting", { key, value, root }),
+  setHookLog: (on, root) => invoke<SettingsView>("set_hook_log", { on, root }),
+  setExtraHide: (root, patterns) => invoke<SettingsView>("set_extra_hide", { root, patterns }),
 };
 
 let chosen: Promise<Api> | undefined;
@@ -141,3 +157,8 @@ export const decide = async (root: string, action: DecideAction, target: DecideT
   (await api()).decide(root, action, target);
 export const setReadOnly = async (on: boolean) => (await api()).setReadOnly(on);
 export const setHiddenProjects = async (roots: string[]) => (await api()).setHiddenProjects(roots);
+export const getSettings = async (root: string | null) => (await api()).getSettings(root);
+export const setSetting = async (key: SettingKey, value: unknown, root: string | null) =>
+  (await api()).setSetting(key, value, root);
+export const setHookLog = async (on: boolean, root: string | null) => (await api()).setHookLog(on, root);
+export const setExtraHide = async (root: string, patterns: string[]) => (await api()).setExtraHide(root, patterns);

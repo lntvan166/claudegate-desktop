@@ -13,7 +13,10 @@ import type {
   ProjectSummary,
   ProjectView,
   RecordItem,
+  SettingKey,
+  SettingsView,
 } from "./api";
+import { DEFAULT_PROTECTED, type Resolved } from "./settings";
 
 const SHOP = "/home/dev/src/shop-api";
 const WT = `${SHOP}/.worktrees/checkout-v2`;
@@ -27,7 +30,9 @@ function pending(scope: string, rel: string, added: number, removed: number, new
   const path = `${scope}/${rel}`;
   // scripts/seed.py has a null baseline from an older hook: a reject leaves it on disk.
   const rejectOutcome = newFile ? "delete" : rel.endsWith("seed.py") ? "leave" : "restore";
-  return { path, rel: path.slice(SHOP.length + 1), scope, newFile, capturedAt: ago(added), added, removed, waiting: false, rejectOutcome };
+  // Two Claude sessions: this morning's (older captures) and the one running now.
+  const sessionId = added > 20 ? "sess-morning" : "sess-now";
+  return { path, rel: path.slice(SHOP.length + 1), scope, newFile, capturedAt: ago(added), sessionId, added, removed, waiting: false, rejectOutcome };
 }
 
 function pendingIn(root: string, rel: string, added: number, removed: number): PendingItem {
@@ -59,6 +64,10 @@ const views: Record<string, ProjectView> = {
       pending(SHOP, "docker-compose.yml", 5, 2),
       pending(SHOP, "internal/refunds/refund.go", 19, 6),
       pending(SHOP, "scripts/seed.py", 11, 3),
+      // A secret: the protected globs match it, so accepting it asks first.
+      pending(SHOP, ".env.local", 2, 1),
+      // Captured four days ago by a hook with no session id; it has sat in the backlog since.
+      { ...pending(SHOP, "docs/runbook.md", 6, 2), capturedAt: ago(4 * 1440 + 30), sessionId: null },
       // Captured, but Claude's write has not landed: bulk actions skip it.
       { ...pending(SHOP, "src/api/types.ts", 0, 0), capturedAt: ago(0), waiting: true },
       pending(WT, "src/checkout/cart.svelte", 88, 31),
@@ -286,6 +295,37 @@ function sample(path: string, isNew: boolean): { before: string | null; after: s
 
 let config: EditorConfig = { editor: "zed {path}:{line}:{col}", customEditor: "nvim +{line} {path}", readOnly: false };
 
+/** What the extension would supply: a VS Code user setting and a project exclude list. */
+const ext: Record<string, Resolved<unknown>> = {
+  autoAdvance: { value: true, source: "default" },
+  groupBySession: { value: false, source: "default" },
+  pendingAgeMinDays: { value: 2, source: "vsCode" },
+  maxAttached: { value: 256, source: "default" },
+  protected: { value: DEFAULT_PROTECTED, source: "default" },
+};
+const appSettings: Partial<Record<SettingKey, unknown>> = {};
+let hookLog = false;
+const extraHide: Record<string, string[]> = { [SHOP]: ["**/*.snap"] };
+const DEFAULT_EXCLUDE = ["**/package-lock.json", "**/yarn.lock", "**/Cargo.lock", "**/go.sum", "**/*.min.js", "**/*.map", "**/node_modules/**"];
+
+function mockSettings(root: string | null): SettingsView {
+  const r = <T>(k: SettingKey) =>
+    (k in appSettings ? { value: appSettings[k], source: "app" } : ext[k]) as Resolved<T>;
+  return {
+    exclude:
+      root === SHOP
+        ? { value: [...DEFAULT_EXCLUDE, "dist/**", "coverage/**"], source: "vsCode" }
+        : { value: DEFAULT_EXCLUDE, source: "default" },
+    protected: r<string[]>("protected"),
+    autoAdvance: r<boolean>("autoAdvance"),
+    groupBySession: r<boolean>("groupBySession"),
+    pendingAgeMinDays: r<number>("pendingAgeMinDays"),
+    maxAttached: r<number>("maxAttached"),
+    hookLog: { value: hookLog, source: hookLog ? "app" : "default" },
+    extraHide: (root && extraHide[root]) || [],
+  };
+}
+
 const delay = <T>(v: T) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), 120));
 
 const handlers = new Set<(p: ChangedPayload) => void>();
@@ -369,6 +409,20 @@ export const mockApi: Api = {
   setHiddenProjects: (roots) => {
     config = { ...config, hiddenProjects: [...new Set(roots.map((r) => r.trim()).filter(Boolean))] };
     return delay(config);
+  },
+  getSettings: (root) => delay(mockSettings(root)),
+  setSetting: (key, value, root) => {
+    if (value === null) delete appSettings[key];
+    else appSettings[key] = value;
+    return delay(mockSettings(root));
+  },
+  setHookLog: (on, root) => {
+    hookLog = on;
+    return delay(mockSettings(root));
+  },
+  setExtraHide: (root, patterns) => {
+    extraHide[root] = patterns;
+    return delay(mockSettings(root));
   },
 };
 

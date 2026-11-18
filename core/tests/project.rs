@@ -282,3 +282,31 @@ fn reject_outcome_matches_apply_reject() {
     let json = serde_json::to_value(&v.pending[0]).unwrap();
     assert!(json["rejectOutcome"].is_string(), "{json}");
 }
+
+#[test]
+fn rows_carry_their_session_id() {
+    let h = tempfile::tempdir().unwrap();
+    let w = tempfile::tempdir().unwrap();
+    let root = w.path();
+    let chg = root.join("chg.txt");
+    fs::write(&chg, "new\n").unwrap();
+    let anon = root.join("anon.txt");
+    fs::write(&anon, "new\n").unwrap();
+    let mut files = serde_json::Map::new();
+    files.insert(chg.to_string_lossy().into(), entry(Some("old\n")));
+    files.insert(
+        anon.to_string_lossy().into(),
+        serde_json::json!({"originalContent": "old\n", "reviewStatus": "pending", "sessionId": null}),
+    );
+    let acc = serde_json::json!([rec("/x/a.txt", "2026-01-01T00:00:00Z"),
+        {"id":"2026-01-02T00:00:00Z::/x/b.txt","path":"/x/b.txt","before":"a","after":"b","decidedAt":"2026-01-02T00:00:00Z"}]);
+    write_session(h.path(), root, &session(files.into(), acc, serde_json::json!({})));
+    let v = load_project(h.path(), root);
+    let by = |p: &Path| v.pending.iter().find(|i| i.path == p.to_string_lossy()).unwrap().session_id.clone();
+    assert_eq!(by(&chg).as_deref(), Some("s"));
+    assert_eq!(by(&anon), None);
+    let ids: Vec<_> = v.accepted.iter().map(|r| r.session_id.clone()).collect();
+    assert_eq!(ids, vec![None, Some("s".to_string())]);
+    let j = serde_json::to_value(&v.pending[0]).unwrap();
+    assert!(j.get("sessionId").is_some(), "serialized as sessionId");
+}

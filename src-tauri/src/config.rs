@@ -215,6 +215,112 @@ pub fn save_read_only(path: &Path, on: bool, guard: Option<&Path>) -> Result<Con
     })
 }
 
+/// The setting names the UI sends, mapped to the `settings` keys `claudegate_core::settings`
+/// reads (the extension's names without `claudegate.`). Exclude is per project and the hook log
+/// is a sentinel file, so neither is here.
+fn setting_key(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "autoAdvance" => "autoAdvance",
+        "groupBySession" => "groupBySession",
+        "pendingAgeMinDays" => "pendingAge.minDays",
+        "maxAttached" => "worktrees.maxAttached",
+        "protected" => "protected",
+        _ => return None,
+    })
+}
+
+fn whole_number(v: &serde_json::Value, min: u64) -> Option<u64> {
+    let n = v.as_u64().or_else(|| v.as_f64().filter(|f| f.fract() == 0.0 && *f >= 0.0).map(|f| f as u64))?;
+    (n >= min && n <= u32::MAX as u64).then_some(n)
+}
+
+/// The value as it is stored, or why it is refused.
+fn checked_setting(key: &str, v: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use serde_json::Value;
+    let bad = |what: &str| Err(format!("{key} must be {what}."));
+    match key {
+        "autoAdvance" | "groupBySession" => match v {
+            Value::Bool(_) => Ok(v.clone()),
+            _ => bad("true or false"),
+        },
+        "pendingAgeMinDays" => whole_number(v, 0).map(Value::from).map_or_else(|| bad("a whole number of days, 0 or more"), Ok),
+        "maxAttached" => whole_number(v, 1).map(Value::from).map_or_else(|| bad("a whole number, 1 or more"), Ok),
+        "protected" => match v.as_array() {
+            Some(a) if a.iter().all(Value::is_string) => {
+                Ok(serde_json::json!(clean_roots(a.iter().filter_map(Value::as_str))))
+            }
+            _ => bad("a list of glob patterns"),
+        },
+        _ => Err(format!("Unknown setting: {key}")),
+    }
+}
+
+/// Sets one app override in `settings` (`null` drops it, so the value falls back to the
+/// extension's, then the default). Every other key in the file is kept.
+pub fn save_setting(path: &Path, key: &str, value: serde_json::Value, guard: Option<&Path>) -> Result<(), String> {
+    let stored = setting_key(key).ok_or_else(|| format!("Unknown setting: {key}"))?;
+    let value = if value.is_null() { None } else { Some(checked_setting(key, &value)?) };
+    update_config(path, guard, |obj, _| {
+        let settings = obj.entry("settings").or_insert_with(|| serde_json::json!({}));
+        let map = settings.as_object_mut().ok_or("The settings entry in config.json is not an object.")?;
+        match value {
+            Some(v) => map.insert(stored.into(), v),
+            None => map.remove(stored),
+        };
+        Ok(())
+    })
+    .map(|_| ())
+}
+
+/// Sets the app-only hide patterns for `root` (`projects[root].extraHide`). They only hide rows in
+/// this app; capture and the extension never see them.
+pub fn save_extra_hide(path: &Path, root: &str, patterns: &[String], guard: Option<&Path>) -> Result<(), String> {
+    let root = root.trim();
+    if root.is_empty() {
+        return Err("No project given.".into());
+    }
+    let patterns = clean_roots(patterns.iter().map(String::as_str));
+    update_config(path, guard, |obj, _| {
+        let projects = obj.entry("projects").or_insert_with(|| serde_json::json!({}));
+        let projects = projects.as_object_mut().ok_or("The projects entry in config.json is not an object.")?;
+        let entry = projects.entry(root.to_string()).or_insert_with(|| serde_json::json!({}));
+        let entry = entry.as_object_mut().ok_or("That project's entry in config.json is not an object.")?;
+        if patterns.is_empty() {
+            entry.remove("extraHide");
+        } else {
+            entry.insert("extraHide".into(), serde_json::json!(patterns));
+        }
+        Ok(())
+    })
+    .map(|_| ())
+}
+
+/// The app's overrides as the core resolver reads them, plus each project's `extraHide`. Lenient:
+/// an unreadable file, or an entry of the wrong shape, reads as no override.
+pub fn read_app_settings(path: &Path) -> (claudegate_core::settings::AppSettings, std::collections::HashMap<String, Vec<String>>) {
+    use claudegate_core::settings::{AppSettings, ProjectSettings};
+    let mut app = AppSettings::default();
+    let mut extra = std::collections::HashMap::new();
+    let Some(v) = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else {
+        return (app, extra);
+    };
+    if let Some(m) = v.get("settings").and_then(|s| s.as_object()) {
+        app.settings = m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    }
+    if let Some(m) = v.get("projects").and_then(|s| s.as_object()) {
+        for (root, p) in m {
+            let strings = |k: &str| -> Option<Vec<String>> {
+                Some(p.get(k)?.as_array()?.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            };
+            app.projects.insert(root.clone(), ProjectSettings { exclude: strings("exclude") });
+            if let Some(x) = strings("extraHide") {
+                extra.insert(root.clone(), x);
+            }
+        }
+    }
+    (app, extra)
+}
+
 #[tauri::command]
 pub async fn get_config() -> Result<Config, String> {
     tauri::async_runtime::spawn_blocking(|| load_or_create(&config_path()))

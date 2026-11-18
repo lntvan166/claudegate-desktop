@@ -409,6 +409,41 @@ fn prune_snapshot_dirs(root: &Path, current: &Path) {
     }
 }
 
+/// The hook-log switch the extension also reads: the sentinel's presence is the setting.
+pub const HOOKLOG_SENTINEL: &str = "hooklog.enabled";
+
+/// Creates (`on`) or deletes the hook-log sentinel. Guarded to exactly
+/// `<claudegate home>/hooklog.enabled`: any other path is refused. Creating is `create_new` (an
+/// existing file is fine) and deleting is one unlink (an absent file is fine), so a concurrent
+/// toggle by the extension can never leave a half-written file. A missing home is not created.
+pub(crate) fn set_sentinel(path: &Path, on: bool) -> io::Result<()> {
+    let home = crate::paths::claudegate_home();
+    if home.as_os_str().is_empty() || path != home.join(HOOKLOG_SENTINEL) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "refusing to touch anything but the hook-log sentinel"));
+    }
+    if on {
+        if !home.is_dir() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} does not exist", home.display())));
+        }
+        match OpenOptions::new().write(true).create_new(true).open(path) {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(e),
+        }
+    } else {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Turns the hook's logging on or off for every ClaudeGate, the extension included.
+pub fn set_hook_log(on: bool) -> io::Result<()> {
+    set_sentinel(&crate::paths::claudegate_home().join(HOOKLOG_SENTINEL), on)
+}
+
 #[path = "../tests/unit/store.rs"]
 #[cfg(test)]
 mod store_tests;
@@ -468,6 +503,18 @@ mod tests {
         assert_eq!(fs::read_to_string(&fresh).unwrap(), "x");
         let names: Vec<_> = fs::read_dir(tmp.path()).unwrap().flatten().map(|d| d.file_name()).collect();
         assert!(names.iter().all(|n| !n.to_string_lossy().ends_with(".tmp")), "{names:?}");
+    }
+
+    #[test]
+    fn set_sentinel_refuses_any_other_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Same name, wrong folder: never the ClaudeGate home, whatever CLAUDEGATE_HOME says.
+        let elsewhere = tmp.path().join("hooklog.enabled");
+        assert!(set_sentinel(&elsewhere, true).is_err());
+        assert!(!elsewhere.exists());
+        // Right folder, wrong name.
+        assert!(set_sentinel(&crate::paths::claudegate_home().join("hooklog.enabledx"), true).is_err());
+        assert!(set_sentinel(&crate::paths::claudegate_home().join("sessions"), false).is_err());
     }
 
     #[test]

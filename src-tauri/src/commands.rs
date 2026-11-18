@@ -5,7 +5,8 @@ use crate::watch::KnownMap;
 use claudegate_core::decide::{decide_confirmed, Action, DecideError, DecidePaths, DecideReport, Target};
 use claudegate_core::model::{parse_session, ReviewRecord, Session};
 use claudegate_core::paths::{claudegate_home, resolve_root, session_file_for};
-use claudegate_core::project::{load_project, ProjectSummary, ProjectView};
+use claudegate_core::project::{load_project_max, ProjectSummary, ProjectView};
+use claudegate_core::settings::{default_ext_sources, effective, Effective, ExtSources};
 use claudegate_core::roots::read_roots;
 use claudegate_core::textfile::{read_text, TextFile};
 use serde::{Deserialize, Serialize};
@@ -100,6 +101,11 @@ fn remember(known: &KnownMap, home: &Path, view: &ProjectView) {
 }
 
 pub fn list_projects_with(home: &Path, known: &KnownMap) -> Vec<ProjectSummary> {
+    list_projects_max(home, known, &|_| claudegate_core::worktrees::MAX_WORKTREES)
+}
+
+/// `list_projects_with`, attaching at most `max_for(root)` worktrees per project.
+pub fn list_projects_max(home: &Path, known: &KnownMap, max_for: &dyn Fn(&Path) -> usize) -> Vec<ProjectSummary> {
     let roots: Vec<PathBuf> = read_roots(home);
     if let Ok(mut k) = known.lock() {
         k.clear();
@@ -107,7 +113,7 @@ pub fn list_projects_with(home: &Path, known: &KnownMap) -> Vec<ProjectSummary> 
     roots
         .into_iter()
         .map(|r| {
-            let v = load_project(home, &r);
+            let v = load_project_max(home, &r, max_for(&r));
             remember(known, home, &v);
             let name = r
                 .file_name()
@@ -125,9 +131,51 @@ pub fn list_projects_with(home: &Path, known: &KnownMap) -> Vec<ProjectSummary> 
 }
 
 pub fn get_project_with(home: &Path, known: &KnownMap, root: &str) -> ProjectView {
-    let v = load_project(home, &resolve_root(Path::new(root)));
+    get_project_max(home, known, root, claudegate_core::worktrees::MAX_WORKTREES)
+}
+
+/// `get_project_with`, attaching at most `max_attached` worktrees (`worktrees.maxAttached`).
+pub fn get_project_max(home: &Path, known: &KnownMap, root: &str, max_attached: usize) -> ProjectView {
+    let v = load_project_max(home, &resolve_root(Path::new(root)), max_attached);
     remember(known, home, &v);
     v
+}
+
+/// Where the extension's settings live on this machine. The two ClaudeGate-home files follow
+/// `$CLAUDEGATE_HOME`, like everything else the app reads there.
+pub fn ext_sources() -> ExtSources {
+    let cg = claudegate_home();
+    let mut s = default_ext_sources(&dirs::home_dir().unwrap_or_default());
+    s.excludes_json = cg.join("excludes.json");
+    s.hooklog_sentinel = cg.join(claudegate_core::store::HOOKLOG_SENTINEL);
+    s
+}
+
+/// What the Settings screen shows: every effective setting with its source, and the selected
+/// project's app-only hide patterns. Serializes flat: `Effective`'s fields plus `extraHide`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsView {
+    #[serde(flatten)]
+    pub effective: Effective,
+    pub extra_hide: Vec<String>,
+}
+
+pub fn settings_view(config_path: &Path, root: Option<&str>, sources: &ExtSources) -> SettingsView {
+    let (app, extra) = crate::config::read_app_settings(config_path);
+    let root = root.map(|r| resolve_root(Path::new(r)));
+    let extra_hide = root
+        .as_ref()
+        .and_then(|r| extra.get(r.to_string_lossy().as_ref()))
+        .cloned()
+        .unwrap_or_default();
+    SettingsView { effective: effective(&app, root.as_deref(), sources), extra_hide }
+}
+
+/// `worktrees.maxAttached` for `root`, as the Settings screen resolves it.
+pub fn max_attached_for(config_path: &Path, root: &Path, sources: &ExtSources) -> usize {
+    let (app, _) = crate::config::read_app_settings(config_path);
+    effective(&app, Some(root), sources).max_attached.value as usize
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
@@ -137,13 +185,59 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 #[tauri::command]
 pub async fn list_projects(known: State<'_, KnownMap>) -> Result<Vec<ProjectSummary>, String> {
     let known = known.inner().clone();
-    blocking(move || list_projects_with(&claudegate_home(), &known)).await
+    blocking(move || {
+        let (cfg, src) = (crate::config::config_path(), ext_sources());
+        list_projects_max(&claudegate_home(), &known, &|r| max_attached_for(&cfg, r, &src))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn get_project(root: String, known: State<'_, KnownMap>) -> Result<ProjectView, String> {
     let known = known.inner().clone();
-    blocking(move || get_project_with(&claudegate_home(), &known, &root)).await
+    blocking(move || {
+        let max = max_attached_for(&crate::config::config_path(), &resolve_root(Path::new(&root)), &ext_sources());
+        get_project_max(&claudegate_home(), &known, &root, max)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn get_settings(root: Option<String>) -> Result<SettingsView, String> {
+    blocking(move || settings_view(&crate::config::config_path(), root.as_deref(), &ext_sources())).await
+}
+
+/// One app override; `value: null` drops it. Returns the settings as they now resolve.
+#[tauri::command]
+pub async fn set_setting(key: String, value: serde_json::Value, root: Option<String>) -> Result<SettingsView, String> {
+    blocking(move || {
+        let cfg = crate::config::config_path();
+        crate::config::save_setting(&cfg, &key, value, Some(&claudegate_home()))?;
+        Ok(settings_view(&cfg, root.as_deref(), &ext_sources()))
+    })
+    .await?
+}
+
+/// Creates or deletes `~/.claudegate/hooklog.enabled`, the switch the extension shares.
+#[tauri::command]
+pub async fn set_hook_log(on: bool, root: Option<String>) -> Result<SettingsView, String> {
+    blocking(move || {
+        claudegate_core::store::set_hook_log(on).map_err(|e| format!("Couldn't change the hook log: {e}"))?;
+        Ok(settings_view(&crate::config::config_path(), root.as_deref(), &ext_sources()))
+    })
+    .await?
+}
+
+/// The app-only hide patterns for one project (`projects[root].extraHide` in config.json).
+#[tauri::command]
+pub async fn set_extra_hide(root: String, patterns: Vec<String>) -> Result<SettingsView, String> {
+    blocking(move || {
+        let cfg = crate::config::config_path();
+        let key = resolve_root(Path::new(&root)).to_string_lossy().into_owned();
+        crate::config::save_extra_hide(&cfg, &key, &patterns, Some(&claudegate_home()))?;
+        Ok(settings_view(&cfg, Some(&key), &ext_sources()))
+    })
+    .await?
 }
 
 #[tauri::command]

@@ -57,3 +57,16 @@ fn does_not_descend_into_worktree_and_caps() {
     }
     assert_eq!(nested_worktrees_under(r).len(), 256);
 }
+
+#[test]
+fn max_attached_caps_the_scan() {
+    use claudegate_core::worktrees::nested_worktrees_under_max;
+    let t = tempfile::tempdir().unwrap();
+    let r = t.path();
+    for i in 0..5 {
+        wt(&r.join(format!("w{i}")), "/x/.git/worktrees/w");
+    }
+    assert_eq!(nested_worktrees_under_max(r, 2), vec![r.join("w0"), r.join("w1")]);
+    assert_eq!(nested_worktrees_under_max(r, 256).len(), 5);
+    assert_eq!(nested_worktrees_under(r).len(), 5);
+}

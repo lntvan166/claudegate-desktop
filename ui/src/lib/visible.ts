@@ -1,7 +1,7 @@
 // The review tree's rows in display order. FileTree renders from the same functions, so keyboard
 // navigation and what is on screen cannot disagree.
 import type { DiffKind } from "./api";
-import type { Group, Row } from "./rows";
+import { groupKey, type Group, type Row } from "./rows";
 import { buildTree, type TreeNode } from "./tree";
 
 export type Mode = "tree" | "list";
@@ -54,14 +54,15 @@ export function visibleItems(groups: Group[], o: Opts): Item[] {
   };
   for (const g of groups) {
     const nodes = nodesFor(g.rows, o.mode);
+    const gk = groupKey(g);
     if (o.showGroups) {
-      const collapseKey = groupCollapseKey(o.tab, g.scope.root);
+      const collapseKey = groupCollapseKey(o.tab, gk);
       const open = !o.collapsed.has(collapseKey);
-      const id = groupId(g.scope.root);
+      const id = groupId(gk);
       out.push({ id, kind: "group", depth: 0, parent: null, collapseKey, open });
-      if (open) walk(nodes, 1, g.scope.root, id);
+      if (open) walk(nodes, 1, gk, id);
     } else {
-      walk(nodes, 0, g.scope.root, null);
+      walk(nodes, 0, gk, null);
     }
   }
   return out;
@@ -76,8 +77,9 @@ export function fileOrder(groups: Group[], mode: Mode): Row[] {
 
 /** Collapsed keys on `tab` that hide `row`: its group and any folder (compacted or not) above it. */
 export function collapseKeysToReveal(row: Row, tab: DiffKind, collapsed: Iterable<string>): string[] {
-  const group = groupCollapseKey(tab, row.scope);
-  const prefix = `${tab}|${row.scope}|`;
+  const g = row.group ?? row.scope;
+  const group = groupCollapseKey(tab, g);
+  const prefix = `${tab}|${g}|`;
   const out: string[] = [];
   for (const k of collapsed) {
     if (k === group) out.push(k);

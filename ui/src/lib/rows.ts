@@ -18,9 +18,19 @@ export type Row = {
   waiting: boolean;
   /** Pending rows: what a reject does on disk. Null on the Accepted and Rejected tabs. */
   rejectOutcome: RejectOutcome | null;
+  /** Pending rows: when the hook captured it (the age label). */
+  capturedAt?: string | null;
+  /** The Claude session behind it; null when the hook had none. */
+  sessionId?: string | null;
+  /** The key of the group it is listed under, when that is not its scope (grouped by session). */
+  group?: string;
 };
 
-export type Group = { scope: ScopeView; label: string; rows: Row[] };
+/** `key` identifies the group when it is not simply its scope (one scope can hold several). */
+export type Group = { scope: ScopeView; label: string; rows: Row[]; key?: string };
+
+/** The group's identity in ids and collapse keys. */
+export const groupKey = (g: Group) => g.key ?? g.scope.root;
 
 const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
 
@@ -38,7 +48,7 @@ export function scopeLabel(view: ProjectView, scope: ScopeView): string {
   return scope.isWorktree ? relTo(view.root, scope.root) : basename(view.root);
 }
 
-function rowsOf(view: ProjectView, kind: DiffKind): Row[] {
+export function rowsOf(view: ProjectView, kind: DiffKind): Row[] {
   if (kind === "pending") {
     return view.pending.map((p) => ({
       key: p.path,
@@ -51,6 +61,8 @@ function rowsOf(view: ProjectView, kind: DiffKind): Row[] {
       decidedAt: null,
       waiting: p.waiting,
       rejectOutcome: p.rejectOutcome,
+      capturedAt: p.capturedAt,
+      sessionId: p.sessionId ?? null,
     }));
   }
   return view[kind].map((r) => ({
@@ -64,6 +76,7 @@ function rowsOf(view: ProjectView, kind: DiffKind): Row[] {
     decidedAt: r.decidedAt,
     waiting: false,
     rejectOutcome: null,
+    sessionId: r.sessionId ?? null,
   }));
 }
 

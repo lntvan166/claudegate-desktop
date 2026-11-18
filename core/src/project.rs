@@ -3,7 +3,7 @@ use crate::model::{has_real_change, parse_session, ReviewRecord, Session, Shape}
 use crate::paths::{resolve_root, session_file_for};
 use crate::roots::read_roots;
 use crate::time::{now_ms, parse_iso_ms};
-use crate::worktrees::nested_worktrees_under;
+use crate::worktrees::{nested_worktrees_under_max, MAX_WORKTREES};
 use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
 use std::path::{Path, PathBuf};
@@ -27,6 +27,8 @@ pub struct PendingItem {
     pub scope: String,
     pub new_file: bool,
     pub captured_at: Option<String>,
+    /// The Claude session that captured it; `None` when the hook had none (group "Unknown session").
+    pub session_id: Option<String>,
     pub added: usize,
     pub removed: usize,
     /// No change on disk yet, inside the settle window: the write may still be on its way.
@@ -62,6 +64,7 @@ pub struct RecordItem {
     pub rel: String,
     pub scope: String,
     pub decided_at: String,
+    pub session_id: Option<String>,
     pub added: usize,
     pub removed: usize,
 }
@@ -122,6 +125,7 @@ fn record_item(primary: &str, scope: &str, r: &ReviewRecord) -> RecordItem {
         rel: rel_of(primary, &r.path),
         scope: scope.to_string(),
         decided_at: r.decided_at.clone(),
+        session_id: r.session_id.clone(),
         added,
         removed,
     }
@@ -199,6 +203,7 @@ fn load_scope(
                 scope: scope_str.clone(),
                 new_file: e.new_file.unwrap_or(e.original_content.is_none()),
                 captured_at: e.captured_at.clone(),
+                session_id: e.session_id.clone(),
                 added,
                 removed,
                 waiting,
@@ -256,8 +261,12 @@ pub fn pending_state(
 /// The project's scopes: the primary root first, then every nested worktree (sorted).
 /// `primary` must already be resolved (`resolve_root`).
 pub(crate) fn project_scopes(primary: &Path) -> Vec<PathBuf> {
+    project_scopes_max(primary, MAX_WORKTREES)
+}
+
+fn project_scopes_max(primary: &Path, max_attached: usize) -> Vec<PathBuf> {
     let mut scopes = vec![primary.to_path_buf()];
-    scopes.extend(nested_worktrees_under(primary));
+    scopes.extend(nested_worktrees_under_max(primary, max_attached));
     scopes
 }
 
@@ -273,8 +282,17 @@ pub fn load_project(home: &Path, root: &Path) -> ProjectView {
     load_project_at(home, root, now_ms())
 }
 
+/// `load_project` attaching at most `max_attached` worktrees (`worktrees.maxAttached`).
+pub fn load_project_max(home: &Path, root: &Path, max_attached: usize) -> ProjectView {
+    load_project_at_max(home, root, now_ms(), max_attached)
+}
+
 /// `load_project` with the clock injected.
 pub fn load_project_at(home: &Path, root: &Path, now_ms: i64) -> ProjectView {
+    load_project_at_max(home, root, now_ms, MAX_WORKTREES)
+}
+
+fn load_project_at_max(home: &Path, root: &Path, now_ms: i64, max_attached: usize) -> ProjectView {
     let primary_path = resolve_root(root);
     let primary = primary_path.to_string_lossy().into_owned();
     let mut view = ProjectView {
@@ -290,7 +308,7 @@ pub fn load_project_at(home: &Path, root: &Path, now_ms: i64) -> ProjectView {
         return view;
     }
     let matcher = project_matcher(home, &primary_path);
-    for (i, scope) in project_scopes(&primary_path).iter().enumerate() {
+    for (i, scope) in project_scopes_max(&primary_path, max_attached).iter().enumerate() {
         load_scope(home, scope, &primary, &matcher, i > 0, now_ms, &mut view);
     }
     view.pending.sort_by(|a, b| a.path.cmp(&b.path));

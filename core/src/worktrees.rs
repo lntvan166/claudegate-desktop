@@ -8,7 +8,8 @@ const SKIP: &[&str] = &[
     ".nuxt", ".venv", "venv",
 ];
 const MAX_DEPTH: usize = 6;
-const MAX_WORKTREES: usize = 256;
+/// The extension's `claudegate.worktrees.maxAttached` default.
+pub const MAX_WORKTREES: usize = 256;
 
 fn gitdir_target(dot_git: &Path) -> Option<String> {
     let raw = fs::read_to_string(dot_git).ok()?;
@@ -42,6 +43,11 @@ pub fn is_worktree_root(dir: &Path) -> bool {
 
 /// Worktree working dirs nested under `root`, sorted, at most 256.
 pub fn nested_worktrees_under(root: &Path) -> Vec<PathBuf> {
+    nested_worktrees_under_max(root, MAX_WORKTREES)
+}
+
+/// `nested_worktrees_under` with the cap (`worktrees.maxAttached`) given.
+pub fn nested_worktrees_under_max(root: &Path, max: usize) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();
     let mut frontier = vec![crate::paths::resolve_root(root)];
     let mut depth = 1;
@@ -71,6 +77,6 @@ pub fn nested_worktrees_under(root: &Path) -> Vec<PathBuf> {
         depth += 1;
     }
     found.sort();
-    found.truncate(MAX_WORKTREES);
+    found.truncate(max);
     found
 }

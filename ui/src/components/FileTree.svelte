@@ -5,7 +5,8 @@
   import { folderPrefix, rejectPrompt, type DecideAction, type DecideTarget, type Prompt } from "../lib/decide";
   import { iconFor, type IconTheme } from "../lib/icons";
   import { WAITING_REFUSAL } from "../lib/keys";
-  import { nodeKey, type Group, type Row } from "../lib/rows";
+  import { groupKey, nodeKey, type Group, type Row } from "../lib/rows";
+  import { ageLabel } from "../lib/settings";
   import { relTime } from "../lib/time";
   import type { TreeNode } from "../lib/tree";
   import {
@@ -34,6 +35,8 @@
     ondecide = () => {},
     onnotice = () => {},
     lockReason = null,
+    isProtected = () => false,
+    ageMinDays = 0,
   }: {
     groups: Group[];
     showGroups: boolean;
@@ -57,7 +60,14 @@
     onnotice?: (message: string) => void;
     /** Why decisions are off (said when a/r is pressed on a row then); null when they are on. */
     lockReason?: string | null;
+    /** True for a path the `protected` globs match: the row shows a lock. */
+    isProtected?: (path: string) => boolean;
+    /** `pendingAge.minDays`: pending rows at least this many days old show "Nd"; 0 is off. */
+    ageMinDays?: number;
   } = $props();
+
+  /** Read once per render pass: ages only change by the day. */
+  const now = Date.now();
 
   /** `a`/`r` on the focused file or folder: the same actions and confirmations as its buttons. */
   function decideFocused(e: KeyboardEvent, cur: (typeof items)[number]): boolean {
@@ -95,17 +105,17 @@
 
   /** The tree node behind a folder row id, with its scope. */
   function findFolder(id: string): { scope: string; node: TreeNode<Row> } | null {
-    const walk = (nodes: TreeNode<Row>[], scope: string): TreeNode<Row> | null => {
+    const walk = (nodes: TreeNode<Row>[], gid: string): TreeNode<Row> | null => {
       for (const n of nodes) {
         if (n.kind !== "folder") continue;
-        if (folderId(scope, n.rel) === id) return n;
-        const hit = walk(n.children ?? [], scope);
+        if (folderId(gid, n.rel) === id) return n;
+        const hit = walk(n.children ?? [], gid);
         if (hit) return hit;
       }
       return null;
     };
     for (const t of trees) {
-      const node = walk(t.nodes, t.group.scope.root);
+      const node = walk(t.nodes, groupKey(t.group));
       if (node) return { scope: t.group.scope.root, node };
     }
     return null;
@@ -312,11 +322,11 @@
   {/if}
 {/snippet}
 
-{#snippet node(n: TreeNode<Row>, depth: number, scope: string)}
+{#snippet node(n: TreeNode<Row>, depth: number, gid: string, scope: string)}
   {#if n.kind === "folder"}
-    {@const key = folderCollapseKey(tab, scope, n.rel)}
+    {@const key = folderCollapseKey(tab, gid, n.rel)}
     {@const open = !collapsed.has(key)}
-    {@const id = folderId(scope, n.rel)}
+    {@const id = folderId(gid, n.rel)}
     {@const folderActs = canDecide && tab === "pending"}
     <div class={folderActs ? "item" : "plain"} role="none">
     <button
@@ -382,7 +392,7 @@
     {#if open}
       <div role="group">
         {#each n.children ?? [] as child (nodeKey(child))}
-          {@render node(child, depth + 1, scope)}
+          {@render node(child, depth + 1, gid, scope)}
         {/each}
       </div>
     {/if}
@@ -406,8 +416,18 @@
         {@render guides(depth)}
         <img class="icon" src={iconFor(n.name, "file", false, theme)} alt="" draggable="false" />
         <span class="name">{n.name}</span>
+        {#if isProtected(row.path)}
+          <svg class="lock" viewBox="0 0 16 16" width="12" height="12" role="img" aria-label="Protected: looks like a secret file">
+            <title>Protected: looks like a secret file</title>
+            <rect x="3.5" y="7" width="9" height="6.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3" />
+            <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.3" />
+          </svg>
+        {/if}
         {#if mode === "list" && dirOf(n.rel)}<span class="dir">{dirOf(n.rel)}</span>{/if}
         <span class="spacer"></span>
+        {#if tab === "pending" && ageLabel(row.capturedAt, now, ageMinDays)}
+          <span class="meta age" title={row.capturedAt ? `Captured ${new Date(row.capturedAt).toLocaleString()}` : undefined}>{ageLabel(row.capturedAt, now, ageMinDays)}</span>
+        {/if}
         {#if row.decidedAt}<span class="meta">{relTime(row.decidedAt)}</span>{/if}
         {#if row.waiting}<span class="meta waiting" title="Captured before Claude wrote it; the write hasn't landed yet">waiting for write…</span>{/if}
         {@render stats(row)}
@@ -493,11 +513,12 @@
 {/snippet}
 
 <div class="tree" role="tree" aria-label="{tab} files" tabindex="-1" bind:this={treeEl} {onkeydown} {onfocusin}>
-  {#each trees as { group, nodes } (group.scope.root)}
+  {#each trees as { group, nodes } (groupKey(group))}
+    {@const gid = groupKey(group)}
     {#if showGroups}
-      {@const key = groupCollapseKey(tab, group.scope.root)}
+      {@const key = groupCollapseKey(tab, gid)}
       {@const open = !collapsed.has(key)}
-      {@const id = groupId(group.scope.root)}
+      {@const id = groupId(gid)}
       <button
         class="row group"
         role="treeitem"
@@ -509,7 +530,12 @@
         onclick={() => toggle(key)}
       >
         {@render chevron(open)}
-        {#if group.scope.isWorktree}
+        {#if group.key?.startsWith("s:")}
+          <svg class="glyph" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.3" />
+            <path d="M8 5v3.2l2 1.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        {:else if group.scope.isWorktree}
           <svg class="glyph" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
             <circle cx="4.5" cy="3.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" />
             <circle cx="4.5" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" />
@@ -529,13 +555,13 @@
       {#if open}
         <div role="group">
           {#each nodes as n (nodeKey(n))}
-            {@render node(n, 1, group.scope.root)}
+            {@render node(n, 1, gid, group.scope.root)}
           {/each}
         </div>
       {/if}
     {:else}
       {#each nodes as n (nodeKey(n))}
-        {@render node(n, 0, group.scope.root)}
+        {@render node(n, 0, gid, group.scope.root)}
       {/each}
     {/if}
   {/each}
@@ -747,6 +773,14 @@
     flex: none;
     font-size: var(--fs-meta);
     color: var(--faint);
+  }
+  .lock {
+    flex: none;
+    margin-left: 4px;
+    color: var(--warning-ink);
+  }
+  .meta.age {
+    color: var(--warning-ink);
   }
   .meta.waiting {
     font-style: italic;
