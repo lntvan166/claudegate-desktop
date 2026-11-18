@@ -1,0 +1,74 @@
+{
+  "cases": [
+    {
+      "name": "patched full config",
+      "after": "{\n  \"2\": \"index key\",\n  \"10\": \"index key\",\n  \"model\": \"opus\",\n  \"permissions\": {\n    \"allow\": [\n      \"Bash(ls)\",\n      \"Read\"\n    ],\n    \"deny\": []\n  },\n  \"hooks\": {\n    \"SessionStart\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/x/start.sh\"\n          }\n        ]\n      }\n    ],\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^Bash$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/guard\",\n            \"timeout\": 5\n          }\n        ]\n      },\n      {\n        \"matcher\": \"Write|Edit\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"prettier --write\"\n          }\n        ]\n      },\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ],\n    \"PostToolUse\": [\n      {\n        \"matcher\": \"*\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/x/post.sh\"\n          }\n        ]\n      }\n    ]\n  },\n  \"enabledPlugins\": {\n    \"b@m\": true,\n    \"a@m\": false\n  },\n  \"01\": \"not an index\",\n  \"zeta\": 1.5,\n  \"alpha\": null,\n  \"empty\": {},\n  \"none\": [],\n  \"text\": \"tab\\t quote\\\" slash\\\\ ctrl\\u0001 é 日本 😀 /\"\n}",
+      "previous": "{\n  \"model\": \"opus\",\n  \"permissions\": { \"allow\": [\"Bash(ls)\", \"Read\"], \"deny\": [] },\n  \"hooks\": {\n    \"SessionStart\": [{ \"hooks\": [{ \"type\": \"command\", \"command\": \"/x/start.sh\" }] }],\n    \"PreToolUse\": [\n      { \"matcher\": \"^Bash$\", \"hooks\": [{ \"type\": \"command\", \"command\": \"/usr/bin/guard\", \"timeout\": 5 }] },\n      { \"matcher\": \"Write|Edit\", \"hooks\": [{ \"type\": \"command\", \"command\": \"prettier --write\" }] }\n    ],\n    \"PostToolUse\": [{ \"matcher\": \"*\", \"hooks\": [{ \"type\": \"command\", \"command\": \"/x/post.sh\" }] }]\n  },\n  \"enabledPlugins\": { \"b@m\": true, \"a@m\": false },\n  \"10\": \"index key\", \"2\": \"index key\", \"01\": \"not an index\", \"zeta\": 1.5, \"alpha\": null, \"empty\": {}, \"none\": [],\n  \"text\": \"tab\\t quote\\\" slash\\\\ ctrl\\u0001 é 日本 \\ud83d\\ude00 /\"\n}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": null
+    },
+    {
+      "name": "fresh install",
+      "after": "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+      "previous": "",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": null
+    },
+    {
+      "name": "not JSON",
+      "after": "{",
+      "previous": "{\n  \"model\": \"opus\",\n  \"permissions\": { \"allow\": [\"Bash(ls)\", \"Read\"], \"deny\": [] },\n  \"hooks\": {\n    \"SessionStart\": [{ \"hooks\": [{ \"type\": \"command\", \"command\": \"/x/start.sh\" }] }],\n    \"PreToolUse\": [\n      { \"matcher\": \"^Bash$\", \"hooks\": [{ \"type\": \"command\", \"command\": \"/usr/bin/guard\", \"timeout\": 5 }] },\n      { \"matcher\": \"Write|Edit\", \"hooks\": [{ \"type\": \"command\", \"command\": \"prettier --write\" }] }\n    ],\n    \"PostToolUse\": [{ \"matcher\": \"*\", \"hooks\": [{ \"type\": \"command\", \"command\": \"/x/post.sh\" }] }]\n  },\n  \"enabledPlugins\": { \"b@m\": true, \"a@m\": false },\n  \"10\": \"index key\", \"2\": \"index key\", \"01\": \"not an index\", \"zeta\": 1.5, \"alpha\": null, \"empty\": {}, \"none\": [],\n  \"text\": \"tab\\t quote\\\" slash\\\\ ctrl\\u0001 é 日本 \\ud83d\\ude00 /\"\n}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": "the file on disk is not valid JSON"
+    },
+    {
+      "name": "not an object",
+      "after": "[]",
+      "previous": "",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": "the file on disk is not a JSON object"
+    },
+    {
+      "name": "lost a top-level key",
+      "after": "{\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"/x/start.sh\"}]}],\"PreToolUse\":[{\"matcher\":\"^Bash$\",\"hooks\":[{\"type\":\"command\",\"command\":\"/usr/bin/guard\",\"timeout\":5}]},{\"matcher\":\"Write|Edit\",\"hooks\":[{\"type\":\"command\",\"command\":\"prettier --write\"}]},{\"matcher\":\"^(Write|Edit|MultiEdit|Bash)$\",\"hooks\":[{\"type\":\"command\",\"command\":\"/home/u/.claudegate/hook.sh\"}]}],\"PostToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"/x/post.sh\"}]}]}}",
+      "previous": "{\n  \"model\": \"opus\",\n  \"permissions\": { \"allow\": [\"Bash(ls)\", \"Read\"], \"deny\": [] },\n  \"hooks\": {\n    \"SessionStart\": [{ \"hooks\": [{ \"type\": \"command\", \"command\": \"/x/start.sh\" }] }],\n    \"PreToolUse\": [\n      { \"matcher\": \"^Bash$\", \"hooks\": [{ \"type\": \"command\", \"command\": \"/usr/bin/guard\", \"timeout\": 5 }] },\n      { \"matcher\": \"Write|Edit\", \"hooks\": [{ \"type\": \"command\", \"command\": \"prettier --write\" }] }\n    ],\n    \"PostToolUse\": [{ \"matcher\": \"*\", \"hooks\": [{ \"type\": \"command\", \"command\": \"/x/post.sh\" }] }]\n  },\n  \"enabledPlugins\": { \"b@m\": true, \"a@m\": false },\n  \"10\": \"index key\", \"2\": \"index key\", \"01\": \"not an index\", \"zeta\": 1.5, \"alpha\": null, \"empty\": {}, \"none\": [],\n  \"text\": \"tab\\t quote\\\" slash\\\\ ctrl\\u0001 é 日本 \\ud83d\\ude00 /\"\n}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": "top-level key \"2\" was lost"
+    },
+    {
+      "name": "entry missing",
+      "after": "{\n  \"model\": \"opus\",\n  \"permissions\": { \"allow\": [\"Bash(ls)\", \"Read\"], \"deny\": [] },\n  \"hooks\": {\n    \"SessionStart\": [{ \"hooks\": [{ \"type\": \"command\", \"command\": \"/x/start.sh\" }] }],\n    \"PreToolUse\": [\n      { \"matcher\": \"^Bash$\", \"hooks\": [{ \"type\": \"command\", \"command\": \"/usr/bin/guard\", \"timeout\": 5 }] },\n      { \"matcher\": \"Write|Edit\", \"hooks\": [{ \"type\": \"command\", \"command\": \"prettier --write\" }] }\n    ],\n    \"PostToolUse\": [{ \"matcher\": \"*\", \"hooks\": [{ \"type\": \"command\", \"command\": \"/x/post.sh\" }] }]\n  },\n  \"enabledPlugins\": { \"b@m\": true, \"a@m\": false },\n  \"10\": \"index key\", \"2\": \"index key\", \"01\": \"not an index\", \"zeta\": 1.5, \"alpha\": null, \"empty\": {}, \"none\": [],\n  \"text\": \"tab\\t quote\\\" slash\\\\ ctrl\\u0001 é 日本 \\ud83d\\ude00 /\"\n}",
+      "previous": "{\n  \"model\": \"opus\",\n  \"permissions\": { \"allow\": [\"Bash(ls)\", \"Read\"], \"deny\": [] },\n  \"hooks\": {\n    \"SessionStart\": [{ \"hooks\": [{ \"type\": \"command\", \"command\": \"/x/start.sh\" }] }],\n    \"PreToolUse\": [\n      { \"matcher\": \"^Bash$\", \"hooks\": [{ \"type\": \"command\", \"command\": \"/usr/bin/guard\", \"timeout\": 5 }] },\n      { \"matcher\": \"Write|Edit\", \"hooks\": [{ \"type\": \"command\", \"command\": \"prettier --write\" }] }\n    ],\n    \"PostToolUse\": [{ \"matcher\": \"*\", \"hooks\": [{ \"type\": \"command\", \"command\": \"/x/post.sh\" }] }]\n  },\n  \"enabledPlugins\": { \"b@m\": true, \"a@m\": false },\n  \"10\": \"index key\", \"2\": \"index key\", \"01\": \"not an index\", \"zeta\": 1.5, \"alpha\": null, \"empty\": {}, \"none\": [],\n  \"text\": \"tab\\t quote\\\" slash\\\\ ctrl\\u0001 é 日本 \\ud83d\\ude00 /\"\n}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": "the claudegate hook entry is missing"
+    },
+    {
+      "name": "entry under another event only",
+      "after": "{\"hooks\":{\"PostToolUse\":[{\"hooks\":[{\"command\":\"/home/u/.claudegate/hook.sh\"}]}]}}",
+      "previous": "",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": "the claudegate hook entry is missing"
+    },
+    {
+      "name": "null entries are skipped",
+      "after": "{\"hooks\":{\"PreToolUse\":[null,{\"hooks\":[null,{\"command\":\"/home/u/.claudegate/hook.sh\"}]}]}}",
+      "previous": "",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": null
+    },
+    {
+      "name": "unparseable previous preserves nothing",
+      "after": "{\"hooks\":{\"PreToolUse\":[{\"hooks\":[{\"command\":\"/home/u/.claudegate/hook.sh\"}]}]}}",
+      "previous": "{ nope",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": null
+    },
+    {
+      "name": "previous array preserves nothing",
+      "after": "{\"hooks\":{\"PreToolUse\":[{\"hooks\":[{\"command\":\"/home/u/.claudegate/hook.sh\"}]}]}}",
+      "previous": "[1]",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": null
+    }
+  ]
+}

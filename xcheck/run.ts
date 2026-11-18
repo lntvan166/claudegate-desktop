@@ -156,8 +156,66 @@ for (const f of upkeepFiles) {
   else if (bundled.replace(stampRe, "") !== pinned) fail("bundled hook.py differs from the pinned tag's hooks/hook.py (ignoring the stamp line)");
 }
 
+// Capture setup: the shared fixtures through the extension's own hookInstaller.ts. It imports
+// "vscode", so that one name resolves to the extension's own test stub.
+let captureCases = 0;
+{
+  const Module = require("module");
+  const ext = path.join(root, ".xcheck-cache", "claudegate");
+  const resolve = Module._resolveFilename;
+  Module._resolveFilename = function (req: string, ...rest: unknown[]) {
+    return req === "vscode" ? path.join(ext, "src", "test-stubs", "vscode.ts") : resolve.call(this, req, ...rest);
+  };
+  const hi = require(path.join(ext, "src", "hookInstaller.ts"));
+  Module._resolveFilename = resolve;
+  const cap = (f: string) => JSON.parse(fs.readFileSync(path.join(fixtures, "capture", f), "utf8"));
+
+  const patch = cap("settings_patch.json");
+  for (const c of patch.cases) {
+    const r = hi.computeSettingsPatch(c.raw, c.hookCommand);
+    const d = firstDiff({ content: r.content, changed: r.changed, parseError: !!r.parseError }, c.expected);
+    if (d) fail(`capture patch "${c.name}": ${d}`);
+    captureCases++;
+  }
+  // Shapes core refuses: the extension throws, or writes a file that fails its own verification.
+  for (const c of patch.refuse) {
+    let safe = false;
+    try {
+      const r = hi.computeSettingsPatch(c.raw, c.hookCommand);
+      safe = hi.verifySettingsContent(r.content, c.raw, c.hookCommand) !== null;
+    } catch {
+      safe = true;
+    }
+    if (!safe) fail(`capture refuse "${c.name}": the extension installs here, core refuses`);
+    captureCases++;
+  }
+  for (const c of cap("backups_to_prune.json").cases) {
+    const d = firstDiff(hi.backupsToPrune(c.names, c.baseName, c.keep), c.expected);
+    if (d) fail(`capture prune "${c.name}": ${d}`);
+    captureCases++;
+  }
+  for (const c of cap("verify_settings.json").cases) {
+    const got = hi.verifySettingsContent(c.after, c.previous, c.hookCommand);
+    if (got !== c.expected) fail(`capture verify "${c.name}": extension=${got}, fixture=${c.expected}`);
+    captureCases++;
+  }
+
+  // Constants core copies: the matcher, the keep count, and the POSIX wrapper's text.
+  const rs = fs.readFileSync(path.join(root, "core", "src", "capture.rs"), "utf8");
+  const rsStr = (name: string) => {
+    const m = rs.match(new RegExp(`pub const ${name}: &str = "((?:[^"\\\\]|\\\\.)*)";`));
+    return m ? JSON.parse(`"${m[1]}"`) : undefined;
+  };
+  if (rsStr("PRE_TOOL_MATCHER") !== hi.PRE_TOOL_MATCHER) fail(`capture PRE_TOOL_MATCHER: core=${rsStr("PRE_TOOL_MATCHER")}, extension=${hi.PRE_TOOL_MATCHER}`);
+  const keep = rs.match(/pub const SETTINGS_BACKUP_RETENTION: usize = (\d+);/)?.[1];
+  if (Number(keep) !== hi.SETTINGS_BACKUP_RETENTION) fail(`capture SETTINGS_BACKUP_RETENTION: core=${keep}, extension=${hi.SETTINGS_BACKUP_RETENTION}`);
+  const ts = fs.readFileSync(path.join(ext, "src", "hookInstaller.ts"), "utf8");
+  const wrapper = ts.match(/const sh = `([^`]*)`;/)?.[1].replace("${this.pythonCmd}", "python3").replace(/\\n/g, "\n");
+  if (rsStr("HOOK_SH_CONTENT") !== wrapper) fail(`capture HOOK_SH_CONTENT: core=${JSON.stringify(rsStr("HOOK_SH_CONTENT"))}, extension=${JSON.stringify(wrapper)}`);
+}
+
 if (failures) {
   console.error(`${failures} mismatch(es)`);
   process.exit(1);
 }
-console.log(`ok - ${sessionFiles.length} session cases, ${ex.cases.length} exclude cases, ${mergeFiles.length} merge cases, ${upkeepCases} upkeep cases`);
+console.log(`ok - ${sessionFiles.length} session cases, ${ex.cases.length} exclude cases, ${mergeFiles.length} merge cases, ${upkeepCases} upkeep cases, ${captureCases} capture cases`);

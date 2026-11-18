@@ -1,0 +1,58 @@
+{
+  "cases": [
+    {
+      "name": "under the limit",
+      "names": [
+        "settings.json.claudegate-2026-01-01T00-00-00.000Z.bak",
+        "other"
+      ],
+      "baseName": "settings.json",
+      "expected": []
+    },
+    {
+      "name": "seven backups, legacy and foreign files",
+      "baseName": "settings.json",
+      "names": [
+        "settings.json.claudegate-2026-01-07T00-00-00.000Z.bak",
+        "settings.json.claudegate-2026-01-01T00-00-00.000Z.bak",
+        "settings.json.claudegate-2026-01-03T00-00-00.000Z.bak",
+        "settings.json.claudegate-2026-01-03T00-00-00.000Z_1.bak",
+        "settings.json.claudegate-2026-01-02T00-00-00.000Z.bak",
+        "settings.json.claudegate-2026-01-05T00-00-00.000Z.bak",
+        "settings.json.claudegate-2026-01-06T00-00-00.000Z.bak",
+        "settings.json.claudegate.bak",
+        "settings.json",
+        "settings.local.json.claudegate-2020-01-01T00-00-00.000Z.bak",
+        "settings.json.claudegate-x.tmp"
+      ],
+      "expected": [
+        "settings.json.claudegate-2026-01-01T00-00-00.000Z.bak",
+        "settings.json.claudegate-2026-01-02T00-00-00.000Z.bak"
+      ]
+    },
+    {
+      "name": "exactly five",
+      "baseName": "settings.json",
+      "names": [
+        "settings.json.claudegate-2026-01-01T00-00-00.000Z.bak",
+        "settings.json.claudegate-2026-01-02T00-00-00.000Z.bak",
+        "settings.json.claudegate-2026-01-03T00-00-00.000Z.bak",
+        "settings.json.claudegate-2026-01-04T00-00-00.000Z.bak",
+        "settings.json.claudegate-2026-01-05T00-00-00.000Z.bak"
+      ],
+      "expected": []
+    },
+    {
+      "name": "custom keep",
+      "baseName": "settings.json",
+      "keep": 1,
+      "names": [
+        "settings.json.claudegate-2026-01-01T00-00-00.000Z.bak",
+        "settings.json.claudegate-2026-01-02T00-00-00.000Z.bak"
+      ],
+      "expected": [
+        "settings.json.claudegate-2026-01-01T00-00-00.000Z.bak"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,211 @@
+{
+  "cases": [
+    {
+      "name": "absent",
+      "raw": "",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "changed": true,
+        "parseError": false
+      }
+    },
+    {
+      "name": "whitespace",
+      "raw": "  \n\t",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "changed": true,
+        "parseError": false
+      }
+    },
+    {
+      "name": "empty object",
+      "raw": "{}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "changed": true,
+        "parseError": false
+      }
+    },
+    {
+      "name": "full config with other hooks and keys",
+      "raw": "{\n  \"model\": \"opus\",\n  \"permissions\": { \"allow\": [\"Bash(ls)\", \"Read\"], \"deny\": [] },\n  \"hooks\": {\n    \"SessionStart\": [{ \"hooks\": [{ \"type\": \"command\", \"command\": \"/x/start.sh\" }] }],\n    \"PreToolUse\": [\n      { \"matcher\": \"^Bash$\", \"hooks\": [{ \"type\": \"command\", \"command\": \"/usr/bin/guard\", \"timeout\": 5 }] },\n      { \"matcher\": \"Write|Edit\", \"hooks\": [{ \"type\": \"command\", \"command\": \"prettier --write\" }] }\n    ],\n    \"PostToolUse\": [{ \"matcher\": \"*\", \"hooks\": [{ \"type\": \"command\", \"command\": \"/x/post.sh\" }] }]\n  },\n  \"enabledPlugins\": { \"b@m\": true, \"a@m\": false },\n  \"10\": \"index key\", \"2\": \"index key\", \"01\": \"not an index\", \"zeta\": 1.5, \"alpha\": null, \"empty\": {}, \"none\": [],\n  \"text\": \"tab\\t quote\\\" slash\\\\ ctrl\\u0001 é 日本 \\ud83d\\ude00 /\"\n}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\n  \"2\": \"index key\",\n  \"10\": \"index key\",\n  \"model\": \"opus\",\n  \"permissions\": {\n    \"allow\": [\n      \"Bash(ls)\",\n      \"Read\"\n    ],\n    \"deny\": []\n  },\n  \"hooks\": {\n    \"SessionStart\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/x/start.sh\"\n          }\n        ]\n      }\n    ],\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^Bash$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/guard\",\n            \"timeout\": 5\n          }\n        ]\n      },\n      {\n        \"matcher\": \"Write|Edit\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"prettier --write\"\n          }\n        ]\n      },\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ],\n    \"PostToolUse\": [\n      {\n        \"matcher\": \"*\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/x/post.sh\"\n          }\n        ]\n      }\n    ]\n  },\n  \"enabledPlugins\": {\n    \"b@m\": true,\n    \"a@m\": false\n  },\n  \"01\": \"not an index\",\n  \"zeta\": 1.5,\n  \"alpha\": null,\n  \"empty\": {},\n  \"none\": [],\n  \"text\": \"tab\\t quote\\\" slash\\\\ ctrl\\u0001 é 日本 😀 /\"\n}",
+        "changed": true,
+        "parseError": false
+      }
+    },
+    {
+      "name": "hooks null is replaced",
+      "raw": "{\"hooks\":null,\"a\":1}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ]\n  },\n  \"a\": 1\n}",
+        "changed": true,
+        "parseError": false
+      }
+    },
+    {
+      "name": "hooks false is replaced",
+      "raw": "{\"hooks\":false}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "changed": true,
+        "parseError": false
+      }
+    },
+    {
+      "name": "PreToolUse null is replaced",
+      "raw": "{\"hooks\":{\"Stop\":[],\"PreToolUse\":null}}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\n  \"hooks\": {\n    \"Stop\": [],\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "changed": true,
+        "parseError": false
+      }
+    },
+    {
+      "name": "empty PreToolUse",
+      "raw": "{\"hooks\":{\"PreToolUse\":[]}}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "changed": true,
+        "parseError": false
+      }
+    },
+    {
+      "name": "numbers",
+      "raw": "{\"n\":[0,-0,1.0,1e21,1e-7,0.000001,123456789012345678901,12345678901234567890,0.1,-2.5e-10,1E3,9007199254740993]}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\n  \"n\": [\n    0,\n    0,\n    1,\n    1e+21,\n    1e-7,\n    0.000001,\n    123456789012345680000,\n    12345678901234567000,\n    0.1,\n    -2.5e-10,\n    1000,\n    9007199254740992\n  ],\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "changed": true,
+        "parseError": false
+      }
+    },
+    {
+      "name": "duplicate keys keep first position and last value",
+      "raw": "{\"a\":1,\"b\":2,\"a\":3}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\n  \"a\": 3,\n  \"b\": 2,\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "changed": true,
+        "parseError": false
+      }
+    },
+    {
+      "name": "already correct",
+      "raw": "{\n    \"x\": 1,\n    \"hooks\": {\n        \"PreToolUse\": [\n            {\n                \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n                \"hooks\": [\n                    {\n                        \"type\": \"command\",\n                        \"command\": \"/home/u/.claudegate/hook.sh\"\n                    }\n                ]\n            }\n        ]\n    }\n}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\n  \"x\": 1,\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "changed": false,
+        "parseError": false
+      }
+    },
+    {
+      "name": "stale matcher is repaired",
+      "raw": "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"Write|Edit\",\"hooks\":[{\"type\":\"command\",\"command\":\"/home/u/.claudegate/hook.sh\"}]}]}}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "changed": true,
+        "parseError": false
+      }
+    },
+    {
+      "name": "stale command is repaired",
+      "raw": "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"^(Write|Edit|MultiEdit|Bash)$\",\"hooks\":[{\"type\":\"command\",\"command\":\"/old/.claudegate/hook.sh\"},{\"type\":\"command\",\"command\":\"/keep\"}]}]}}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          },\n          {\n            \"type\": \"command\",\n            \"command\": \"/keep\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+        "changed": true,
+        "parseError": false
+      }
+    },
+    {
+      "name": "comment is a parse error",
+      "raw": "{\n// c\n\"a\":1}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\n// c\n\"a\":1}",
+        "changed": false,
+        "parseError": true
+      }
+    },
+    {
+      "name": "array is a parse error",
+      "raw": "[]",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "[]",
+        "changed": false,
+        "parseError": true
+      }
+    },
+    {
+      "name": "null is a parse error",
+      "raw": "null",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "null",
+        "changed": false,
+        "parseError": true
+      }
+    },
+    {
+      "name": "number is a parse error",
+      "raw": "42",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "42",
+        "changed": false,
+        "parseError": true
+      }
+    },
+    {
+      "name": "truncated is a parse error",
+      "raw": "{\"a\":",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": {
+        "content": "{\"a\":",
+        "changed": false,
+        "parseError": true
+      }
+    }
+  ],
+  "refuse": [
+    {
+      "name": "hooks is a string",
+      "raw": "{\"hooks\":\"x\"}",
+      "hookCommand": "/home/u/.claudegate/hook.sh"
+    },
+    {
+      "name": "hooks is a number",
+      "raw": "{\"hooks\":3}",
+      "hookCommand": "/home/u/.claudegate/hook.sh"
+    },
+    {
+      "name": "hooks is an array",
+      "raw": "{\"hooks\":[]}",
+      "hookCommand": "/home/u/.claudegate/hook.sh"
+    },
+    {
+      "name": "PreToolUse is an object",
+      "raw": "{\"hooks\":{\"PreToolUse\":{}}}",
+      "hookCommand": "/home/u/.claudegate/hook.sh"
+    },
+    {
+      "name": "PreToolUse is a string",
+      "raw": "{\"hooks\":{\"PreToolUse\":\"x\"}}",
+      "hookCommand": "/home/u/.claudegate/hook.sh"
+    }
+  ]
+}

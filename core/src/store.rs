@@ -139,6 +139,11 @@ fn tmp_name(target: &Path) -> PathBuf {
 /// Crate-private: the only callers are `persist` (session files) and `workspace_write` (which
 /// checks the path is a key of the session being decided). `no_writes` forbids it elsewhere.
 pub(crate) fn atomic_write(target: &Path, content: &str, preserve_existing: bool) -> io::Result<()> {
+    atomic_write_bytes(target, content.as_bytes(), preserve_existing)
+}
+
+/// `atomic_write` for bytes (a settings.json restored from its backup byte for byte).
+pub(crate) fn atomic_write_bytes(target: &Path, content: &[u8], preserve_existing: bool) -> io::Result<()> {
     let mut target = target.to_path_buf();
     let mut perms = None;
     if preserve_existing {
@@ -155,7 +160,7 @@ pub(crate) fn atomic_write(target: &Path, content: &str, preserve_existing: bool
             fs::create_dir_all(parent)?;
         }
         let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-        f.write_all(content.as_bytes())?;
+        f.write_all(content)?;
         drop(f);
         if let Some(p) = perms {
             fs::set_permissions(&tmp, p)?;
@@ -675,6 +680,412 @@ pub(crate) fn excludes_remove(home: &Path, root: &Path) -> Result<(), StoreError
     let key = excludes_key(root);
     update_excludes(home, |map| Ok(map.remove(&key).is_some())).map(|_| ())
 }
+
+// ---- Capture setup -------------------------------------------------------------------------
+//
+// A port of the extension's `HookInstaller.setup` (`hookInstaller.ts` v1.16.1) for a machine
+// without the extension: the hook files, a marker, then `registerHookInSettings` and its guarded
+// write. `~/.claude/settings.json` is the user's whole Claude Code configuration, so:
+//
+// - it is written only at the realpath of `<HOME>/.claude/settings.json` (a dotfiles symlink
+//   keeps its link), and only when it reads as a plain JSON object;
+// - a timestamped copy goes beside the literal path first (`settings.json.claudegate-<ISO>.bak`,
+//   the extension's name and its 5-copy ring), and a failed copy refuses the write;
+// - the result is re-read and checked with `verify_settings_content`; anything wrong restores the
+//   copy byte for byte.
+//
+// Any failure after the first write rolls back what this call wrote and nothing else: a file is
+// removed only if this call created it and it still holds the bytes we wrote; a replaced marker
+// gets its old bytes back; a folder is removed only if this call created it and it is empty.
+
+use crate::capture::{
+    backups_to_prune, capture_status, compute_settings_patch, verify_settings_content, CaptureStatus, InstallError,
+    InstallReport, HOOK_PY_FILE, HOOK_SH_CONTENT, HOOK_SH_FILE, MARKER_FILE, SETTINGS_BACKUP_RETENTION,
+};
+
+#[cfg(test)]
+thread_local! {
+    static INSTALL_FAULT: std::cell::RefCell<Option<Box<dyn FnMut(&str) -> io::Result<()>>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam: called at each install stage (`before_hook_py`, `after_hooks`, `before_backup`,
+/// `after_settings_write`); an error aborts the install there.
+#[cfg(test)]
+pub(crate) fn set_install_fault(f: Option<Box<dyn FnMut(&str) -> io::Result<()>>>) {
+    INSTALL_FAULT.with(|r| *r.borrow_mut() = f);
+}
+
+fn install_fault(_stage: &str) -> io::Result<()> {
+    #[cfg(test)]
+    return INSTALL_FAULT.with(|r| r.borrow_mut().as_mut().map_or(Ok(()), |f| f(_stage)));
+    #[cfg(not(test))]
+    Ok(())
+}
+
+fn refused(what: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, format!("refusing to write {what}"))
+}
+
+/// The hook files may only be `<claudegate home>/{hook.py,hook.sh,.installed-by-desktop}`.
+pub(crate) fn guard_hook_file(claudegate_home: &Path, path: &Path) -> io::Result<()> {
+    let ok = path.parent() == Some(claudegate_home)
+        && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| [HOOK_PY_FILE, HOOK_SH_FILE, MARKER_FILE].contains(&n));
+    if ok { Ok(()) } else { Err(refused(&path.display().to_string())) }
+}
+
+fn settings_literal(home: &Path) -> PathBuf {
+    home.join(".claude").join("settings.json")
+}
+
+/// Where a settings write must land: the realpath of `<home>/.claude/settings.json`, or that
+/// literal path when nothing is there yet. A dangling symlink has no safe answer.
+fn settings_target(home: &Path) -> io::Result<PathBuf> {
+    let literal = settings_literal(home);
+    match fs::symlink_metadata(&literal) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(literal),
+        Err(e) => Err(e),
+        Ok(_) => fs::canonicalize(&literal).map_err(|e| {
+            io::Error::new(e.kind(), format!("{} is a link to nothing ({e})", literal.display()))
+        }),
+    }
+}
+
+/// A settings write may only target `settings_target(home)`.
+pub(crate) fn guard_settings_target(home: &Path, path: &Path) -> io::Result<()> {
+    if settings_target(home)? == path { Ok(()) } else { Err(refused(&path.display().to_string())) }
+}
+
+/// `new Date().toISOString().replace(/:/g, "-")`: `2026-11-18T10-20-30.123Z`.
+fn iso_backup_stamp(t: SystemTime) -> String {
+    let ms = t.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+    let (days, rem) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
+    let (y, mo, d) = civil_from_days(days);
+    let (h, mi, s, milli) = (rem / 3_600_000, rem / 60_000 % 60, rem / 1000 % 60, rem % 1000);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}-{mi:02}-{s:02}.{milli:03}Z")
+}
+
+#[cfg(unix)]
+fn mode_of(p: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(p).ok().map(|m| m.permissions().mode() & 0o777)
+}
+
+/// Create `path` with `content`, never replacing anything: the bytes go to a temp file first and
+/// are published with a hard link, which fails if the name exists. Where hard links are not
+/// supported, falls back to `create_new` on the path itself.
+#[cfg(unix)]
+fn create_file_exclusive(path: &Path, content: &[u8], mode: Option<u32>) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tmp_name(path);
+    let staged = (|| {
+        let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        f.write_all(content)?;
+        f.sync_all()?;
+        drop(f);
+        if let Some(m) = mode {
+            fs::set_permissions(&tmp, fs::Permissions::from_mode(m))?;
+        }
+        fs::hard_link(&tmp, path)
+    })();
+    let _ = fs::remove_file(&tmp);
+    match staged {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists && fs::symlink_metadata(path).is_err() => {
+            let mut f = OpenOptions::new().write(true).create_new(true).open(path)?;
+            let written = f.write_all(content).and_then(|()| f.sync_all());
+            drop(f);
+            if let Err(e) = written.and_then(|()| match mode {
+                Some(m) => fs::set_permissions(path, fs::Permissions::from_mode(m)),
+                None => Ok(()),
+            }) {
+                let _ = fs::remove_file(path);
+                return Err(e);
+            }
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+/// What to put back if the install fails.
+#[derive(Default)]
+struct Undo {
+    /// Files this call created, with the bytes it wrote.
+    created: Vec<(PathBuf, Vec<u8>)>,
+    /// Files this call replaced, with their old bytes.
+    replaced: Vec<(PathBuf, Vec<u8>)>,
+    /// Folders this call created (removed only while empty).
+    dirs: Vec<PathBuf>,
+    /// The settings write: its target and the backup to restore from. `None`: the file did not
+    /// exist before, so it is removed, whatever it holds now, as a backup is restored whatever the
+    /// file holds now (the extension's rule).
+    settings: Option<(PathBuf, Option<PathBuf>)>,
+}
+
+impl Undo {
+    /// Best-effort, settings first. Returns what could not be put back.
+    fn run(self) -> Option<String> {
+        let mut problems = Vec::new();
+        if let Some((target, backup)) = self.settings {
+            let res = match &backup {
+                Some(b) => fs::read(b).and_then(|bytes| atomic_write_bytes(&target, &bytes, true)),
+                None => fs::remove_file(&target),
+            };
+            if let Err(e) = res {
+                let from = backup.map(|b| format!("; your previous settings are in {}", b.display())).unwrap_or_default();
+                problems.push(format!("could not restore {}: {e}{from}", target.display()));
+            }
+        }
+        for (p, ours) in self.created.into_iter().rev() {
+            if fs::read(&p).is_ok_and(|now| now == ours) {
+                if let Err(e) = fs::remove_file(&p) {
+                    problems.push(format!("could not remove {}: {e}", p.display()));
+                }
+            }
+        }
+        for (p, old) in self.replaced {
+            if let Err(e) = atomic_write_bytes(&p, &old, true) {
+                problems.push(format!("could not restore {}: {e}", p.display()));
+            }
+        }
+        for d in self.dirs.into_iter().rev() {
+            let _ = fs::remove_dir(d); // only succeeds while empty
+        }
+        (!problems.is_empty()).then(|| problems.join("; "))
+    }
+}
+
+fn failed(undo: Undo, reason: impl std::fmt::Display) -> InstallError {
+    InstallError::Failed { reason: reason.to_string(), rollback: undo.run() }
+}
+
+/// Copy `bytes` (the settings as read) to `<literal>.claudegate-<stamp>[_n].bak` with the
+/// original's mode, then prune the ring to the extension's keep count (best-effort).
+#[cfg(unix)]
+fn backup_settings(literal: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let stamp = iso_backup_stamp(SystemTime::now());
+    let mode = mode_of(literal).unwrap_or(0o600);
+    let mut n = 0u32;
+    let path = loop {
+        let candidate =
+            if n == 0 { with_suffix(literal, &format!(".claudegate-{stamp}.bak")) } else { with_suffix(literal, &format!(".claudegate-{stamp}_{n}.bak")) };
+        match OpenOptions::new().write(true).create_new(true).mode(mode).open(&candidate) {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
+                    drop(f);
+                    let _ = fs::remove_file(&candidate);
+                    return Err(e);
+                }
+                break candidate;
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < 10_000 => n += 1,
+            Err(e) => return Err(e),
+        }
+    };
+    if let (Some(dir), Some(base)) = (literal.parent(), literal.file_name().and_then(|b| b.to_str())) {
+        if let Ok(rd) = fs::read_dir(dir) {
+            let names: Vec<String> = rd.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+            for name in backups_to_prune(&names, base, SETTINGS_BACKUP_RETENTION) {
+                let _ = fs::remove_file(dir.join(name));
+            }
+        }
+    }
+    Ok(path)
+}
+
+fn create_dir_tracked(dir: &Path, undo: &mut Undo) -> io::Result<()> {
+    match fs::create_dir(dir) {
+        Ok(()) => {
+            undo.dirs.push(dir.to_path_buf());
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Sets capture up under `home` (the user's HOME, injectable for tests). Order:
+/// 1. refuse unless read-write, the bundled hook is stamped, and `capture_status` is exactly
+///    `NotSetUp` (python3 present, settings strict JSON object or absent, no claudegate entry);
+///    refuse an existing hook.py or a hook.sh that is not the extension's wrapper;
+/// 2. create hook.py and hook.sh (0755) without replacing anything, then the marker;
+/// 3. back up settings.json (refusing if it changed since it was read);
+/// 4. write `compute_settings_patch`'s content atomically to the realpath;
+/// 5. re-read and `verify_settings_content`; on any failure from step 2 on, roll back.
+///
+/// The wrapper runs `$HOME/.claudegate/hook.py`, so the hook files go to `<home>/.claudegate`
+/// whatever `CLAUDEGATE_HOME` says.
+pub(crate) fn install_capture(
+    home: &Path,
+    bundled_hook: &str,
+    python3: bool,
+    read_only: bool,
+) -> Result<InstallReport, InstallError> {
+    if read_only {
+        return Err(InstallError::ReadOnly);
+    }
+    if !cfg!(unix) {
+        return Err(InstallError::Unsupported);
+    }
+    let version = crate::capture::bundled_hook_version(bundled_hook).ok_or(InstallError::BundledHook)?;
+    if !home.is_absolute() || !home.is_dir() {
+        return Err(InstallError::Failed { reason: format!("{} is not a home folder", home.display()), rollback: None });
+    }
+    install_unix(home, bundled_hook, &version, python3)
+}
+
+#[cfg(not(unix))]
+fn install_unix(_: &Path, _: &str, _: &str, _: bool) -> Result<InstallReport, InstallError> {
+    Err(InstallError::Unsupported)
+}
+
+#[cfg(unix)]
+fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -> Result<InstallReport, InstallError> {
+    let unreadable = |e: io::Error| InstallError::SettingsUnreadable(e.to_string());
+    let cg = home.join(".claudegate");
+    let (py, sh, marker) = (cg.join(HOOK_PY_FILE), cg.join(HOOK_SH_FILE), cg.join(MARKER_FILE));
+    let claude_dir = home.join(".claude");
+    let literal = settings_literal(home);
+    let hook_command = sh
+        .to_str()
+        .ok_or_else(|| InstallError::Failed { reason: "the home folder's path is not valid UTF-8".into(), rollback: None })?
+        .to_owned();
+
+    // 1. Read and decide. Only "not found" means a fresh install; any other read error refuses.
+    let target = settings_target(home).map_err(unreadable)?;
+    let raw: Option<String> = match fs::read(&target) {
+        Ok(b) => Some(String::from_utf8(b).map_err(|_| InstallError::SettingsUnreadable("not UTF-8 text".into()))?),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(unreadable(e)),
+    };
+    match capture_status(raw.as_deref(), fs::symlink_metadata(&marker).is_ok(), python3) {
+        CaptureStatus::NotSetUp => {}
+        CaptureStatus::PythonMissing => return Err(InstallError::PythonMissing),
+        CaptureStatus::SettingsUnreadable(r) => return Err(InstallError::SettingsUnreadable(r)),
+        other => return Err(InstallError::AlreadySetUp(other)),
+    }
+    let patch = compute_settings_patch(raw.as_deref().unwrap_or(""), &hook_command);
+    if patch.parse_error {
+        return Err(InstallError::SettingsUnreadable("not a JSON object".into()));
+    }
+    if let Some(why) = patch.shape_error {
+        return Err(InstallError::SettingsUnreadable(why));
+    }
+    if !patch.changed {
+        return Err(InstallError::AlreadySetUp(CaptureStatus::NotSetUp));
+    }
+    if fs::symlink_metadata(&py).is_ok() {
+        return Err(InstallError::HookFilesExist);
+    }
+    let write_sh = match fs::read(&sh) {
+        Ok(b) if b == HOOK_SH_CONTENT.as_bytes() => false,
+        Ok(_) => return Err(InstallError::ForeignWrapper),
+        Err(e) if e.kind() == io::ErrorKind::NotFound && fs::symlink_metadata(&sh).is_err() => true,
+        Err(_) => return Err(InstallError::ForeignWrapper),
+    };
+    let old_marker = match fs::read(&marker) {
+        Ok(b) => Some(b),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(InstallError::Failed { reason: format!("could not read {}: {e}", marker.display()), rollback: None }),
+    };
+
+    let mut undo = Undo::default();
+
+    // 2. Hook files, then the marker.
+    if let Err(e) = create_dir_tracked(&cg, &mut undo) {
+        return Err(failed(undo, format!("could not create {}: {e}", cg.display())));
+    }
+    if let Err(e) = install_fault("before_hook_py") {
+        return Err(failed(undo, e));
+    }
+    for (path, content, mode, wanted) in
+        [(&py, bundled_hook.as_bytes(), None, true), (&sh, HOOK_SH_CONTENT.as_bytes(), Some(0o755), write_sh)]
+    {
+        if !wanted {
+            continue;
+        }
+        let res = guard_hook_file(&cg, path).and_then(|()| create_file_exclusive(path, content, mode));
+        match res {
+            Ok(()) => undo.created.push((path.clone(), content.to_vec())),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && path == &py => {
+                undo.run();
+                return Err(InstallError::HookFilesExist);
+            }
+            Err(e) => return Err(failed(undo, format!("could not write {}: {e}", path.display()))),
+        }
+    }
+    if old_marker.as_deref() != Some(version.as_bytes()) {
+        let res = guard_hook_file(&cg, &marker).and_then(|()| match &old_marker {
+            None => create_file_exclusive(&marker, version.as_bytes(), None),
+            Some(_) => atomic_write_bytes(&marker, version.as_bytes(), true),
+        });
+        match res {
+            Ok(()) => match old_marker {
+                None => undo.created.push((marker.clone(), version.as_bytes().to_vec())),
+                Some(old) => undo.replaced.push((marker.clone(), old)),
+            },
+            Err(e) => return Err(failed(undo, format!("could not write {}: {e}", marker.display()))),
+        }
+    }
+    if let Err(e) = install_fault("after_hooks") {
+        return Err(failed(undo, e));
+    }
+
+    // 3. Back up what we read; a file that changed since then is someone else's write, not ours to
+    //    clobber.
+    if let Err(e) = create_dir_tracked(&claude_dir, &mut undo) {
+        return Err(failed(undo, format!("could not create {}: {e}", claude_dir.display())));
+    }
+    if let Err(e) = install_fault("before_backup") {
+        return Err(failed(undo, e));
+    }
+    let backup = match &raw {
+        None => {
+            if fs::symlink_metadata(&literal).is_ok() {
+                return Err(failed(undo, "settings.json appeared while setting up; try again"));
+            }
+            None
+        }
+        Some(text) => {
+            match fs::read(&target) {
+                Ok(now) if now == text.as_bytes() => {}
+                Ok(_) => return Err(failed(undo, "settings.json changed while setting up; try again")),
+                Err(e) => return Err(failed(undo, format!("could not re-read settings.json: {e}"))),
+            }
+            match backup_settings(&literal, text.as_bytes()) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    return Err(failed(undo, format!("could not back up settings.json, so it was not changed: {e}")))
+                }
+            }
+        }
+    };
+
+    // 4. Write to the realpath.
+    if let Err(e) = guard_settings_target(home, &target) {
+        return Err(failed(undo, e));
+    }
+    if let Err(e) = atomic_write_bytes(&target, patch.content.as_bytes(), true) {
+        return Err(failed(undo, format!("could not write settings.json: {e}")));
+    }
+    undo.settings = Some((target.clone(), backup.clone()));
+    if let Err(e) = install_fault("after_settings_write") {
+        return Err(failed(undo, e));
+    }
+
+    // 5. Verify what is on disk now.
+    let after = fs::read_to_string(&target).unwrap_or_default();
+    if let Some(problem) = verify_settings_content(&after, raw.as_deref().unwrap_or(""), &hook_command) {
+        return Err(failed(undo, format!("settings.json did not verify after the write: {problem}")));
+    }
+
+    let created = undo.created.iter().map(|(p, _)| p.clone()).filter(|p| p != &marker).collect();
+    Ok(InstallReport { settings: target, backup, created, version: version.to_owned() })
+}
+
+#[path = "../tests/unit/install_capture.rs"]
+#[cfg(test)]
+mod install_capture_tests;
 
 #[path = "../tests/unit/excludes_write.rs"]
 #[cfg(test)]
