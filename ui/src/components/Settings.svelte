@@ -2,7 +2,7 @@
   import { onMount, tick } from "svelte";
   import type { EditorConfig } from "../lib/editors";
   import { menuOptions } from "../lib/editors";
-  import { sourceLabel, type Resolved, type SettingKey, type SettingsView } from "../lib/settings";
+  import { appProtectedList, protectedChips, sourceLabel, type Resolved, type SettingKey, type SettingsView } from "../lib/settings";
 
   let {
     settings,
@@ -96,6 +96,10 @@
   }
 
   const editors = $derived(menuOptions(config));
+  /** Secret files: which chips can be removed here, and which come from this project's .vscode. */
+  const pChips = $derived(new Map(protectedChips(settings).map((c) => [c.glob, c])));
+  /** The app's own protected list: what an edit saves (never the project's added-back globs). */
+  const appProtected = $derived(appProtectedList(settings));
   const owner = $derived(settings.excludeOwner);
   const readOnly = $derived(config.readOnly === true);
   /** The Take back confirmation is open. */
@@ -137,21 +141,29 @@
   </div>
 {/snippet}
 
-{#snippet toggle(on: boolean, label: string, change: (on: boolean) => void)}
-  <button class="switch" role="switch" aria-checked={on} aria-label={label} onclick={() => change(!on)}>
+{#snippet toggle(on: boolean, label: string, change: (on: boolean) => void, disabled = false)}
+  <button class="switch" role="switch" aria-checked={on} aria-label={label} {disabled} onclick={() => change(!on)}>
     <span class="knob"></span>
   </button>
 {/snippet}
 
-{#snippet chips(list: string[], removable: boolean, onremove: (p: string) => void, label: string)}
+{#snippet chips(
+  list: string[],
+  removable: boolean | ((p: string) => boolean),
+  onremove: (p: string) => void,
+  label: string,
+  noteFor: (p: string) => string | null = () => null,
+)}
   {#if list.length === 0}
     <p class="none">None</p>
   {:else}
     <ul class="chips" aria-label={label}>
       {#each list as p (p)}
-        <li class="chip">
+        {@const note = noteFor(p)}
+        <li class="chip" title={note ? `${p} (${note}; change it there)` : undefined}>
           <span class="glob">{p}</span>
-          {#if removable}
+          {#if note}<span class="chip-note">{note}</span>{/if}
+          {#if typeof removable === "function" ? removable(p) : removable}
             <button class="x" aria-label="Remove {p}" title="Remove" onclick={() => onremove(p)}>
               <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true">
                 <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
@@ -283,9 +295,15 @@
         {@render source("protected", settings.protected)}
       </div>
       <div class="control">
-        {@render chips(settings.protected.value, settings.protected.source === "app", (p) => void removePattern("protected", settings.protected.value, p), "Secret file patterns")}
+        {@render chips(
+          settings.protected.value,
+          (p) => pChips.get(p)?.removable === true,
+          (p) => void removePattern("protected", appProtected, p),
+          "Secret file patterns",
+          (p) => pChips.get(p)?.note ?? null,
+        )}
         {#if settings.protected.source === "app"}
-          {@render adder("protected", settings.protected.value, "Add a secret file pattern")}
+          {@render adder("protected", appProtected, "Add a secret file pattern")}
         {:else}
           <p class="note">To edit this list, Override it first.</p>
         {/if}
@@ -365,7 +383,8 @@
         <div class="source"><span class="badge" class:app={settings.hookLog.source === "app"}>{settings.hookLog.value ? "On for every ClaudeGate" : "Default"}</span></div>
       </div>
       <div class="control">
-        {@render toggle(settings.hookLog.value, "Hook log", (on) => void onhooklog(on).then(stamp))}
+        {@render toggle(settings.hookLog.value, "Hook log", (on) => void onhooklog(on).then(stamp), readOnly)}
+        {#if readOnly}<p class="note">Read-only mode is on. Turn it off to change the hook log.</p>{/if}
       </div>
     </div>
 
@@ -582,6 +601,10 @@
   .switch[aria-checked="true"] {
     background: var(--positive);
   }
+  .switch:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
   .knob {
     position: absolute;
     top: 2px;
@@ -655,6 +678,11 @@
     font-family: var(--font-mono);
     font-size: var(--fs-meta);
     color: var(--text);
+  }
+  .chip-note {
+    margin-left: 4px;
+    font-size: var(--fs-small);
+    color: var(--muted);
   }
   .x {
     display: grid;

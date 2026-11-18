@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chooseSelection, clipboardText, formatRef, selectionOnModified } from "./ref";
+import { chooseSelection, clipboardText, formatRef, pasteHint, refRange, selectionOnModified } from "./ref";
 
 const ROOT = "/home/dev/shop";
 
@@ -65,5 +65,24 @@ describe("chooseSelection", () => {
   });
   it("skips an empty side", () => {
     expect(chooseSelection([{ range: null, focused: true }, { range: { start: 1, end: 2 }, focused: true }], true)).toEqual({ start: 1, end: 2 });
+  });
+});
+
+describe("refRange (M8)", () => {
+  const sel = { start: 3, end: 7 };
+  it("keeps a selection on the Pending tab, where the modified side is the file on disk", () => {
+    expect(refRange("pending", sel)).toEqual(sel);
+  });
+  it("is always the whole file on Accepted and Rejected: those lines are not on disk", () => {
+    expect(refRange("accepted", sel)).toBeNull();
+    expect(refRange("rejected", sel)).toBeNull();
+    expect(formatRef(`${ROOT}/a.ts`, ROOT, "relative", refRange("accepted", sel))).toBe("@a.ts");
+  });
+});
+
+describe("pasteHint", () => {
+  it("is Cmd+V on macOS and Ctrl+Shift+V elsewhere (terminals)", () => {
+    expect(pasteHint(true)).toBe("Cmd+V");
+    expect(pasteHint(false)).toBe("Ctrl+Shift+V");
   });
 });

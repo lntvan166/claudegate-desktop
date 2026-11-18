@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { ProjectView } from "./api";
 import {
+  DEFAULT_SETTINGS,
+  appProtectedList,
+  protectedChips,
+  removedMessage,
+  settingsReloadOnChange,
+  type SettingsView,
   ageLabel,
   globMatcher,
   groupsBySession,
@@ -149,5 +155,55 @@ describe("session groups in the visible tree", () => {
     const row = g[1].rows[0];
     const key = groupCollapseKey("pending", g[1].key!);
     expect(collapseKeysToReveal(row, "pending", [key, groupCollapseKey("pending", g[0].key!)])).toEqual([key]);
+  });
+});
+
+describe("protected chips (a project's .vscode globs added back to an app list)", () => {
+  const base = { ...DEFAULT_SETTINGS };
+  it("makes the project's own globs non-removable and labels them", () => {
+    const s: SettingsView = {
+      ...base,
+      protected: { value: ["**/.env", "secrets/**"], source: "app" },
+      protectedWorkspace: ["secrets/**"],
+    };
+    expect(protectedChips(s)).toEqual([
+      { glob: "**/.env", removable: true, note: null },
+      { glob: "secrets/**", removable: false, note: "from this project's .vscode" },
+    ]);
+  });
+  it("saves only the app's own list, never the project's globs", () => {
+    const s: SettingsView = {
+      ...base,
+      protected: { value: ["**/.env", "**/*.pem", "secrets/**"], source: "app" },
+      protectedWorkspace: ["secrets/**"],
+    };
+    expect(appProtectedList(s)).toEqual(["**/.env", "**/*.pem"]);
+  });
+  it("is not removable at all when the list is not the app's", () => {
+    const s: SettingsView = { ...base, protected: { value: ["**/.env"], source: "vsCode" }, protectedWorkspace: [] };
+    expect(protectedChips(s)).toEqual([{ glob: "**/.env", removable: false, note: null }]);
+  });
+});
+
+describe("settingsReloadOnChange", () => {
+  it("reloads on a relist (empty roots) and on a change touching the selected project", () => {
+    expect(settingsReloadOnChange([], "/a")).toBe(true);
+    expect(settingsReloadOnChange([], null)).toBe(true);
+    expect(settingsReloadOnChange(["/b", "/a"], "/a")).toBe(true);
+  });
+  it("leaves it alone for other projects' changes", () => {
+    expect(settingsReloadOnChange(["/b"], "/a")).toBe(false);
+    expect(settingsReloadOnChange(["/b"], null)).toBe(false);
+  });
+});
+
+describe("removedMessage", () => {
+  it("says the history is kept when the root was unregistered", () => {
+    expect(removedMessage("shop", true)).toBe("shop removed; its review history is kept");
+  });
+  it("words the forget-only case", () => {
+    expect(removedMessage("shop", false)).toBe(
+      "shop is no longer managed here. VS Code also uses this folder, so capture stays on and it stays in your list.",
+    );
   });
 });

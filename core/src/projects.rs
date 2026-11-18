@@ -166,6 +166,12 @@ fn sync_root(home: &Path, cfg: &mut impl AppProjects, root: &str, now_ms: i64) -
     Ok(wrote.then(|| RootChange::Written { root: root.to_string(), globs: want }))
 }
 
+/// One root's exclude sync now (`sync_excludes` for `root` alone), with the error kept: the
+/// caller of a user's edit reports it rather than log it.
+pub fn sync_exclude_of(home: &Path, cfg: &mut impl AppProjects, root: &str) -> Result<Option<RootChange>, String> {
+    sync_root(home, cfg, root, crate::time::now_ms())
+}
+
 /// "Take back" for a root VS Code took over: the app owns its exclude again. Clears
 /// `managedByVsCode`, writes the app's effective exclude over whatever is there (unconditionally:
 /// the key is VS Code's value, which a plain sync would read as a takeover again) and records it.

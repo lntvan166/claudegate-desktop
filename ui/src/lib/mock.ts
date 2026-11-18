@@ -402,6 +402,7 @@ function mockSettings(root: string | null): SettingsView {
     extraHide: (root && extraHide[root]) || [],
     excludeOwner: excludeOwner(root),
     copyRefPathStyle: appSettings.copyRefPathStyle === "absolute" ? "absolute" : "relative",
+    protectedWorkspace: [],
   };
 }
 
@@ -511,6 +512,7 @@ export const mockApi: Api = {
     return delay(mockSettings(root));
   },
   setHookLog: (on, root) => {
+    if (config.readOnly) throw "Read-only mode is on. Turn it off in Settings to turn the hook log on or off.";
     hookLog = on;
     return delay(mockSettings(root));
   },

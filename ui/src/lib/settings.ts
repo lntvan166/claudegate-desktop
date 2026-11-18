@@ -27,6 +27,13 @@ export type SettingsView = {
   excludeOwner: ExcludeOwner;
   /** App-only: how "Copy reference for Claude" writes the path. */
   copyRefPathStyle: RefPathStyle;
+  /**
+   * The globs this project's `.vscode` adds back to an app `protected` list. They are shown but
+   * cannot be removed here (the removal would never stick).
+   */
+  protectedWorkspace: string[];
+  /** The change was saved, but a step after it failed (e.g. the exclude sync). */
+  warning?: string | null;
 };
 
 export type ExcludeOwner = "owned" | "managedByVsCode" | "vsCode";
@@ -51,6 +58,7 @@ export const DEFAULT_SETTINGS: SettingsView = {
   extraHide: [],
   excludeOwner: "vsCode",
   copyRefPathStyle: "relative",
+  protectedWorkspace: [],
 };
 
 export function sourceLabel(source: Source): string {
@@ -207,4 +215,41 @@ export function parsePatterns(text: string): string[] {
   const out: string[] = [];
   for (const p of text.split(/[\n,]/).map((s) => s.trim())) if (p && !out.includes(p)) out.push(p);
   return out;
+}
+
+/** One chip of the Secret files list. */
+export type ProtectedChip = { glob: string; removable: boolean; note: string | null };
+
+/**
+ * The Secret files chips: only the app's own globs can be removed; a glob this project's
+ * `.vscode` adds back is labelled and stays.
+ */
+export function protectedChips(s: SettingsView): ProtectedChip[] {
+  const ws = s.protectedWorkspace ?? [];
+  return s.protected.value.map((glob) => {
+    const fromWs = ws.includes(glob);
+    return { glob, removable: s.protected.source === "app" && !fromWs, note: fromWs ? "from this project's .vscode" : null };
+  });
+}
+
+/** The app's own protected list, which is what an edit saves: never the project's added-back globs. */
+export function appProtectedList(s: SettingsView): string[] {
+  const ws = s.protectedWorkspace ?? [];
+  return s.protected.value.filter((g) => !ws.includes(g));
+}
+
+/**
+ * Whether a `claudegate://changed` event can have changed the Settings screen: a relist (empty
+ * `roots`: the roots, excludes.json or the config changed, e.g. VS Code took a project over) or a
+ * change touching the selected project.
+ */
+export function settingsReloadOnChange(roots: string[], selected: string | null): boolean {
+  return roots.length === 0 || (selected !== null && roots.includes(selected));
+}
+
+/** What Remove says: the root left the shared list, or (VS Code also uses it) only the app forgot it. */
+export function removedMessage(name: string, unregistered: boolean): string {
+  return unregistered
+    ? `${name} removed; its review history is kept`
+    : `${name} is no longer managed here. VS Code also uses this folder, so capture stays on and it stays in your list.`;
 }

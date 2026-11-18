@@ -61,7 +61,7 @@
   import type { IconTheme } from "./lib/icons";
   import { actionFor, decisionFor, DIFF_HIDDEN_REFUSAL, isTypingTarget, nextIndex, READ_ONLY_REFUSAL, refKeyFor, WAITING_REFUSAL } from "./lib/keys";
   import { writeClipboard } from "./lib/clipboard";
-  import { clipboardText, formatRef, type LineRange } from "./lib/ref";
+  import { clipboardText, formatRef, pasteHint, refRange, type LineRange } from "./lib/ref";
   import { basename, groupsFor, scopeLabel, selectionAfterList, sortProjects, splitHidden, type Row } from "./lib/rows";
   import { Rechecks } from "./lib/recheck";
   import {
@@ -88,6 +88,8 @@
     hideExtra,
     protectedAmong,
     protectPrompt,
+    removedMessage,
+    settingsReloadOnChange,
     type SettingsView,
   } from "./lib/settings";
 
@@ -157,10 +159,11 @@
    */
   async function copyRef(row: Row, sel: LineRange | null = null) {
     if (!selected) return;
-    const ref = formatRef(row.path, selected, settings.copyRefPathStyle, sel);
+    // Line numbers only on Pending, where the diff's modified side is the file on disk.
+    const ref = formatRef(row.path, selected, settings.copyRefPathStyle, refRange(tab, sel));
     try {
       await writeClipboard(clipboardText(ref));
-      announce(`Copied ${ref} — paste in Claude with ${isMac ? "Cmd+V" : "Ctrl+Shift+V"}`);
+      announce(`Copied ${ref} — paste in Claude with ${pasteHint(isMac)}`);
     } catch (e) {
       show({ text: `Couldn't copy the reference: ${e instanceof Error ? e.message : e}`, tone: "error" });
     }
@@ -632,11 +635,7 @@
       const r = await removeProject(root);
       config = await getConfig();
       await loadProjects();
-      announce(
-        r.unregistered
-          ? `${name} removed; its review history is kept`
-          : `${name} removed from the app. VS Code also uses this folder, so capture stays on.`,
-      );
+      announce(removedMessage(name, r.unregistered));
     } catch (e) {
       show({ text: `Couldn't remove ${name}: ${e}`, tone: "error" });
     }
@@ -716,6 +715,7 @@
       const s = await save();
       settings = s;
       settingsFor = selected;
+      if (s.warning) show({ text: s.warning, tone: "warn" });
       if (reload) {
         if (selected) await loadView(selected);
         void loadProjects();
@@ -723,6 +723,13 @@
       return true;
     } catch (e) {
       show({ text: `Couldn't change ${what}: ${e}`, tone: "error" });
+      // The refusal may come from state the screen no longer matches (VS Code took the project
+      // over, read-only turned on elsewhere): show what is true now.
+      void loadSettings(selected);
+      if (reload) {
+        if (selected) void loadView(selected);
+        void loadProjects();
+      }
       return false;
     }
   }
@@ -907,6 +914,8 @@
       .finally(() => void loadProjects());
     window.addEventListener("keydown", onKey);
     const off = onChanged(({ roots }) => {
+      // A takeover, a config change or the selected project's own change can alter what Settings shows.
+      if (settingsReloadOnChange(roots, selected)) void loadSettings(selected);
       if (roots.length === 0) {
         void loadProjects();
         return;

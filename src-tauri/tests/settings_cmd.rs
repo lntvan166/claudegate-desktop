@@ -238,3 +238,54 @@ fn copy_ref_path_style_is_app_only_defaults_to_relative_and_is_validated() {
     save_setting(&p, "copyRefPathStyle", serde_json::Value::Null, None).unwrap();
     assert_eq!(serde_json::to_value(settings_view(&p, None, &src)).unwrap()["copyRefPathStyle"], "relative");
 }
+
+/// Protected chip: an app `protected` list in a project whose `.vscode` protects more globs shows
+/// those globs (added back), and says which they are so the UI can make them non-removable.
+#[test]
+fn protected_workspace_names_the_globs_the_project_adds_back() {
+    let home = tempfile::tempdir().unwrap();
+    let p = config_path_in(home.path());
+    let src = sources(home.path());
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    fs::create_dir_all(b.path().join(".vscode")).unwrap();
+    fs::write(b.path().join(".vscode/settings.json"), r#"{ "claudegate.protected": { "secrets/**": true, "**/.pem": true } }"#).unwrap();
+    let (ra, rb) = (a.path().to_string_lossy().into_owned(), b.path().to_string_lossy().into_owned());
+    // No app list: the merged layers, nothing is "added back".
+    assert!(settings_view(&p, Some(&rb), &src).protected_workspace.is_empty());
+    save_setting(&p, "protected", json!(["**/.env", "**/.pem"]), None).unwrap();
+    let in_b = settings_view(&p, Some(&rb), &src);
+    assert_eq!(in_b.protected_workspace, vec!["secrets/**".to_string()], "only what the app list lacks");
+    assert!(in_b.effective.protected.value.contains(&"secrets/**".to_string()));
+    assert!(settings_view(&p, Some(&ra), &src).protected_workspace.is_empty());
+    assert_eq!(serde_json::to_value(&in_b).unwrap()["protectedWorkspace"], json!(["secrets/**"]));
+}
+
+/// M7: read-only mode blocks the hook-log toggle like every other shared-file write; the
+/// sentinel is never touched.
+#[test]
+fn read_only_blocks_the_hook_log_toggle() {
+    use claudegate_desktop_lib::commands::set_hook_log_with;
+    let home = tempfile::tempdir().unwrap();
+    let p = config_path_in(home.path());
+    save_read_only(&p, true, None).unwrap();
+    let mut called = false;
+    let r = set_hook_log_with(&p, true, |_| {
+        called = true;
+        Ok(())
+    });
+    assert!(r.unwrap_err().contains("Read-only mode is on"));
+    assert!(!called, "the sentinel is not touched in read-only mode");
+    // Off: the toggle goes through.
+    save_read_only(&p, false, None).unwrap();
+    let mut got = None;
+    set_hook_log_with(&p, true, |on| {
+        got = Some(on);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(got, Some(true));
+    // An unreadable config fails closed.
+    fs::write(&p, "{ not json").unwrap();
+    assert!(set_hook_log_with(&p, false, |_| Ok(())).is_err());
+}

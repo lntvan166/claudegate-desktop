@@ -208,7 +208,7 @@ fn resolve_all(app: &AppSettings, root: Option<&Path>, sources: &ExtSources, lay
     // An app list replaces the user-level layers, but never drops what this project's own
     // `.vscode` protects: those globs are added back, so an override made in one project cannot
     // weaken protection in another. The source stays App.
-    let protected = match app.settings.get("protected").and_then(|v| globs_from_map(v).or_else(|| strings(v))) {
+    let protected = match app_protected(app) {
         Some(mut value) => {
             let ws = layers.workspace.as_ref().and_then(|m| m.get("claudegate.protected")).and_then(globs_from_map);
             for g in ws.unwrap_or_default() {
@@ -238,6 +238,12 @@ fn resolve_all(app: &AppSettings, root: Option<&Path>, sources: &ExtSources, lay
         max_attached: layers.resolve(app, "worktrees.maxAttached", as_u32(1), DEFAULT_MAX_ATTACHED),
         hook_log,
     }
+}
+
+/// The app's own `protected` list, before this project's `.vscode` globs are added back. `None`
+/// when the app has no override.
+pub fn app_protected(app: &AppSettings) -> Option<Vec<String>> {
+    app.settings.get("protected").and_then(|v| globs_from_map(v).or_else(|| strings(v)))
 }
 
 fn strings(v: &Value) -> Option<Vec<String>> {

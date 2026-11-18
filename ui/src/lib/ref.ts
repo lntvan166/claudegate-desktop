@@ -42,3 +42,15 @@ export function chooseSelection(cands: { range: LineRange | null; focused: boole
   for (const c of cands) if (c.range && (!focusedOnly || c.focused)) return c.range;
   return null;
 }
+
+/**
+ * The line range a copy may carry on `tab`. Only Pending: its modified side is the file on disk.
+ * On Accepted and Rejected the lines would come from text that is not on disk, so the reference
+ * is always the whole file.
+ */
+export function refRange(tab: "pending" | "accepted" | "rejected", sel: LineRange | null | undefined): LineRange | null {
+  return tab === "pending" ? (sel ?? null) : null;
+}
+
+/** The paste shortcut named after a copy: Cmd+V on macOS, Ctrl+Shift+V (terminals) elsewhere. */
+export const pasteHint = (isMac: boolean) => (isMac ? "Cmd+V" : "Ctrl+Shift+V");

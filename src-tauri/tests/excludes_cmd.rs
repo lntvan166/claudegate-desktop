@@ -249,3 +249,25 @@ fn rewriting_the_same_value_does_not_restart_the_stale_write_back_window() {
     assert_eq!(ch, vec![RootChange::ManagedByVsCode { root: app.clone() }]);
     assert_eq!(f.excludes()[&app], json!(defaults()), "VS Code's key is left alone");
 }
+
+/// M2: a save whose exclude sync then fails is still saved, and says the hook still uses the
+/// old list, with the reason.
+#[test]
+fn a_failed_exclude_sync_is_surfaced_as_a_warning() {
+    let f = fx();
+    let app = f.dir("app");
+    add_project_with(&f.cg, &f.cfg, &app).unwrap();
+    // excludes.json becomes something the writer refuses to overwrite.
+    fs::write(f.cg.join("excludes.json"), "[ not json").unwrap();
+    let s = set_project_exclude_with(&f.cg, &f.cfg, &app, Some(vec!["**/gen/**".into()]), &f.src).unwrap();
+    let w = s.warning.expect("a warning");
+    assert!(w.starts_with("Saved, but the hook still uses the old list: "), "{w}");
+    assert!(w.len() > "Saved, but the hook still uses the old list: ".len(), "names the reason: {w}");
+    assert_eq!(f.config()["projects"][&app]["exclude"], json!(["**/gen/**"]), "the list itself is saved");
+    assert_eq!(fs::read_to_string(f.cg.join("excludes.json")).unwrap(), "[ not json", "nothing overwritten");
+    // A sync that works carries no warning.
+    fs::remove_file(f.cg.join("excludes.json")).unwrap();
+    let s = set_project_exclude_with(&f.cg, &f.cfg, &app, None, &f.src).unwrap();
+    assert_eq!(s.warning, None);
+    assert_eq!(f.excludes()[&app], json!(defaults()));
+}

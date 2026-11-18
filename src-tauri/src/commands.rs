@@ -191,6 +191,12 @@ pub struct SettingsView {
     pub exclude_owner: ExcludeOwner,
     /// App-only: how "Copy reference for Claude" writes the path, `relative` (default) or `absolute`.
     pub copy_ref_path_style: String,
+    /// The globs this project's `.vscode` adds back to an app `protected` list (not in the app's
+    /// own list). Shown, but not removable here: removing one would never stick.
+    pub protected_workspace: Vec<String>,
+    /// The change was saved, but something after it failed (the exclude sync): what to tell the user.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// The app's `copyRefPathStyle`, `relative` unless it is exactly `absolute`.
@@ -237,7 +243,19 @@ pub fn settings_view(config_path: &Path, root: Option<&str>, sources: &ExtSource
             }
         }
     }
-    SettingsView { effective, extra_hide, exclude_owner, copy_ref_path_style: copy_ref_path_style(&app) }
+    // What the project's `.vscode` added back to an app list (core `resolve_all`).
+    let protected_workspace = match (effective.protected.source, claudegate_core::settings::app_protected(&app)) {
+        (Source::App, Some(own)) => effective.protected.value.iter().filter(|g| !own.contains(g)).cloned().collect(),
+        _ => Vec::new(),
+    };
+    SettingsView {
+        effective,
+        extra_hide,
+        exclude_owner,
+        copy_ref_path_style: copy_ref_path_style(&app),
+        protected_workspace,
+        warning: None,
+    }
 }
 
 /// The options the app loads `root` with (see `LoadOpts`).
@@ -319,12 +337,21 @@ pub async fn set_setting(key: String, value: serde_json::Value, root: Option<Str
     .await?
 }
 
+/// `set_hook_log` minus Tauri, with the sentinel write (`apply`) injected.
+/// The sentinel is shared with the extension, so read-only mode blocks it like every other
+/// shared-file write (fail closed on an unreadable config).
+pub fn set_hook_log_with(config_path: &Path, on: bool, apply: impl FnOnce(bool) -> std::io::Result<()>) -> Result<(), String> {
+    check_writable_for(config_path, "turn the hook log on or off")?;
+    apply(on).map_err(|e| format!("Couldn't change the hook log: {e}"))
+}
+
 /// Creates or deletes `~/.claudegate/hooklog.enabled`, the switch the extension shares.
 #[tauri::command]
 pub async fn set_hook_log(on: bool, root: Option<String>) -> Result<SettingsView, String> {
     blocking(move || {
-        claudegate_core::store::set_hook_log(on).map_err(|e| format!("Couldn't change the hook log: {e}"))?;
-        Ok(settings_view(&crate::config::config_path(), root.as_deref(), &ext_sources()))
+        let cfg = crate::config::config_path();
+        set_hook_log_with(&cfg, on, claudegate_core::store::set_hook_log)?;
+        Ok(settings_view(&cfg, root.as_deref(), &ext_sources()))
     })
     .await?
 }
@@ -629,10 +656,14 @@ fn check_writable_for(config_path: &Path, what: &str) -> Result<(), String> {
     check_writable(config_path).map_err(|e| e.replace("add or remove projects", what))
 }
 
+pub const SYNC_FAILED_PREFIX: &str = "Saved, but the hook still uses the old list: ";
+
 /// `set_project_exclude` minus Tauri: only for a root the app added and still owns. Validates
 /// the globs, saves `projects[root].exclude` (`None`: back to the defaults), then syncs so the
 /// hook sees it. Read-only mode blocks it. The ownership check, the save and the sync run under
-/// one `roots_guard`, so a watcher sync cannot mark the root managed in between.
+/// one `roots_guard`, so a watcher sync cannot mark the root managed in between. A sync that
+/// fails after the save comes back as the view's `warning` ("Saved, but the hook still uses the
+/// old list: <reason>"); the next sync (any change of excludes.json or the config) retries.
 pub fn set_project_exclude_with(
     cg_home: &Path,
     config_path: &Path,
@@ -643,7 +674,7 @@ pub fn set_project_exclude_with(
     check_writable_for(config_path, "change a project's exclude list")?;
     let key = resolve_root(Path::new(root.trim())).to_string_lossy().into_owned();
     let globs = globs.map(|g| claudegate_core::projects::validate_globs(&g)).transpose()?;
-    {
+    let synced = {
         let _g = roots_guard();
         let rec = crate::config::project_record(config_path, &key);
         if !rec.added_by_app {
@@ -653,9 +684,15 @@ pub fn set_project_exclude_with(
             return Err(MANAGED_EXCLUDE.into());
         }
         crate::config::save_project_exclude(config_path, &key, globs.as_deref(), Some(cg_home))?;
-        sync_excludes_locked(cg_home, config_path);
+        let mut cfg = crate::config::ConfigProjects { path: config_path, guard: Some(cg_home) };
+        claudegate_core::projects::sync_exclude_of(cg_home, &mut cfg, &key)
+    };
+    let mut view = settings_view(config_path, Some(&key), sources);
+    if let Err(e) = synced {
+        eprintln!("claudegate: couldn't sync the exclude of {key}: {e}");
+        view.warning = Some(format!("{SYNC_FAILED_PREFIX}{e}"));
     }
-    Ok(settings_view(config_path, Some(&key), sources))
+    Ok(view)
 }
 
 /// `take_back_exclude` minus Tauri: for an app-added root VS Code took over, the app manages its
