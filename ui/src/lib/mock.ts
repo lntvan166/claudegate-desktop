@@ -401,6 +401,7 @@ function mockSettings(root: string | null): SettingsView {
     hookLog: { value: hookLog, source: hookLog ? "app" : "default" },
     extraHide: (root && extraHide[root]) || [],
     excludeOwner: excludeOwner(root),
+    copyRefPathStyle: appSettings.copyRefPathStyle === "absolute" ? "absolute" : "relative",
   };
 }
 

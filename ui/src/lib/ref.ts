@@ -1,0 +1,33 @@
+// "Copy reference for Claude": the `@path` / `@path:start-end` text Claude Code reads as a file
+// or line-range reference, the same shape the maintainer's ctx-push extension copies.
+import { modifiedPositionFor, type LineChange } from "./navigate";
+
+export type RefPathStyle = "relative" | "absolute";
+export type LineRange = { start: number; end: number };
+
+const trimSlash = (p: string) => p.replace(/\/+$/, "");
+
+/**
+ * `@path`, or `@path:start-end` (1-based) for a selection. The path is relative to `root` under
+ * the "relative" style; a file outside the root stays absolute. A single line is `:N-N`.
+ */
+export function formatRef(absPath: string, root: string, style: RefPathStyle, sel?: LineRange | null): string {
+  const base = trimSlash(root);
+  const path = style === "relative" && base && absPath.startsWith(`${base}/`) ? absPath.slice(base.length + 1) : absPath;
+  return sel ? `@${path}:${sel.start}-${sel.end}` : `@${path}`;
+}
+
+/** What goes on the clipboard: the reference and a trailing space, so typing can follow the paste. */
+export const clipboardText = (ref: string) => `${ref} `;
+
+/**
+ * A selection on either side of the diff, as lines of the file on disk (the modified side). An
+ * original-side line is carried across with Monaco's line changes; a deleted line lands on the
+ * nearest unchanged one above the cut. Never inverted.
+ */
+export function selectionOnModified(side: "original" | "modified", sel: LineRange, changes: LineChange[]): LineRange {
+  if (side === "modified") return sel;
+  const start = modifiedPositionFor(sel.start, 1, changes).line;
+  const end = modifiedPositionFor(sel.end, 1, changes).line;
+  return { start, end: Math.max(start, end) };
+}

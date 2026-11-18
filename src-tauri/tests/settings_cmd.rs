@@ -217,3 +217,24 @@ fn an_app_protected_override_keeps_each_projects_own_workspace_globs() {
     let in_a = settings_view(&p, Some(&ra), &src).effective.protected;
     assert!(!in_a.value.contains(&"secrets/**".to_string()), "B's globs never leak into A");
 }
+
+#[test]
+fn copy_ref_path_style_is_app_only_defaults_to_relative_and_is_validated() {
+    let home = tempfile::tempdir().unwrap();
+    let p = config_path_in(home.path());
+    let src = sources(home.path());
+    assert_eq!(serde_json::to_value(settings_view(&p, None, &src)).unwrap()["copyRefPathStyle"], "relative");
+
+    save_setting(&p, "copyRefPathStyle", json!("absolute"), None).unwrap();
+    assert_eq!(read(&p)["settings"]["copyRefPathStyle"], "absolute");
+    assert_eq!(serde_json::to_value(settings_view(&p, None, &src)).unwrap()["copyRefPathStyle"], "absolute");
+
+    // Anything but the two styles is refused and leaves the stored value alone.
+    assert!(save_setting(&p, "copyRefPathStyle", json!("full"), None).is_err());
+    assert!(save_setting(&p, "copyRefPathStyle", json!(true), None).is_err());
+    assert_eq!(read(&p)["settings"]["copyRefPathStyle"], "absolute");
+
+    // null drops the override: back to relative.
+    save_setting(&p, "copyRefPathStyle", serde_json::Value::Null, None).unwrap();
+    assert_eq!(serde_json::to_value(settings_view(&p, None, &src)).unwrap()["copyRefPathStyle"], "relative");
+}

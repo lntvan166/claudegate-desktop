@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL, DIFF_HIDDEN_REFUSAL, READ_ONLY_REFUSAL } from "./keys";
+import { refKeyFor, actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL, DIFF_HIDDEN_REFUSAL, READ_ONLY_REFUSAL } from "./keys";
 
 describe("nextIndex", () => {
   it("clamps without wrapping", () => {
@@ -167,5 +167,23 @@ describe("decisionFor while the diff is hidden (narrow window)", () => {
 
   it("decides once the diff is shown", () => {
     expect(decisionFor(k("a"), { ...ctx, diffHidden: false })).toEqual({ action: "accept", key: "/w/a.ts" });
+  });
+});
+
+describe("refKeyFor", () => {
+  const k = (o: Partial<Record<"code" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey", unknown>>) =>
+    ({ code: "KeyC", ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, ...o }) as Parameters<typeof refKeyFor>[0];
+  it("is Ctrl+Alt+C off macOS, and Shift makes it the whole file", () => {
+    expect(refKeyFor(k({ ctrlKey: true, altKey: true }), false)).toBe("selection");
+    expect(refKeyFor(k({ ctrlKey: true, altKey: true, shiftKey: true }), false)).toBe("file");
+  });
+  it("is Cmd+Alt+C on macOS", () => {
+    expect(refKeyFor(k({ metaKey: true, altKey: true }), true)).toBe("selection");
+    expect(refKeyFor(k({ ctrlKey: true, altKey: true }), true)).toBeNull();
+  });
+  it("leaves plain copy and other keys alone", () => {
+    expect(refKeyFor(k({ ctrlKey: true }), false)).toBeNull();
+    expect(refKeyFor(k({ ctrlKey: true, altKey: true, code: "KeyV" }), false)).toBeNull();
+    expect(refKeyFor(k({ altKey: true }), false)).toBeNull();
   });
 });

@@ -243,6 +243,8 @@ fn setting_key(key: &str) -> Option<&'static str> {
         "pendingAgeMinDays" => "pendingAge.minDays",
         "maxAttached" => "worktrees.maxAttached",
         "protected" => "protected",
+        // App-only: the extension has no such setting, so it never resolves through `claudegate_core`.
+        "copyRefPathStyle" => "copyRefPathStyle",
         _ => return None,
     })
 }
@@ -260,6 +262,10 @@ fn checked_setting(key: &str, v: &serde_json::Value) -> Result<serde_json::Value
         "autoAdvance" | "groupBySession" => match v {
             Value::Bool(_) => Ok(v.clone()),
             _ => bad("true or false"),
+        },
+        "copyRefPathStyle" => match v.as_str() {
+            Some(s @ ("relative" | "absolute")) => Ok(Value::from(s)),
+            _ => bad("\"relative\" or \"absolute\""),
         },
         "pendingAgeMinDays" => whole_number(v, 0).map(Value::from).map_or_else(|| bad("a whole number of days, 0 or more"), Ok),
         "maxAttached" => whole_number(v, 1).map(Value::from).map_or_else(|| bad("a whole number, 1 or more"), Ok),

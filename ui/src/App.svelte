@@ -7,6 +7,7 @@
   import ProjectList from "./components/ProjectList.svelte";
   import ResultBar from "./components/ResultBar.svelte";
   import Settings from "./components/Settings.svelte";
+  import ContextMenu from "./components/ContextMenu.svelte";
   import ReviewTabs from "./components/ReviewTabs.svelte";
   import Shortcuts from "./components/Shortcuts.svelte";
   import Splitter from "./components/Splitter.svelte";
@@ -58,7 +59,9 @@
   } from "./lib/decide";
   import { editorLabel, ZED } from "./lib/editors";
   import type { IconTheme } from "./lib/icons";
-  import { actionFor, decisionFor, DIFF_HIDDEN_REFUSAL, isTypingTarget, nextIndex, READ_ONLY_REFUSAL, WAITING_REFUSAL } from "./lib/keys";
+  import { actionFor, decisionFor, DIFF_HIDDEN_REFUSAL, isTypingTarget, nextIndex, READ_ONLY_REFUSAL, refKeyFor, WAITING_REFUSAL } from "./lib/keys";
+  import { writeClipboard } from "./lib/clipboard";
+  import { clipboardText, formatRef, type LineRange } from "./lib/ref";
   import { basename, groupsFor, scopeLabel, selectionAfterList, sortProjects, splitHidden, type Row } from "./lib/rows";
   import { Rechecks } from "./lib/recheck";
   import {
@@ -143,6 +146,34 @@
     clearTimeout(noticeTimer);
     noticeTimer = setTimeout(() => (notice = null), 3000);
   }
+  const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+  let diffView: DiffView | undefined = $state();
+  /** The right-click menu on a file row. */
+  let rowMenu = $state<{ x: number; y: number; row: Row } | null>(null);
+
+  /**
+   * "Copy reference for Claude": `@path` (or `@path:start-end` for a selection) for `row`, relative
+   * to the project's primary root, on the clipboard with a trailing space.
+   */
+  async function copyRef(row: Row, sel: LineRange | null = null) {
+    if (!selected) return;
+    const ref = formatRef(row.path, selected, settings.copyRefPathStyle, sel);
+    try {
+      await writeClipboard(clipboardText(ref));
+      announce(`Copied ${ref} — paste in Claude with ${isMac ? "Cmd+V" : "Ctrl+Shift+V"}`);
+    } catch (e) {
+      show({ text: `Couldn't copy the reference: ${e instanceof Error ? e.message : e}`, tone: "error" });
+    }
+  }
+  /** The keyboard and header-button entry: the diff's selection (or the file) for the selected row. */
+  function copySelectedRef(wholeFile: boolean, focusedOnly: boolean) {
+    if (!selectedRow) {
+      announce("Select a file to copy its reference");
+      return;
+    }
+    void copyRef(selectedRow, wholeFile ? null : (diffView?.selection(focusedOnly) ?? null));
+  }
+
   /** The backend refused for a reason the config does not show (its settings file is unreadable). */
   let settingsBlocked = $state<string | null>(null);
 
@@ -701,6 +732,7 @@
     pendingAgeMinDays: "the age setting",
     maxAttached: "the worktree limit",
     protected: "the secret file patterns",
+    copyRefPathStyle: "the reference path style",
   };
   const changeSetting = (key: SettingKey, value: unknown) =>
     applySettings(() => setSetting(key, value, selected), SETTING_NAMES[key], key === "maxAttached");
@@ -749,6 +781,16 @@
       return;
     }
     if (helpOpen) return; // the overlay handles its own keys
+    // Copy reference works inside Monaco (a read-only diff) but not while typing in a field.
+    const ref = refKeyFor(e, isMac);
+    if (ref) {
+      const t = e.target as HTMLElement | null;
+      const inDiff = !!t?.closest?.(".monaco-editor");
+      if (e.repeat || (isTypingTarget(t) && !inDiff)) return;
+      e.preventDefault();
+      copySelectedRef(ref === "file", inDiff);
+      return;
+    }
     if (isTypingTarget(e.target as HTMLElement | null)) return;
     const d = decisionFor(e, {
       tab,
@@ -900,6 +942,21 @@
     </div>
   {/if}
 {/snippet}
+
+{#if rowMenu}
+  {@const m = rowMenu}
+  <ContextMenu
+    x={m.x}
+    y={m.y}
+    label="Copy reference for Claude"
+    hint={isMac ? "⌘⌥C" : "Ctrl+Alt+C"}
+    onpick={() => {
+      rowMenu = null;
+      void copyRef(m.row);
+    }}
+    onclose={() => (rowMenu = null)}
+  />
+{/if}
 
 {#if helpOpen}
   <Shortcuts editorName={editorLabel(config.editor)} onclose={() => (helpOpen = false)} />
@@ -1088,6 +1145,7 @@
                 if (via === "pointer") openNarrowDiff();
               }}
               onopen={(r) => void open(r, lineFor(r))}
+              oncontextmenu={(row, x, y) => (rowMenu = { x, y, row })}
               canDecide={canDecide && !narrow}
               {busy}
               ondecide={(action, target, row) => void runDecide(action, target, { row })}
@@ -1145,6 +1203,7 @@
     />
     {:else}
     <DiffView
+      bind:this={diffView}
       row={selectedRow}
       kind={tab}
       root={selected ?? ""}
@@ -1155,6 +1214,8 @@
       {openError}
       onopen={() => selectedRow && void open(selectedRow, firstLine)}
       onopenat={(line, col) => selectedRow && void open(selectedRow, line, null, col)}
+      oncopyref={(sel) => selectedRow && void copyRef(selectedRow, sel)}
+      copyRefHint={isMac ? "Cmd+Alt+C" : "Ctrl+Alt+C"}
       onpick={(t) => void pickEditor(t)}
       ondismiss={() => (openError = null)}
       canDecide={canDecide && diffShown}

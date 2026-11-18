@@ -3,6 +3,7 @@
 // the app-only hide patterns. Shapes mirror src-tauri/src/commands.rs `SettingsView` and
 // core/src/settings.rs `Effective`.
 import type { DiffKind, ProjectView } from "./api";
+import type { RefPathStyle } from "./ref";
 import { basename, rowsOf, scopeLabel, type Group, type Row } from "./rows";
 
 export type Source = "app" | "vsCode" | "cursor" | "workspace" | "default";
@@ -24,12 +25,14 @@ export type SettingsView = {
    * VS Code because the project is its own.
    */
   excludeOwner: ExcludeOwner;
+  /** App-only: how "Copy reference for Claude" writes the path. */
+  copyRefPathStyle: RefPathStyle;
 };
 
 export type ExcludeOwner = "owned" | "managedByVsCode" | "vsCode";
 
 /** The keys `set_setting` takes. */
-export type SettingKey = "autoAdvance" | "groupBySession" | "pendingAgeMinDays" | "maxAttached" | "protected";
+export type SettingKey = "autoAdvance" | "groupBySession" | "pendingAgeMinDays" | "maxAttached" | "protected" | "copyRefPathStyle";
 
 /** The extension's built-in defaults (core/src/settings.rs), for the screen before the first load. */
 export const DEFAULT_PROTECTED = [
@@ -47,6 +50,7 @@ export const DEFAULT_SETTINGS: SettingsView = {
   hookLog: { value: false, source: "default" },
   extraHide: [],
   excludeOwner: "vsCode",
+  copyRefPathStyle: "relative",
 };
 
 export function sourceLabel(source: Source): string {

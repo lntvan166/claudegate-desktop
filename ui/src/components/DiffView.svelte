@@ -8,6 +8,7 @@
   import { languageFor } from "../lib/language";
   import { modifiedPositionFor } from "../lib/navigate";
   import { paneState } from "../lib/paneState";
+  import { selectionOnModified, type LineRange } from "../lib/ref";
   import type { Row } from "../lib/rows";
   import OpenWith from "./OpenWith.svelte";
 
@@ -35,6 +36,8 @@
     onnotice = () => {},
     onback = null,
     onopenat = () => {},
+    oncopyref = () => {},
+    copyRefHint = "Ctrl+Alt+C",
   }: {
     row: Row | null;
     kind: DiffKind;
@@ -63,6 +66,10 @@
     onback?: (() => void) | null;
     /** Open the file at a position on its current (modified) side: Ctrl/Cmd+click, F12, the menu. */
     onopenat?: (line: number, col: number) => void;
+    /** Copy a reference for Claude: the selection's lines on the file's side, or null for the file. */
+    oncopyref?: (sel: LineRange | null) => void;
+    /** The shortcut shown in the Copy @ref button's tooltip. */
+    copyRefHint?: string;
   } = $props();
 
   /** The last cursor position in either side of the diff, for "Open at cursor". */
@@ -80,6 +87,25 @@
   function openAtCursor() {
     if (cursor) openAt(cursor.side, cursor.line, cursor.col);
     else onopenat(firstLine, 1);
+  }
+
+  /**
+   * The selected lines as lines of the file on disk, or null with none. With `focusedOnly` (the
+   * keyboard) a selection counts only in the side that has focus; the header button and menu take
+   * whichever side holds one, the side last used first.
+   */
+  export function selection(focusedOnly = false): LineRange | null {
+    if (!editor) return null;
+    const sides = [
+      { side: "original" as const, e: editor.getOriginalEditor() },
+      { side: "modified" as const, e: editor.getModifiedEditor() },
+    ].sort((a, b) => Number(b.side === cursor?.side) - Number(a.side === cursor?.side));
+    for (const { side, e } of sides) {
+      const sel = e.getSelection();
+      if (!sel || sel.isEmpty() || (focusedOnly && !e.hasTextFocus())) continue;
+      return selectionOnModified(side, { start: sel.startLineNumber, end: sel.endLineNumber }, editor.getLineChanges() ?? []);
+    }
+    return null;
   }
 
   type CodeEditor = import("monaco-editor/editor/editor.api.js").editor.IStandaloneCodeEditor;
@@ -111,6 +137,18 @@
     });
     e.onDidChangeCursorPosition((ev) => {
       cursor = { side, line: ev.position.lineNumber, col: ev.position.column };
+    });
+    // Monaco's right-click menu: the diff's entry for "Copy reference for Claude".
+    e.addAction({
+      id: `claudegate.copyRef.${side}`,
+      label: "Copy reference for Claude",
+      contextMenuGroupId: "9_cutcopypaste",
+      contextMenuOrder: 9,
+      run: (ed) => {
+        const sel = ed.getSelection();
+        const lines = sel && !sel.isEmpty() ? { start: sel.startLineNumber, end: sel.endLineNumber } : null;
+        oncopyref(lines && selectionOnModified(side, lines, editor?.getLineChanges() ?? []));
+      },
     });
     e.addAction({
       id: `claudegate.openAtCursor.${side}`,
@@ -406,6 +444,19 @@
           </button>
         {/each}
       </div>
+      <button
+        class="copyref"
+        title="Copy a reference for Claude: the selection, or the file ({copyRefHint})"
+        aria-label="Copy reference for Claude"
+        aria-keyshortcuts="Control+Alt+C"
+        onclick={() => oncopyref(selection(false))}
+      >
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3" />
+          <path d="M10.5 3.5v-.2a.8.8 0 0 0-.8-.8H3.3a.8.8 0 0 0-.8.8v6.4a.8.8 0 0 0 .8.8h.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+        </svg>
+        <span class="crlabel">Copy @ref</span>
+      </button>
       <OpenWith {config} {onopen} {onpick} onopencursor={pane === "editor" ? openAtCursor : null} />
     </div>
   {/if}
@@ -438,6 +489,8 @@
           <div><dt><kbd>N</kbd> <kbd>P</kbd></dt><dd>Next and previous pending, across worktrees</dd></div>
           <div><dt><kbd>A</kbd> <kbd>R</kbd></dt><dd>Accept or reject the selected file or focused folder</dd></div>
           <div><dt><kbd>O</kbd></dt><dd>Open in {label} at the first change</dd></div>
+          <div><dt><kbd>{copyRefHint}</kbd></dt><dd>Copy a reference for Claude: selection or file</dd></div>
+          <div><dt><kbd>{copyRefHint.replace(/C$/, "Shift+C")}</kbd></dt><dd>Copy a reference to the whole file</dd></div>
           <div><dt><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></dt><dd>Pending, accepted, rejected</dd></div>
           <div><dt><kbd>[</kbd></dt><dd>Collapse or expand projects</dd></div>
           <div><dt><kbd>?</kbd></dt><dd>All shortcuts</dd></div>
@@ -595,6 +648,30 @@
     color: var(--faint);
   }
 
+  .copyref {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex: none;
+    height: 28px;
+    padding: 0 8px;
+    border-radius: var(--radius-control);
+    font-size: var(--fs-small);
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--muted);
+    transition:
+      background 120ms var(--ease),
+      color 120ms var(--ease);
+  }
+  .copyref:hover {
+    color: var(--text);
+    background: var(--hover);
+  }
+  .copyref:active {
+    background: var(--active);
+  }
+
   .view {
     display: flex;
     align-items: center;
@@ -725,7 +802,7 @@
   }
   .keys div {
     display: grid;
-    grid-template-columns: 64px auto;
+    grid-template-columns: 132px auto;
     gap: 12px;
   }
   .keys dt {
@@ -748,6 +825,7 @@
     }
   }
   @container diff (max-width: 500px) {
+    .crlabel,
     .diff-head :global(.split .main span) {
       display: none;
     }

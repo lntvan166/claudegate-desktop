@@ -189,6 +189,16 @@ pub struct SettingsView {
     pub effective: Effective,
     pub extra_hide: Vec<String>,
     pub exclude_owner: ExcludeOwner,
+    /// App-only: how "Copy reference for Claude" writes the path, `relative` (default) or `absolute`.
+    pub copy_ref_path_style: String,
+}
+
+/// The app's `copyRefPathStyle`, `relative` unless it is exactly `absolute`.
+fn copy_ref_path_style(app: &claudegate_core::settings::AppSettings) -> String {
+    match app.settings.get("copyRefPathStyle").and_then(|v| v.as_str()) {
+        Some("absolute") => "absolute".into(),
+        _ => "relative".into(),
+    }
 }
 
 /// The exclude the app writes for `root`, when it owns it: the project's own list, else the
@@ -227,7 +237,7 @@ pub fn settings_view(config_path: &Path, root: Option<&str>, sources: &ExtSource
             }
         }
     }
-    SettingsView { effective, extra_hide, exclude_owner }
+    SettingsView { effective, extra_hide, exclude_owner, copy_ref_path_style: copy_ref_path_style(&app) }
 }
 
 /// The options the app loads `root` with (see `LoadOpts`).

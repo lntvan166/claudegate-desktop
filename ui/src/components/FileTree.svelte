@@ -30,6 +30,7 @@
     editorName,
     onselect,
     onopen,
+    oncontextmenu = () => {},
     canDecide = false,
     busy = false,
     ondecide = () => {},
@@ -50,6 +51,8 @@
     /** `pointer` for a click or Enter on the row, `key` when arrow keys move the selection. */
     onselect: (row: Row, via?: "pointer" | "key") => void;
     onopen: (row: Row) => void;
+    /** Right-click (or the menu key) on a file row, at window coordinates. */
+    oncontextmenu?: (row: Row, x: number, y: number) => void;
     /** Show the accept/reject (revert, reapply) actions; false in read-only mode. */
     canDecide?: boolean;
     /** A decision is in flight: every action is disabled. */
@@ -412,6 +415,13 @@
         style:padding-left="{pad(depth) + 16}px"
         title={row.path}
         onclick={() => onselect(row, "pointer")}
+        oncontextmenu={(e) => {
+          e.preventDefault();
+          const at = e.currentTarget.getBoundingClientRect();
+          // The menu key reports no pointer: open at the row.
+          const keyboard = e.clientX === 0 && e.clientY === 0;
+          oncontextmenu(row, keyboard ? at.left + 24 : e.clientX, keyboard ? at.bottom : e.clientY);
+        }}
       >
         {@render guides(depth)}
         <img class="icon" src={iconFor(n.name, "file", false, theme)} alt="" draggable="false" />

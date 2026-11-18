@@ -51,6 +51,19 @@ export function actionFor(e: KeyLike): KeyAction | null {
   return tab ? { type: "tab", tab } : null;
 }
 
+type RefKeyLike = { code: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean };
+
+/**
+ * Copy reference for Claude: Ctrl+Alt+C (Cmd+Alt+C on macOS) copies the selection, or the whole
+ * file with none; adding Shift always copies the whole file. `code`, not `key`: Alt changes the
+ * character on macOS.
+ */
+export function refKeyFor(e: RefKeyLike, isMac: boolean): "selection" | "file" | null {
+  if (e.code !== "KeyC" || !e.altKey) return null;
+  if (isMac ? !e.metaKey || e.ctrlKey : !e.ctrlKey || e.metaKey) return null;
+  return e.shiftKey ? "file" : "selection";
+}
+
 type ElementLike = { tagName: string; isContentEditable?: boolean; closest?: (sel: string) => unknown };
 
 /** True when keys belong to what has focus: a field, an editable region (Monaco), or a menu. */

@@ -389,6 +389,20 @@
 
     <div class="row">
       <div class="label">
+        <p class="title" id="set-refstyle">Path in copied references</p>
+        <p class="desc">“Copy reference for Claude” writes @src/app.ts (relative to the project) or the full path. Files outside the project always use the full path.</p>
+      </div>
+      <div class="control">
+        <div class="segmented" role="group" aria-labelledby="set-refstyle">
+          {#each [["relative", "Relative"], ["absolute", "Absolute"]] as [v, text] (v)}
+            <button aria-pressed={settings.copyRefPathStyle === v} class:on={settings.copyRefPathStyle === v} onclick={() => void set("copyRefPathStyle", v)}>{text}</button>
+          {/each}
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="label">
         <p class="title">Read-only mode</p>
         <p class="desc">Block every accept, reject, revert and reapply until it is turned off.</p>
       </div>
