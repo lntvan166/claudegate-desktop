@@ -7,9 +7,11 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { DecideAction, DecideReport, DecideTarget, RejectOutcome } from "./decide";
+import type { CaptureView, InstallView } from "./capture";
 import type { EditorConfig } from "./editors";
 import type { SettingKey, SettingsView } from "./settings";
 
+export type { CaptureView, InstallView };
 export type { DecideAction, DecideReport, DecideTarget, EditorConfig, SettingKey, SettingsView };
 
 export type ProjectSummary = {
@@ -130,6 +132,14 @@ export interface Api {
   projectInVsCode(root: string): Promise<boolean>;
   /** The native folder picker; null when cancelled. */
   pickFolder(): Promise<string | null>;
+  /** Whether Claude Code runs the ClaudeGate hook. `recheck` looks for python3 again. Read only. */
+  captureStatus(recheck: boolean): Promise<CaptureView>;
+  /**
+   * Writes ~/.claudegate/hook.py, hook.sh and the marker, and adds one hook to
+   * ~/.claude/settings.json (with a backup). Only after the user confirmed. Rejects with a message
+   * for the user; blocked in read-only mode.
+   */
+  setUpCapture(): Promise<InstallView>;
 }
 
 const tauriApi: Api = {
@@ -154,6 +164,8 @@ const tauriApi: Api = {
   removeProject: (root) => invoke<RemovedProject>("remove_project", { root }),
   projectInVsCode: (root) => invoke<boolean>("project_in_vs_code", { root }),
   pickFolder: () => invoke<string | null>("pick_folder"),
+  captureStatus: (recheck) => invoke<CaptureView>("capture_status", { recheck }),
+  setUpCapture: () => invoke<InstallView>("set_up_capture"),
 };
 
 let chosen: Promise<Api> | undefined;
@@ -199,3 +211,5 @@ export const addProject = async (path: string) => (await api()).addProject(path)
 export const removeProject = async (root: string) => (await api()).removeProject(root);
 export const pickFolder = async () => (await api()).pickFolder();
 export const projectInVsCode = async (root: string) => (await api()).projectInVsCode(root);
+export const captureStatus = async (recheck = false) => (await api()).captureStatus(recheck);
+export const setUpCapture = async () => (await api()).setUpCapture();

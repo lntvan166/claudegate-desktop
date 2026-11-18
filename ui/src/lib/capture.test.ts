@@ -1,0 +1,114 @@
+import { describe, expect, it } from "vitest";
+import {
+  CONFIRM_TEXT,
+  canRecheck,
+  canSetUp,
+  capturing,
+  chipLabel,
+  explanation,
+  setupResult,
+  type CaptureView,
+  type InstallView,
+} from "./capture";
+
+const v = (status: CaptureView["status"], extra: Partial<CaptureView> = {}): CaptureView => ({
+  status,
+  version: null,
+  note: null,
+  ...extra,
+});
+
+describe("chipLabel", () => {
+  it("names every state", () => {
+    expect(chipLabel(v("vscode"))).toBe("Capturing (VS Code)");
+    expect(chipLabel(v("app", { version: "v1.16.1" }))).toBe("Capturing (this app)");
+    expect(chipLabel(v("not-set-up"))).toBe("Not capturing — Set up");
+    expect(chipLabel(v("settings-unreadable", { note: "x" }))).toBe("Capture: settings unreadable");
+    expect(chipLabel(v("python-missing"))).toBe("Capture: python3 not found");
+  });
+  it("says checking before the first answer, and something for an unknown state", () => {
+    expect(chipLabel(null)).toBe("Capture: checking…");
+    expect(chipLabel(v("weird" as CaptureView["status"]))).toBe("Capture: unknown");
+  });
+});
+
+describe("capturing", () => {
+  it("is true only for the two set-up states", () => {
+    expect(capturing(v("vscode"))).toBe(true);
+    expect(capturing(v("app"))).toBe(true);
+    for (const s of ["not-set-up", "settings-unreadable", "python-missing"] as const) {
+      expect(capturing(v(s))).toBe(false);
+    }
+    expect(capturing(null)).toBe(false);
+  });
+});
+
+describe("explanation", () => {
+  it("explains each non-capturing state and nothing else", () => {
+    expect(explanation(v("vscode"))).toBeNull();
+    expect(explanation(v("app"))).toBeNull();
+    expect(explanation(v("not-set-up"))).toMatch(/Claude Code/);
+    expect(explanation(v("python-missing"))).toMatch(/python3/);
+  });
+  it("carries the unreadable reason", () => {
+    const e = explanation(v("settings-unreadable", { note: "not valid JSON: line 1" }))!;
+    expect(e).toMatch(/~\/\.claude\/settings\.json/);
+    expect(e).toMatch(/not valid JSON: line 1/);
+  });
+});
+
+describe("actions", () => {
+  it("offers Set up only when not set up and writes are allowed", () => {
+    expect(canSetUp(v("not-set-up"), false)).toBe(true);
+    expect(canSetUp(v("not-set-up"), true)).toBe(false);
+    for (const s of ["vscode", "app", "settings-unreadable", "python-missing"] as const) {
+      expect(canSetUp(v(s), false)).toBe(false);
+    }
+    expect(canSetUp(null, false)).toBe(false);
+  });
+  it("offers Check again for the non-capturing states", () => {
+    expect(canRecheck(v("python-missing"))).toBe(true);
+    expect(canRecheck(v("settings-unreadable"))).toBe(true);
+    expect(canRecheck(v("not-set-up"))).toBe(true);
+    expect(canRecheck(v("vscode"))).toBe(false);
+    expect(canRecheck(v("app"))).toBe(false);
+  });
+});
+
+describe("confirmation copy", () => {
+  it("is the plan's exact text, naming both files", () => {
+    expect(CONFIRM_TEXT).toBe(
+      "Set up capture? This writes ~/.claudegate/hook.py and hook.sh, and adds one hook to ~/.claude/settings.json (a backup is kept).",
+    );
+  });
+});
+
+describe("setupResult", () => {
+  const ok: InstallView = {
+    settings: "/h/.claude/settings.json",
+    backup: "/h/.claude/settings.json.claudegate-2026-11-18T10-00-00.000Z.bak",
+    created: ["/h/.claudegate/hook.py", "/h/.claudegate/hook.sh"],
+    version: "v1.16.1",
+    note: null,
+    capture: v("app", { version: "v1.16.1" }),
+  };
+  it("is a success naming the backup", () => {
+    const r = setupResult(ok);
+    expect(r.tone).toBe("success");
+    expect(r.text).toContain("Capture is set up");
+    expect(r.text).toContain(ok.backup!);
+  });
+  it("says when there was no settings file to back up", () => {
+    expect(setupResult({ ...ok, backup: null }).text).toMatch(/no settings\.json before/);
+  });
+  it("is a warning when setup carries a note", () => {
+    const r = setupResult({ ...ok, note: "settings.json was changed by another program" });
+    expect(r.tone).toBe("warning");
+    expect(r.text).toContain("changed by another program");
+    expect(r.text).toContain(ok.backup!);
+  });
+  it("is a warning when the status read afterwards is not capturing", () => {
+    const r = setupResult({ ...ok, capture: v("not-set-up") });
+    expect(r.tone).toBe("warning");
+  });
+});

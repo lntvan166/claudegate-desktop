@@ -307,3 +307,33 @@ impl std::error::Error for InstallError {}
 pub fn set_up_capture(home: &Path, bundled_hook: &str, python3: bool, read_only: bool) -> Result<InstallReport, InstallError> {
     crate::store::install_capture(home, bundled_hook, python3, read_only)
 }
+
+/// True when `candidate` is a strictly newer `vMAJOR.MINOR.PATCH` than `installed`. Anything that
+/// does not parse as one (either side) is never newer, so an odd marker never triggers a write.
+pub fn version_newer(candidate: &str, installed: &str) -> bool {
+    fn parse(v: &str) -> Option<(u64, u64, u64)> {
+        let v = v.trim();
+        let v = v.strip_prefix('v').unwrap_or(v);
+        let mut it = v.split('.').map(|p| p.parse::<u64>().ok());
+        let t = (it.next()??, it.next()??, it.next()??);
+        it.next().is_none().then_some(t)
+    }
+    matches!((parse(candidate), parse(installed)), (Some(a), Some(b)) if a > b)
+}
+
+/// What the startup update of the app's own hook.py did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookUpdate {
+    /// hook.py was rewritten with the bundled copy and the marker now says `to`.
+    Updated { from: String, to: String },
+    /// Nothing was written; why.
+    Skipped(String),
+}
+
+/// Rewrites `<home>/.claudegate/hook.py` with the bundled copy when this app set capture up
+/// (marker present, status `SetUpByApp`, the installed hook.py carries our stamp) and the bundled
+/// version is newer than the marker. Never touches settings.json. See
+/// `store::update_app_hook`.
+pub fn update_app_hook(home: &Path, bundled_hook: &str, python3: bool, read_only: bool) -> Result<HookUpdate, String> {
+    crate::store::update_app_hook(home, bundled_hook, python3, read_only)
+}

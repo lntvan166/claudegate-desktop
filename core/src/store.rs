@@ -1309,6 +1309,75 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
     Ok(report(None))
 }
 
+// ---- Updating the app's own hook.py ----------------------------------------------------------
+
+//
+// The app ships a newer hook.py than the one it installed: rewrite it, but only the copy this app
+// put there. Every one of these must hold, or nothing is written:
+// - read-only mode is off;
+// - the marker exists (refused outright otherwise: it is the record that the copy is ours);
+// - `capture_status` is exactly `SetUpByApp` (an entry registered and the marker present);
+// - the installed hook.py exists and carries a `CLAUDEGATE_HOOK_VERSION` stamp: the extension's
+//   copy has none, so an extension that rewrote hook.py since setup keeps it;
+// - the bundled version is newer than the marker's.
+// hook.py is replaced atomically (its mode kept), comparing it with what was read right before
+// the rename; then the marker gets the new version. settings.json and hook.sh are never written.
+
+pub(crate) fn update_app_hook(
+    home: &Path,
+    bundled_hook: &str,
+    python3: bool,
+    read_only: bool,
+) -> Result<crate::capture::HookUpdate, String> {
+    use crate::capture::{bundled_hook_version, version_newer, HookUpdate};
+    let skip = |why: &str| Ok(HookUpdate::Skipped(why.to_owned()));
+    if read_only {
+        return skip("read-only mode is on");
+    }
+    let to = bundled_hook_version(bundled_hook).ok_or("the bundled hook has no version stamp")?;
+    let cg = home.join(".claudegate");
+    let (py, marker) = (cg.join(HOOK_PY_FILE), cg.join(MARKER_FILE));
+    let from = match fs::read(&marker) {
+        Ok(b) => String::from_utf8_lossy(&b).trim().to_owned(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return skip("capture was not set up by this app (no marker)"),
+        Err(e) => return Err(format!("could not read {}: {e}", marker.display())),
+    };
+    let raw = match settings_target(home).and_then(fs::read) {
+        Ok(b) => Some(String::from_utf8_lossy(&b).into_owned()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return skip(&format!("settings.json could not be read: {e}")),
+    };
+    match capture_status(raw.as_deref(), true, python3) {
+        CaptureStatus::SetUpByApp { .. } => {}
+        other => return skip(&format!("capture status is {other:?}, not set up by this app")),
+    }
+    if !version_newer(&to, &from) {
+        return skip(&format!("hook.py is {from}, the bundled one is {to}: not newer"));
+    }
+    let installed = match fs::read(&py) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return skip("hook.py is missing"),
+        Err(e) => return Err(format!("could not read {}: {e}", py.display())),
+    };
+    if fs::symlink_metadata(&py).is_ok_and(|m| !m.file_type().is_file())
+        || bundled_hook_version(&String::from_utf8_lossy(&installed)).is_none()
+    {
+        return skip("hook.py has no version stamp: it is not this app's copy");
+    }
+    guard_hook_file(&cg, &py).map_err(|e| e.to_string())?;
+    let unchanged = || match fs::read(&py) {
+        Ok(now) if now == installed => Ok(()),
+        Ok(_) => Err(io::Error::other("hook.py changed while it was being updated")),
+        Err(e) => Err(e),
+    };
+    atomic_write_checked(&py, bundled_hook.as_bytes(), true, unchanged)
+        .map_err(|e| format!("could not update {}: {e}", py.display()))?;
+    guard_hook_file(&cg, &marker)
+        .and_then(|()| atomic_write_bytes(&marker, to.as_bytes(), true))
+        .map_err(|e| format!("updated hook.py, but could not update {}: {e}", marker.display()))?;
+    Ok(HookUpdate::Updated { from, to })
+}
+
 #[path = "../tests/unit/install_capture.rs"]
 #[cfg(test)]
 mod install_capture_tests;

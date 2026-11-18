@@ -7,6 +7,7 @@
   import ProjectList from "./components/ProjectList.svelte";
   import ResultBar from "./components/ResultBar.svelte";
   import Settings from "./components/Settings.svelte";
+  import CaptureChip from "./components/CaptureChip.svelte";
   import ContextMenu from "./components/ContextMenu.svelte";
   import ReviewTabs from "./components/ReviewTabs.svelte";
   import Shortcuts from "./components/Shortcuts.svelte";
@@ -987,6 +988,7 @@
     </div>
     <div class="status">
       {#if usingMock}<span class="hint">Fixture data</span>{/if}
+      <CaptureChip {readOnly} />
       <button
         class="chip"
         class:on={readOnly}

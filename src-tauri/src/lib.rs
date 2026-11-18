@@ -1,3 +1,4 @@
+pub mod capture;
 pub mod commands;
 pub mod config;
 pub mod editor;
@@ -21,6 +22,9 @@ pub fn run() {
             commands::sync_excludes_with(&claudegate_core::paths::claudegate_home(), &config::config_path());
             watch::start(app.handle().clone(), claudegate_core::paths::claudegate_home(), known);
             tray::setup(app.handle());
+            // Bring the app's own ~/.claudegate/hook.py up to the bundled version (never the
+            // extension's; never settings.json). Off the main thread: it runs python3 --version.
+            std::thread::spawn(capture::update_hook_at_startup);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -35,6 +39,8 @@ pub fn run() {
             commands::add_project,
             commands::remove_project,
             commands::pick_folder,
+            capture::capture_status,
+            capture::set_up_capture,
             commands::project_in_vs_code,
             commands::set_project_exclude,
             commands::take_back_exclude,

@@ -292,7 +292,7 @@ pub fn max_attached_for(config_path: &Path, root: &Path, sources: &ExtSources) -
     effective(&app, Some(root), sources).max_attached.value as usize
 }
 
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())
 }
 
@@ -652,7 +652,7 @@ pub const VS_CODE_EXCLUDE: &str =
 pub const MANAGED_EXCLUDE: &str =
     "Managed by VS Code: a VS Code window wrote its own exclude list for this project, so the app no longer changes it.";
 
-fn check_writable_for(config_path: &Path, what: &str) -> Result<(), String> {
+pub(crate) fn check_writable_for(config_path: &Path, what: &str) -> Result<(), String> {
     check_writable(config_path).map_err(|e| e.replace("add or remove projects", what))
 }
 

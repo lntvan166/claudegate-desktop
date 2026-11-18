@@ -2,6 +2,7 @@
 // Loaded through a DEV-guarded dynamic import in api.ts, so it never ships.
 import type {
   Api,
+  CaptureView,
   ChangedPayload,
   DecideAction,
   DecideReport,
@@ -567,7 +568,37 @@ export const mockApi: Api = {
   },
   projectInVsCode: (root) => delay(mockState().inVsCode.includes(root)),
   pickFolder: () => delay(mockState().nextPick),
+  captureStatus: (recheck) => {
+    // "Check again" finds python3 in the preview, so the state can be walked through.
+    if (recheck && capture.status === "python-missing") capture = { status: "not-set-up", version: null, note: null };
+    return delay({ ...capture });
+  },
+  setUpCapture: async () => {
+    await delay(null);
+    if (config.readOnly) throw "Read-only mode is on. Turn it off in Settings to set up capture.";
+    if (capture.status !== "not-set-up") throw "Capture is already set up; nothing was changed.";
+    capture = { status: "app", version: "v1.16.1", note: null };
+    return {
+      settings: "/home/dev/.claude/settings.json",
+      backup: "/home/dev/.claude/settings.json.claudegate-2026-11-18T10-20-30.123Z.bak",
+      created: ["/home/dev/.claudegate/hook.py", "/home/dev/.claudegate/hook.sh"],
+      version: "v1.16.1",
+      note: new URLSearchParams(location.search).get("captureNote"),
+      capture: { ...capture },
+    };
+  },
 };
+
+/** The capture state the preview starts in: `?capture=vscode|app|not-set-up|settings-unreadable|python-missing`. */
+let capture: CaptureView = (() => {
+  const s = (typeof location === "undefined" ? null : new URLSearchParams(location.search).get("capture")) ?? "not-set-up";
+  const status = (["vscode", "app", "not-set-up", "settings-unreadable", "python-missing"].includes(s) ? s : "not-set-up") as CaptureView["status"];
+  return {
+    status,
+    version: status === "app" ? "v1.16.1" : null,
+    note: status === "settings-unreadable" ? "not valid JSON: expected value at line 4 column 3" : null,
+  };
+})();
 
 function mockState(): { nextPick: string | null; inVsCode: string[] } {
   return (globalThis as Record<string, unknown>).__mock as { nextPick: string | null; inVsCode: string[] };
