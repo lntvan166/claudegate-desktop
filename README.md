@@ -2,7 +2,7 @@
 
 A standalone desktop reviewer for the session files written by the ClaudeGate VS Code extension. It reads `~/.claudegate/sessions/`, shows the pending, accepted and rejected changes Claude Code has made, and lets you decide them, without needing an editor open.
 
-It writes only when you make a decision (see Decisions). Browsing never writes, and the read-only switch turns decisions off.
+It writes when you make a decision, when you manage projects and their settings, and on its own to keep up the projects it added (see "What the app writes" below). Browsing is not write-free: loading or watching a project the app added runs upkeep on its session. The read-only switch blocks every write to the files shared with the extension except two that only maintain projects you already added.
 
 ## Running
 
@@ -37,7 +37,7 @@ Folder and project-wide accept and reject skip excluded files and files with no 
 
 **Undo.** After accepting or rejecting a single file, Undo reverses it: an accept is reverted, a reject is reapplied, so the file holds Claude's version again. Bulk and folder actions have no Undo.
 
-**Backups.** Before every write to a session file, the app copies the current one to `~/.claudegate-desktop/backups/<session hash>/<UTC timestamp>.json` and keeps the newest 50 per project. If the backup fails, the write is refused.
+**Backups.** Before a write to a session file, the app copies the current one to `~/.claudegate-desktop/backups/<session hash>/<UTC timestamp>.json` and keeps the newest 50 per project. If the backup fails, the write is refused. One exception: an upkeep write takes no backup when all it does is prune settled no-op entries (the file on disk equals the recorded baseline, or a file Claude was to create never appeared, so nothing is lost) and/or set the `excludeCleanupDone` latch. Upkeep that drops an excluded or out-of-workspace entry, or trims the accepted log, is backed up like a decision. Without the exception, routine upkeep would rotate the decision backups out of the 50 slots within hours.
 
 **Read-only mode.** Decisions are refused in these cases, and the app hides the actions and shows a banner:
 
@@ -48,6 +48,32 @@ Folder and project-wide accept and reject skip excluded files and files with no 
 
 **Alongside VS Code.** The app and the extension can run at once. Both take the same `<session>.lock`, re-read the file just before writing and merge in what the other (and the Claude hook) wrote in between, so a capture made while you decide is kept. `scripts/decide-e2e.sh` checks this headless in a temp sandbox: it runs the extension's hook during an accept and asserts the capture survives (it prints `E2E OK`).
 
-### Proving it is read-only
+### What the app writes
 
-`scripts/readonly-proof.sh [--no-app] [--bin PATH] [--print-bin] [HOME_DIR] [SECONDS]` snapshots every file under the ClaudeGate home (default `~/.claudegate`), runs the built binary for SECONDS (default 60), snapshots again, and prints `UNCHANGED` (exit 0) or each changed, added or removed file with its last `hook.log` mention (exit 1). The extension's hook may legitimately write in that window; the log line shows who. The binary is `--bin PATH`, else the newer of `target/release` and `target/debug`; the script prints its path, build time and the current `HEAD`, and warns when any file under `core/src`, `src-tauri/src` or `ui/src` is newer than it (`--print-bin` prints just that and exits). `--no-app` skips the launch; set `READONLY_PROOF_HEADLESS=1` to run the app under xvfb. Snapshots live in a temp dir, never inside the home. A static check, `core/tests/no_writes.rs`, also fails `cargo test` if any source file outside `src-tauri/src/config.rs` uses a write API.
+Every write the app can make, and whether the read-only switch blocks it. "Shared" files live in the ClaudeGate home (`~/.claudegate`) and are also written by the VS Code extension and its hook. An unreadable `config.json` counts as read-only for every row marked "Yes".
+
+| Write | File(s) | Blocked by read-only? | Why |
+|---|---|---|---|
+| Decisions (accept, reject, revert, reapply, clear, Undo) | the project's session file (shared); the workspace files rejected or reapplied; a backup | Yes | The switch exists to stop these. |
+| Add or Remove project | `workspace-roots.json` and `excludes.json` (shared); `config.json` | Yes | They change what the hook captures for every ClaudeGate. |
+| Set a project's exclude list | `excludes.json` (shared); `config.json` | Yes | The hook reads it. |
+| Take back an exclude list from VS Code | `excludes.json` (shared); `config.json` | Yes | Overwrites what VS Code wrote. |
+| Hook-log toggle | `hooklog.enabled` (shared) | Yes | Turns logging on or off for the extension too. |
+| App settings (overrides, extra hide patterns, hidden projects, editor, path style, the read-only switch itself) | `config.json` | No | The app's own file, never read by the extension; the switch must be able to turn itself off. |
+| Watcher re-add of the app's own roots | `workspace-roots.json` (shared) | No | The extension's unlocked rewrite can drop a root the app added; putting it back restores capture you already chose. It writes only when one of the app's roots is missing. |
+| Exclude sync, at startup and on every change of `excludes.json` or `config.json` | `excludes.json` (shared); `config.json` (`excludeWritten`, `excludeWrittenPrev`, `excludeWrittenAt`, `managedByVsCode`) | No | Maintains the ownership you chose when you added the project, and records a VS Code takeover. It compares first and writes only when something changed. |
+| Upkeep of the app's own projects, after loading one and on its session events | the project's session files (shared), and a backup unless the exception above applies | Yes | Only for projects the app added and VS Code has not taken over, and never while VS Code's or Cursor's `storage.json` shows the folder open (their own extension keeps that session). |
+| Backups | `~/.claudegate-desktop/backups/` | Follows the write it precedes | Taken only before a session write that is itself allowed. |
+| `config.json` | `~/.claudegate-desktop/config.json` | No | Created with the defaults on first launch when missing, and rewritten by every row above that records something in it. Never inside the ClaudeGate home. |
+
+So with read-only on, the app can still write `workspace-roots.json` (re-add) and `excludes.json` (sync) for the projects it added, and its own `config.json`. With no app-added projects, neither of those has anything to do.
+
+**Known limit: a lost write with the extension.** The extension writes `workspace-roots.json` and `excludes.json` without a lock. The app re-reads each file right before its atomic rename and starts over if it changed, but a write by the extension inside the few microseconds between that check and the rename can still be lost (or the extension, writing from a stale read, can drop the app's). The re-add and exclude sync above repair the app's side on the next change event. Session files do not have this gap: both sides take `<session>.lock`.
+
+### Checking what it writes
+
+`scripts/readonly-proof.sh [--no-app] [--bin PATH] [--print-bin] [HOME_DIR] [SECONDS]` snapshots every file under the ClaudeGate home (default `~/.claudegate`), runs the built binary for SECONDS (default 60), snapshots again, and prints `UNCHANGED` (exit 0) or each changed, added or removed file with its last `hook.log` mention (exit 1). The extension's hook may legitimately write in that window; the log line shows who. The binary is `--bin PATH`, else the newer of `target/release` and `target/debug`; the script prints its path, build time and the current `HEAD`, and warns when any file under `core/src`, `src-tauri/src` or `ui/src` is newer than it (`--print-bin` prints just that and exits). `--no-app` skips the launch; set `READONLY_PROOF_HEADLESS=1` to run the app under xvfb. Snapshots live in a temp dir, never inside the home.
+
+The proof sees the app's own writes too, not only the hook's: on a home where the app has added projects, a run can report the startup exclude sync, a re-added root or upkeep of those projects' sessions (see "What the app writes"). Expect `UNCHANGED` only on a home where the app owns no projects, or where everything is already in sync and nothing needs upkeep.
+
+A static check, `core/tests/no_writes.rs`, also fails `cargo test` if any source file uses a write API outside its allow-list: `src-tauri/src/config.rs` (the app's `~/.claudegate-desktop`), `core/src/store.rs` (session files, locks, temp files, backups, `workspace-roots.json`, `excludes.json` and the hook-log sentinel) and `core/src/workspace_write.rs` (workspace files on reject and reapply). A trailing `#[cfg(test)]` module is not scanned.

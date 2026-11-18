@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prove the viewer never writes under the ClaudeGate home.
+# Show what the app writes under the ClaudeGate home while it runs.
 # Usage: readonly-proof.sh [--no-app] [--bin PATH] [--print-bin] [HOME_DIR] [SECONDS]
 #   HOME_DIR     default $HOME/.claudegate
 #   SECONDS      default 60 (how long the app runs)
@@ -7,6 +7,11 @@
 #   --bin PATH   the binary to run; default is the newer of target/release and target/debug
 #   --print-bin  report which binary would run (path, build time, HEAD, staleness) and exit
 # Exit 0 = UNCHANGED, 1 = changed. Never writes inside HOME_DIR.
+# It sees the app's own writes as well as the hook's: for projects the app added, the startup
+# exclude sync (excludes.json), the re-add of a dropped root (workspace-roots.json) and session
+# upkeep can all change files here, read-only mode or not for the first two. Expect UNCHANGED
+# only on a home where the app owns no projects, or nothing is out of sync. See README.md,
+# "What the app writes".
 set -u
 
 NO_APP=0
@@ -113,6 +118,7 @@ if cmp -s "$TMP/before.txt" "$TMP/after.txt"; then
 fi
 
 echo "CHANGED:"
+echo "  (the app's own writes show here too: exclude sync, re-added roots, upkeep of its projects)"
 tsv() { awk '{p=$1; for(i=2;i<=NF-2;i++)p=p" "$i; print p "\t" $(NF-1) " " $NF}' "$1" | sort -t "$TAB" -k1,1; }
 tsv "$TMP/before.txt" > "$TMP/b.tsv"
 tsv "$TMP/after.txt" > "$TMP/a.tsv"
