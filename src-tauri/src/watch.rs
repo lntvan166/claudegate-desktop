@@ -1,6 +1,7 @@
 //! Live watcher: notify events on `<home>/sessions` and `<home>` are coalesced for 150 ms and
 //! turned into one `claudegate://changed` event. Nothing here creates or writes; a change of
-//! `workspace-roots.json` also runs the app's re-add of its own dropped roots (`commands`).
+//! `workspace-roots.json` also runs the app's re-add of its own dropped roots, and a change of
+//! `excludes.json` or the app's config runs the exclude sync of its own roots (`commands`).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -161,10 +162,15 @@ pub fn needs_relist(home: &Path, dirs: &[PathBuf]) -> bool {
     dirs.iter().any(|d| d == home || *d == s)
 }
 
-fn attach(w: &mut notify::RecommendedWatcher, home: &Path, watched: &mut Vec<PathBuf>) -> Vec<PathBuf> {
+fn attach(w: &mut notify::RecommendedWatcher, home: &Path, extra: Option<&Path>, watched: &mut Vec<PathBuf>) -> Vec<PathBuf> {
     use notify::{RecursiveMode, Watcher};
     let mut done = vec![];
-    for d in dirs_to_add(home, watched, &|p: &Path| p.is_dir()) {
+    let mut dirs = dirs_to_add(home, watched, &|p: &Path| p.is_dir());
+    // The app's own config folder, for the exclude sync (attached once it exists).
+    if let Some(x) = extra.filter(|x| x.is_dir() && !watched.iter().any(|w| w == x) && !dirs.iter().any(|d| d == x)) {
+        dirs.push(x.to_path_buf());
+    }
+    for d in dirs {
         match w.watch(&d, RecursiveMode::NonRecursive) {
             Ok(()) => {
                 watched.push(d.clone());
@@ -181,9 +187,12 @@ fn attach(w: &mut notify::RecommendedWatcher, home: &Path, watched: &mut Vec<Pat
 pub fn start(app: tauri::AppHandle, home: PathBuf, known: KnownMap) {
     use tauri::Emitter;
     let cg = home.clone();
-    run_with_roots_hook(
+    let cg2 = home.clone();
+    let config = crate::config::config_path();
+    run_with_hooks(
         home,
         known,
+        Some(config.clone()),
         move |p| {
             let _ = app.emit(CHANGED_EVENT, p);
         },
@@ -193,6 +202,11 @@ pub fn start(app: tauri::AppHandle, home: PathBuf, known: KnownMap) {
         move || {
             crate::commands::ensure_roots_with(&cg, &crate::config::config_path());
         },
+        // excludes.json or the config changed: write the owned roots' exclude, or notice that
+        // VS Code took one over. Compares before writing, so its own writes do not loop.
+        move || {
+            crate::commands::sync_excludes_with(&cg2, &config);
+        },
     );
 }
 
@@ -201,19 +215,27 @@ pub fn touches_roots_file(batch: &[PathBuf]) -> bool {
     batch.iter().any(|p| p.file_name().is_some_and(|n| n == "workspace-roots.json"))
 }
 
+/// True when a settled batch touched `excludes.json` or the app's config file (`config`).
+pub fn touches_excludes_or_config(batch: &[PathBuf], config: Option<&Path>) -> bool {
+    batch.iter().any(|p| p.file_name().is_some_and(|n| n == "excludes.json") || Some(p.as_path()) == config)
+}
+
 /// The watcher loop behind `start`, with the emitter injected so it can be driven by a test.
 /// The thread lives as long as the process.
 pub fn run(home: PathBuf, known: KnownMap, emit: impl Fn(ChangedPayload) + Send + 'static) {
-    run_with_roots_hook(home, known, emit, || {});
+    run_with_hooks(home, known, None, emit, || {}, || {});
 }
 
-/// `run`, also calling `on_roots` (before the emit) once per settled batch that touched
-/// `workspace-roots.json`; the 150 ms coalescing is its debounce.
-pub fn run_with_roots_hook(
+/// `run`, also calling (before the emit, once per settled batch; the 150 ms coalescing is the
+/// debounce) `on_roots` when the batch touched `workspace-roots.json`, and `on_sync` when it
+/// touched `excludes.json` or `config`, whose folder is watched too.
+pub fn run_with_hooks(
     home: PathBuf,
     known: KnownMap,
+    config: Option<PathBuf>,
     emit: impl Fn(ChangedPayload) + Send + 'static,
     on_roots: impl Fn() + Send + 'static,
+    on_sync: impl Fn() + Send + 'static,
 ) {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -230,7 +252,8 @@ pub fn run_with_roots_hook(
         }
     };
     let mut watched: Vec<PathBuf> = vec![];
-    attach(&mut watcher, &home, &mut watched);
+    let config_dir = config.as_ref().and_then(|c| c.parent()).map(Path::to_path_buf);
+    attach(&mut watcher, &home, config_dir.as_deref(), &mut watched);
     let home2 = home.clone();
     std::thread::spawn(move || {
         let mut co = Coalescer::new(Duration::from_millis(COALESCE_MS));
@@ -238,7 +261,7 @@ pub fn run_with_roots_hook(
             let wait = co.remaining(Instant::now()).unwrap_or(Duration::from_secs(3600));
             match rx.recv_timeout(wait) {
                 Ok(paths) => {
-                    let added = attach(&mut watcher, &home2, &mut watched);
+                    let added = attach(&mut watcher, &home2, config_dir.as_deref(), &mut watched);
                     if needs_relist(&home2, &added) {
                         // a pseudo-change on a relist-trigger file: one empty-roots event
                         co.push(Instant::now(), [home2.join("workspace-roots.json")]);
@@ -251,6 +274,9 @@ pub fn run_with_roots_hook(
             if let Some(batch) = co.take_if_due(Instant::now()) {
                 if touches_roots_file(&batch) {
                     on_roots();
+                }
+                if touches_excludes_or_config(&batch, config.as_deref()) {
+                    on_sync();
                 }
                 let snapshot = known.lock().map(|k| k.clone()).unwrap_or_default();
                 if let Some(p) = payload_for(&batch, &snapshot) {
@@ -344,6 +370,17 @@ mod tests {
         assert!(touches_roots_file(&[PathBuf::from("/h/sessions/a.json"), PathBuf::from("/h/workspace-roots.json")]));
         assert!(!touches_roots_file(&[PathBuf::from("/h/excludes.json"), PathBuf::from("/h/sessions/a.json")]));
         assert!(!touches_roots_file(&[PathBuf::from("/h/workspace-roots.json.0123456789ab.tmp")]));
+    }
+
+    #[test]
+    fn excludes_and_the_config_run_the_sync() {
+        let cfg = PathBuf::from("/u/.claudegate-desktop/config.json");
+        assert!(touches_excludes_or_config(&[PathBuf::from("/h/excludes.json")], Some(&cfg)));
+        assert!(touches_excludes_or_config(&[cfg.clone()], Some(&cfg)));
+        assert!(!touches_excludes_or_config(&[PathBuf::from("/h/workspace-roots.json")], Some(&cfg)));
+        assert!(!touches_excludes_or_config(&[PathBuf::from("/h/excludes.json.0123456789ab.tmp")], Some(&cfg)));
+        assert!(!touches_excludes_or_config(&[PathBuf::from("/u/.claudegate-desktop/.config.json.9.tmp")], Some(&cfg)));
+        assert!(!touches_excludes_or_config(&[cfg.clone()], None));
     }
 
     #[test]

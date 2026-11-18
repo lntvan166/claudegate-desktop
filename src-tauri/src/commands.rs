@@ -5,8 +5,8 @@ use crate::watch::KnownMap;
 use claudegate_core::decide::{decide_confirmed, Action, DecideError, DecidePaths, DecideReport, Target};
 use claudegate_core::model::{parse_session, ReviewRecord, Session};
 use claudegate_core::paths::{claudegate_home, resolve_root, session_file_for};
-use claudegate_core::project::{load_project_max, ProjectSummary, ProjectView};
-use claudegate_core::settings::{default_ext_sources, effective, Effective, ExtSources, Resolver};
+use claudegate_core::project::{load_project_max, load_project_with, ProjectSummary, ProjectView};
+use claudegate_core::settings::{default_ext_sources, effective, Effective, ExtSources, Resolved, Resolver, Source};
 use claudegate_core::roots::read_roots;
 use claudegate_core::textfile::{read_text, TextFile};
 use serde::{Deserialize, Serialize};
@@ -106,6 +106,20 @@ pub fn list_projects_with(home: &Path, known: &KnownMap) -> Vec<ProjectSummary> 
 
 /// `list_projects_with`, attaching at most `max_for(root)` worktrees per project.
 pub fn list_projects_max(home: &Path, known: &KnownMap, max_for: &dyn Fn(&Path) -> usize) -> Vec<ProjectSummary> {
+    list_projects_opts(home, known, &|r| LoadOpts { max_attached: max_for(r), exclude: None, extra_hide: vec![] })
+}
+
+/// How one project is loaded for the app: its worktree limit, the exclude to filter with when
+/// the app owns the root (else `excludes.json[root]`), and its app-only hide patterns, which
+/// the summary's count leaves out like the UI's lists do.
+pub struct LoadOpts {
+    pub max_attached: usize,
+    pub exclude: Option<Vec<String>>,
+    pub extra_hide: Vec<String>,
+}
+
+/// Every project's summary, loaded with `opts_for(root)`.
+pub fn list_projects_opts(home: &Path, known: &KnownMap, opts_for: &dyn Fn(&Path) -> LoadOpts) -> Vec<ProjectSummary> {
     let roots: Vec<PathBuf> = read_roots(home);
     if let Ok(mut k) = known.lock() {
         k.clear();
@@ -113,8 +127,10 @@ pub fn list_projects_max(home: &Path, known: &KnownMap, max_for: &dyn Fn(&Path) 
     roots
         .into_iter()
         .map(|r| {
-            let v = load_project_max(home, &r, max_for(&r));
+            let o = opts_for(&r);
+            let v = load_project_with(home, &r, o.max_attached, o.exclude.as_deref());
             remember(known, home, &v);
+            let hidden = claudegate_core::excludes::ExcludeMatcher::new(Path::new(&v.root), &o.extra_hide);
             let name = r
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -123,7 +139,7 @@ pub fn list_projects_max(home: &Path, known: &KnownMap, max_for: &dyn Fn(&Path) 
                 root: v.root.clone(),
                 name,
                 missing: v.missing,
-                pending: v.pending.len(),
+                pending: v.pending.iter().filter(|p| !hidden.is_excluded(&p.path)).count(),
                 next_recheck_at: v.next_recheck_at,
             }
         })
@@ -151,14 +167,35 @@ pub fn ext_sources() -> ExtSources {
     s
 }
 
-/// What the Settings screen shows: every effective setting with its source, and the selected
-/// project's app-only hide patterns. Serializes flat: `Effective`'s fields plus `extraHide`.
+/// Who writes the selected project's exclude for the hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExcludeOwner {
+    /// The app added the root and still owns `excludes.json[root]`: the list is editable here.
+    Owned,
+    /// The app added the root, then VS Code wrote its own `excludes.json[root]`.
+    ManagedByVsCode,
+    /// A VS Code project (or no project selected).
+    VsCode,
+}
+
+/// What the Settings screen shows: every effective setting with its source, the selected
+/// project's app-only hide patterns, and who owns its exclude. Serializes flat: `Effective`'s
+/// fields plus `extraHide` and `excludeOwner`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsView {
     #[serde(flatten)]
     pub effective: Effective,
     pub extra_hide: Vec<String>,
+    pub exclude_owner: ExcludeOwner,
+}
+
+/// The exclude the app writes for `root`, when it owns it: the project's own list, else the
+/// defaults. `None` for a VS Code root or one VS Code took over.
+pub fn owned_exclude_for(config_path: &Path, root: &Path) -> Option<Vec<String>> {
+    let rec = crate::config::project_record(config_path, &root.to_string_lossy());
+    rec.owned().then(|| claudegate_core::projects::owned_exclude(&rec))
 }
 
 pub fn settings_view(config_path: &Path, root: Option<&str>, sources: &ExtSources) -> SettingsView {
@@ -169,7 +206,56 @@ pub fn settings_view(config_path: &Path, root: Option<&str>, sources: &ExtSource
         .and_then(|r| extra.get(r.to_string_lossy().as_ref()))
         .cloned()
         .unwrap_or_default();
-    SettingsView { effective: effective(&app, root.as_deref(), sources), extra_hide }
+    let mut effective = effective(&app, root.as_deref(), sources);
+    let mut exclude_owner = ExcludeOwner::VsCode;
+    if let Some(r) = &root {
+        let rec = crate::config::project_record(config_path, &r.to_string_lossy());
+        if rec.owned() {
+            exclude_owner = ExcludeOwner::Owned;
+            let source = if rec.exclude.is_some() { Source::App } else { Source::Default };
+            effective.exclude = Resolved { value: claudegate_core::projects::owned_exclude(&rec), source };
+        } else if rec.added_by_app && rec.managed_by_vscode {
+            exclude_owner = ExcludeOwner::ManagedByVsCode;
+            // What the hook uses now is VS Code's key, whatever the app had saved.
+            let key = r.to_string_lossy().into_owned();
+            let file = std::fs::read_to_string(&sources.excludes_json).ok();
+            let theirs = file.and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).and_then(|v| {
+                Some(v.get(&key)?.as_array()?.iter().filter_map(|g| g.as_str().map(String::from)).collect::<Vec<_>>())
+            });
+            if let Some(g) = theirs {
+                effective.exclude = Resolved { value: g, source: Source::VsCode };
+            }
+        }
+    }
+    SettingsView { effective, extra_hide, exclude_owner }
+}
+
+/// The options the app loads `root` with (see `LoadOpts`).
+pub fn load_opts_for(config_path: &Path, root: &Path, resolver: &Resolver, extra: &std::collections::HashMap<String, Vec<String>>) -> LoadOpts {
+    let root = resolve_root(root);
+    LoadOpts {
+        max_attached: resolver.effective(Some(&root)).max_attached.value as usize,
+        exclude: owned_exclude_for(config_path, &root),
+        extra_hide: extra.get(root.to_string_lossy().as_ref()).cloned().unwrap_or_default(),
+    }
+}
+
+/// `list_projects` minus Tauri.
+pub fn list_projects_for(home: &Path, known: &KnownMap, config_path: &Path, sources: &ExtSources) -> Vec<ProjectSummary> {
+    // The config and the user-level settings files are read once for the whole list.
+    let (app, extra) = crate::config::read_app_settings(config_path);
+    let resolver = Resolver::new(&app, sources);
+    list_projects_opts(home, known, &|r| load_opts_for(config_path, r, &resolver, &extra))
+}
+
+/// `get_project` minus Tauri.
+pub fn get_project_for(home: &Path, known: &KnownMap, config_path: &Path, root: &str, sources: &ExtSources) -> ProjectView {
+    let (app, extra) = crate::config::read_app_settings(config_path);
+    let resolver = Resolver::new(&app, sources);
+    let o = load_opts_for(config_path, Path::new(root), &resolver, &extra);
+    let v = load_project_with(home, &resolve_root(Path::new(root)), o.max_attached, o.exclude.as_deref());
+    remember(known, home, &v);
+    v
 }
 
 /// `worktrees.maxAttached` for `root`, as the Settings screen resolves it.
@@ -185,24 +271,14 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 #[tauri::command]
 pub async fn list_projects(known: State<'_, KnownMap>) -> Result<Vec<ProjectSummary>, String> {
     let known = known.inner().clone();
-    blocking(move || {
-        // The config and the user-level settings files are read once for the whole list.
-        let (app, _) = crate::config::read_app_settings(&crate::config::config_path());
-        let src = ext_sources();
-        let resolver = Resolver::new(&app, &src);
-        list_projects_max(&claudegate_home(), &known, &|r| resolver.effective(Some(r)).max_attached.value as usize)
-    })
-    .await
+    blocking(move || list_projects_for(&claudegate_home(), &known, &crate::config::config_path(), &ext_sources())).await
 }
 
 #[tauri::command]
 pub async fn get_project(root: String, known: State<'_, KnownMap>) -> Result<ProjectView, String> {
     let known = known.inner().clone();
-    blocking(move || {
-        let max = max_attached_for(&crate::config::config_path(), &resolve_root(Path::new(&root)), &ext_sources());
-        get_project_max(&claudegate_home(), &known, &root, max)
-    })
-    .await
+    blocking(move || get_project_for(&claudegate_home(), &known, &crate::config::config_path(), &root, &ext_sources()))
+        .await
 }
 
 #[tauri::command]
@@ -501,6 +577,58 @@ pub fn ensure_roots_with(cg_home: &Path, config_path: &Path) -> Vec<String> {
     }
 }
 
+/// Writes the exclude of every root the app owns to `excludes.json` and detects a VS Code
+/// takeover (`claudegate_core::projects::sync_excludes`). Runs on changes of excludes.json and
+/// of the config, at startup and after an edit. Writes nothing when nothing changed, so its own
+/// write's event cannot loop. A failure is logged, never raised (it runs from the watcher).
+pub fn sync_excludes_with(cg_home: &Path, config_path: &Path) -> Vec<claudegate_core::projects::RootChange> {
+    let _g = roots_guard();
+    let mut cfg = crate::config::ConfigProjects { path: config_path, guard: Some(cg_home) };
+    match claudegate_core::projects::sync_excludes(cg_home, &mut cfg) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("claudegate: couldn't sync the projects' exclude: {e}");
+            Vec::new()
+        }
+    }
+}
+
+pub const VS_CODE_EXCLUDE: &str =
+    "This project comes from VS Code, which sets its exclude list. Change it there, or hide more files below.";
+pub const MANAGED_EXCLUDE: &str =
+    "Managed by VS Code: a VS Code window wrote its own exclude list for this project, so the app no longer changes it.";
+
+/// `set_project_exclude` minus Tauri: only for a root the app added and still owns. Validates
+/// the globs, saves `projects[root].exclude` (`None`: back to the defaults), then syncs so the
+/// hook sees it. Read-only mode blocks it.
+pub fn set_project_exclude_with(
+    cg_home: &Path,
+    config_path: &Path,
+    root: &str,
+    globs: Option<Vec<String>>,
+    sources: &ExtSources,
+) -> Result<SettingsView, String> {
+    check_writable(config_path).map_err(|e| e.replace("add or remove projects", "change a project's exclude list"))?;
+    let key = resolve_root(Path::new(root.trim())).to_string_lossy().into_owned();
+    let rec = crate::config::project_record(config_path, &key);
+    if !rec.added_by_app {
+        return Err(VS_CODE_EXCLUDE.into());
+    }
+    if rec.managed_by_vscode {
+        return Err(MANAGED_EXCLUDE.into());
+    }
+    let globs = globs.map(|g| claudegate_core::projects::validate_globs(&g)).transpose()?;
+    crate::config::save_project_exclude(config_path, &key, globs.as_deref(), Some(cg_home))?;
+    sync_excludes_with(cg_home, config_path);
+    Ok(settings_view(config_path, Some(&key), sources))
+}
+
+#[tauri::command]
+pub async fn set_project_exclude(root: String, globs: Option<Vec<String>>) -> Result<SettingsView, String> {
+    blocking(move || set_project_exclude_with(&claudegate_home(), &crate::config::config_path(), &root, globs, &ext_sources()))
+        .await?
+}
+
 #[tauri::command]
 pub async fn add_project(path: String) -> Result<claudegate_core::projects::Added, String> {
     blocking(move || add_project_with(&claudegate_home(), &crate::config::config_path(), &path)).await?
@@ -519,11 +647,16 @@ pub async fn remove_project(root: String) -> Result<claudegate_core::projects::R
 /// confirmation words itself on it.
 #[tauri::command]
 pub async fn project_in_vs_code(root: String) -> Result<bool, String> {
-    blocking(move || {
-        let storage = claudegate_core::projects::storage_files(&ext_sources());
-        claudegate_core::projects::vscode_uses_root(&claudegate_home(), Path::new(&root), &storage)
-    })
-    .await
+    blocking(move || project_in_vs_code_with(&claudegate_home(), &crate::config::config_path(), &root, &ext_sources()))
+        .await
+}
+
+/// `project_in_vs_code` minus Tauri: the same evidence `remove_project` weighs.
+pub fn project_in_vs_code_with(cg_home: &Path, config_path: &Path, root: &str, sources: &ExtSources) -> bool {
+    let storage = claudegate_core::projects::storage_files(sources);
+    let rec = crate::config::project_record(config_path, root);
+    rec.managed_by_vscode
+        || claudegate_core::projects::vscode_uses_root(cg_home, Path::new(root), rec.exclude_written.as_deref(), &storage)
 }
 
 /// The native folder picker: one directory, or `None` when cancelled.

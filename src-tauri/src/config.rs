@@ -378,7 +378,82 @@ fn load_hidden(path: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// `projects[root].addedByApp` in config.json, as the core's add/remove/ensure read and write it.
+/// `projects[root]` for `root`: the existing key that resolves to it, else a new one under the
+/// resolved spelling. Creates `projects` when missing.
+fn project_entry<'a>(
+    obj: &'a mut serde_json::Map<String, serde_json::Value>,
+    root: &str,
+) -> Result<&'a mut serde_json::Map<String, serde_json::Value>, String> {
+    let projects = obj.entry("projects").or_insert_with(|| serde_json::json!({}));
+    let projects = projects.as_object_mut().ok_or("The projects entry in config.json is not an object.")?;
+    let key = projects
+        .keys()
+        .find(|k| same_root(k, root))
+        .cloned()
+        .unwrap_or_else(|| claudegate_core::paths::resolve_root(Path::new(root)).to_string_lossy().into_owned());
+    let entry = projects.entry(key).or_insert_with(|| serde_json::json!({}));
+    entry.as_object_mut().ok_or_else(|| "That project's entry in config.json is not an object.".to_string())
+}
+
+/// The app's record of `root` (`projects[root]`: `addedByApp`, `exclude`, `excludeWritten`,
+/// `managedByVsCode`). Lenient: unreadable or the wrong shape reads as no record.
+pub fn project_record(path: &Path, root: &str) -> claudegate_core::projects::ProjectRecord {
+    use claudegate_core::projects::ProjectRecord;
+    let Some(v) = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    else {
+        return ProjectRecord::default();
+    };
+    let Some(p) = v
+        .get("projects")
+        .and_then(|p| p.as_object())
+        .and_then(|m| m.iter().find(|(k, _)| same_root(k, root)).map(|(_, p)| p))
+    else {
+        return ProjectRecord::default();
+    };
+    let strings = |k: &str| -> Option<Vec<String>> {
+        Some(p.get(k)?.as_array()?.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+    };
+    ProjectRecord {
+        added_by_app: p.get("addedByApp").and_then(|b| b.as_bool()) == Some(true),
+        exclude: strings("exclude"),
+        exclude_written: strings("excludeWritten"),
+        managed_by_vscode: p.get("managedByVsCode").and_then(|b| b.as_bool()) == Some(true),
+    }
+}
+
+/// Records what the app last wrote to `excludes.json[root]` (`projects[root].excludeWritten`).
+pub fn set_exclude_written(path: &Path, root: &str, globs: &[String], guard: Option<&Path>) -> Result<(), String> {
+    update_config(path, guard, |obj, _| {
+        project_entry(obj, root)?.insert("excludeWritten".into(), serde_json::json!(globs));
+        Ok(())
+    })
+    .map(|_| ())
+}
+
+/// Records that VS Code took `excludes.json[root]` over (`projects[root].managedByVsCode`).
+pub fn set_managed_by_vscode(path: &Path, root: &str, guard: Option<&Path>) -> Result<(), String> {
+    update_config(path, guard, |obj, _| {
+        project_entry(obj, root)?.insert("managedByVsCode".into(), serde_json::Value::Bool(true));
+        Ok(())
+    })
+    .map(|_| ())
+}
+
+/// Sets the project's own exclude (`projects[root].exclude`); `None` drops it, back to the
+/// defaults. The caller has validated the globs and checked the app owns the root.
+pub fn save_project_exclude(path: &Path, root: &str, globs: Option<&[String]>, guard: Option<&Path>) -> Result<(), String> {
+    update_config(path, guard, |obj, _| {
+        let entry = project_entry(obj, root)?;
+        match globs {
+            Some(g) => entry.insert("exclude".into(), serde_json::json!(g)),
+            None => entry.remove("exclude"),
+        };
+        Ok(())
+    })
+    .map(|_| ())
+}
+
+/// `projects[root]` in config.json, as the core's add/remove/ensure/sync read and write it.
 pub struct ConfigProjects<'a> {
     pub path: &'a Path,
     pub guard: Option<&'a Path>,
@@ -393,6 +468,15 @@ impl claudegate_core::projects::AppProjects for ConfigProjects<'_> {
     }
     fn forget(&mut self, root: &str) -> Result<(), String> {
         forget_project(self.path, root, self.guard)
+    }
+    fn record(&self, root: &str) -> claudegate_core::projects::ProjectRecord {
+        project_record(self.path, root)
+    }
+    fn set_exclude_written(&mut self, root: &str, globs: &[String]) -> Result<(), String> {
+        set_exclude_written(self.path, root, globs, self.guard)
+    }
+    fn set_managed_by_vscode(&mut self, root: &str) -> Result<(), String> {
+        set_managed_by_vscode(self.path, root, self.guard)
     }
 }
 

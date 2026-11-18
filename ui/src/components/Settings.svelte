@@ -12,6 +12,7 @@
     onset,
     onhooklog,
     onextrahide,
+    onexclude,
     oneditor,
     onreadonly,
     onshow,
@@ -28,6 +29,8 @@
     onset: (key: SettingKey, value: unknown) => Promise<boolean>;
     onhooklog: (on: boolean) => Promise<boolean>;
     onextrahide: (patterns: string[]) => Promise<boolean>;
+    /** The owned project's exclude list; `null` resets it to the defaults. */
+    onexclude: (globs: string[] | null) => Promise<boolean>;
     /** Resolves false when it failed (the app says why). */
     oneditor: (template: string) => Promise<boolean>;
     onreadonly: (on: boolean) => void;
@@ -72,24 +75,26 @@
 
   /** The "add a pattern" boxes, keyed by list. */
   let adding = $state<Record<string, string>>({});
-  async function addPattern(list: "protected" | "extraHide", current: string[]) {
+  type PatternList = "protected" | "extraHide" | "exclude";
+  const saveList = (list: PatternList, next: string[]) =>
+    list === "protected" ? onset("protected", next) : list === "exclude" ? onexclude(next) : onextrahide(next);
+  async function addPattern(list: PatternList, current: string[]) {
     const p = (adding[list] ?? "").trim();
     if (!p || current.includes(p)) {
       adding = { ...adding, [list]: "" };
       return;
     }
-    const next = [...current, p];
-    const ok = list === "protected" ? await onset("protected", next) : await onextrahide(next);
+    const ok = await saveList(list, [...current, p]);
     stamp(ok);
     if (ok) adding = { ...adding, [list]: "" };
   }
-  async function removePattern(list: "protected" | "extraHide", current: string[], p: string) {
-    const next = current.filter((x) => x !== p);
-    stamp(list === "protected" ? await onset("protected", next) : await onextrahide(next));
+  async function removePattern(list: PatternList, current: string[], p: string) {
+    stamp(await saveList(list, current.filter((x) => x !== p)));
   }
 
   const editors = $derived(menuOptions(config));
-  const excludeOwned = $derived(settings.exclude.source === "app");
+  const owner = $derived(settings.excludeOwner);
+  const excludeOwned = $derived(owner === "owned" || settings.exclude.source === "app");
   const managedBy = $derived(
     settings.exclude.source === "cursor" ? "Cursor" : settings.exclude.source === "default" ? null : "VS Code",
   );
@@ -148,7 +153,7 @@
   {/if}
 {/snippet}
 
-{#snippet adder(list: "protected" | "extraHide", current: string[], label: string)}
+{#snippet adder(list: PatternList, current: string[], label: string)}
   <form class="adder" onsubmit={(e) => { e.preventDefault(); void addPattern(list, current); }}>
     <input
       type="text"
@@ -282,15 +287,30 @@
           <p class="title">Excluded from {project.name}</p>
           <p class="desc">Changes to these are not captured or listed.</p>
           <div class="source">
-            <span class="badge" class:app={excludeOwned}>{sourceLabel(settings.exclude.source)}</span>
+            {#if owner === "managedByVsCode"}
+              <span class="badge">Managed by VS Code</span>
+            {:else}
+              <span class="badge" class:app={excludeOwned}>{sourceLabel(settings.exclude.source)}</span>
+              {#if owner === "owned" && settings.exclude.source === "app"}
+                <button class="link" onclick={() => void onexclude(null).then(stamp)} title="Use the extension's default list again">Reset to defaults</button>
+              {/if}
+            {/if}
           </div>
         </div>
         <div class="control">
-          {@render chips(settings.exclude.value, false, () => {}, `Excluded from ${project.name}`)}
-          {#if managedBy}
-            <p class="note">Managed by {managedBy}. Change it there, or hide more files below.</p>
-          {:else if !excludeOwned}
-            <p class="note">The extension's default list.</p>
+          {#if owner === "owned"}
+            {@render chips(settings.exclude.value, true, (p) => void removePattern("exclude", settings.exclude.value, p), `Excluded from ${project.name}`)}
+            {@render adder("exclude", settings.exclude.value, "Add a pattern to exclude")}
+            <p class="note">Added in this app, so the app hands this list to the capture hook.</p>
+          {:else}
+            {@render chips(settings.exclude.value, false, () => {}, `Excluded from ${project.name}`)}
+            {#if owner === "managedByVsCode"}
+              <p class="note">Managed by VS Code. A VS Code window wrote its own list for this project, so the app no longer changes it. Change it there, or hide more files below.</p>
+            {:else if managedBy}
+              <p class="note">Managed by {managedBy}. Change it there, or hide more files below.</p>
+            {:else if !excludeOwned}
+              <p class="note">The extension's default list.</p>
+            {/if}
           {/if}
         </div>
       </div>

@@ -112,6 +112,12 @@ export interface Api {
   /** The project's app-only hide patterns. */
   setExtraHide(root: string, patterns: string[]): Promise<SettingsView>;
   /**
+   * The exclude list of a project the app added and still owns, written to
+   * ~/.claudegate/excludes.json for the hook; `null` resets it to the defaults. Rejects for a VS
+   * Code project, one VS Code took over, a blank pattern, and in read-only mode.
+   */
+  setProjectExclude(root: string, globs: string[] | null): Promise<SettingsView>;
+  /**
    * Registers a folder in ~/.claudegate/workspace-roots.json so the hook captures there. Rejects
    * with a message for the user (naming the conflicting root for a nested folder).
    */
@@ -140,6 +146,7 @@ const tauriApi: Api = {
   setSetting: (key, value, root) => invoke<SettingsView>("set_setting", { key, value, root }),
   setHookLog: (on, root) => invoke<SettingsView>("set_hook_log", { on, root }),
   setExtraHide: (root, patterns) => invoke<SettingsView>("set_extra_hide", { root, patterns }),
+  setProjectExclude: (root, globs) => invoke<SettingsView>("set_project_exclude", { root, globs }),
   addProject: (path) => invoke<AddedProject>("add_project", { path }),
   removeProject: (root) => invoke<RemovedProject>("remove_project", { root }),
   projectInVsCode: (root) => invoke<boolean>("project_in_vs_code", { root }),
@@ -182,6 +189,8 @@ export const setSetting = async (key: SettingKey, value: unknown, root: string |
   (await api()).setSetting(key, value, root);
 export const setHookLog = async (on: boolean, root: string | null) => (await api()).setHookLog(on, root);
 export const setExtraHide = async (root: string, patterns: string[]) => (await api()).setExtraHide(root, patterns);
+export const setProjectExclude = async (root: string, globs: string[] | null) =>
+  (await api()).setProjectExclude(root, globs);
 export const addProject = async (path: string) => (await api()).addProject(path);
 export const removeProject = async (root: string) => (await api()).removeProject(root);
 export const pickFolder = async () => (await api()).pickFolder();

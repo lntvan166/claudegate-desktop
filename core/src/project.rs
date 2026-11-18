@@ -287,12 +287,22 @@ pub fn load_project_max(home: &Path, root: &Path, max_attached: usize) -> Projec
     load_project_at_max(home, root, now_ms(), max_attached)
 }
 
+/// `load_project_max`, filtering with `exclude` instead of `excludes.json[root]` when given: the
+/// effective exclude of a root the app owns, which can be ahead of the file until the next sync.
+pub fn load_project_with(home: &Path, root: &Path, max_attached: usize, exclude: Option<&[String]>) -> ProjectView {
+    load_project_full(home, root, now_ms(), max_attached, exclude)
+}
+
 /// `load_project` with the clock injected.
 pub fn load_project_at(home: &Path, root: &Path, now_ms: i64) -> ProjectView {
     load_project_at_max(home, root, now_ms, MAX_WORKTREES)
 }
 
 fn load_project_at_max(home: &Path, root: &Path, now_ms: i64, max_attached: usize) -> ProjectView {
+    load_project_full(home, root, now_ms, max_attached, None)
+}
+
+fn load_project_full(home: &Path, root: &Path, now_ms: i64, max_attached: usize, exclude: Option<&[String]>) -> ProjectView {
     let primary_path = resolve_root(root);
     let primary = primary_path.to_string_lossy().into_owned();
     let mut view = ProjectView {
@@ -307,7 +317,10 @@ fn load_project_at_max(home: &Path, root: &Path, now_ms: i64, max_attached: usiz
     if view.missing {
         return view;
     }
-    let matcher = project_matcher(home, &primary_path);
+    let matcher = match exclude {
+        Some(globs) => ExcludeMatcher::new(&primary_path, globs),
+        None => project_matcher(home, &primary_path),
+    };
     for (i, scope) in project_scopes_max(&primary_path, max_attached).iter().enumerate() {
         load_scope(home, scope, &primary, &matcher, i > 0, now_ms, &mut view);
     }

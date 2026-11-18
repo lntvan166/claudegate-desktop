@@ -8,7 +8,7 @@
 
 use crate::paths::resolve_root;
 use crate::roots::{read_roots, RootsError};
-use crate::store::{roots_add, roots_append, roots_remove, ROOTS_FILE};
+use crate::store::{excludes_key, excludes_remove, roots_add, roots_append, roots_remove, update_excludes, ROOTS_FILE};
 use std::path::{Path, PathBuf};
 
 /// The app's record of the roots it added.
@@ -19,6 +19,137 @@ pub trait AppProjects {
     fn mark_added(&mut self, root: &str) -> Result<(), String>;
     /// Drops the app's whole record of `root`.
     fn forget(&mut self, root: &str) -> Result<(), String>;
+    /// The app's record of `root` (`projects[root]`); the default when there is none.
+    fn record(&self, root: &str) -> ProjectRecord;
+    /// Records the exclude the app last wrote to `excludes.json[root]` (`excludeWritten`).
+    fn set_exclude_written(&mut self, root: &str, globs: &[String]) -> Result<(), String>;
+    /// Records that VS Code took `excludes.json[root]` over (`managedByVsCode`).
+    fn set_managed_by_vscode(&mut self, root: &str) -> Result<(), String>;
+}
+
+/// `projects[root]` in the app's config, as far as exclude ownership needs it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectRecord {
+    pub added_by_app: bool,
+    /// The project's exclude as the user set it in the app; `None` means the defaults.
+    pub exclude: Option<Vec<String>>,
+    /// Exactly what the app last wrote to `excludes.json[root]`.
+    pub exclude_written: Option<Vec<String>>,
+    /// VS Code wrote a different `excludes.json[root]`; the app no longer writes that key.
+    pub managed_by_vscode: bool,
+}
+
+impl ProjectRecord {
+    /// The app writes this root's exclude: it added the root and VS Code has not taken it over.
+    pub fn owned(&self) -> bool {
+        self.added_by_app && !self.managed_by_vscode
+    }
+}
+
+/// What one sync did to a root.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RootChange {
+    /// The app wrote `globs` to `excludes.json[root]`.
+    Written { root: String, globs: Vec<String> },
+    /// `excludes.json[root]` differs from what the app wrote: VS Code owns it from now on.
+    ManagedByVsCode { root: String },
+}
+
+/// The exclude an owned root gets: the app's own list if the user set one, else the extension's
+/// defaults. Never read back from `excludes.json`, which the app itself writes.
+pub fn owned_exclude(rec: &ProjectRecord) -> Vec<String> {
+    rec.exclude
+        .clone()
+        .unwrap_or_else(|| crate::settings::DEFAULT_EXCLUDES.iter().map(|s| s.to_string()).collect())
+}
+
+/// Trimmed, without repeats, in order; refused if a pattern is blank or does not compile with
+/// the extension's matcher (the hook would silently ignore it).
+pub fn validate_globs(globs: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for g in globs {
+        let g = g.trim();
+        if g.is_empty() {
+            return Err("A pattern is empty.".into());
+        }
+        if crate::excludes::glob_to_regex(g).is_none() {
+            return Err(format!("{g} is not a pattern the matcher understands."));
+        }
+        if !out.iter().any(|o| o == g) {
+            out.push(g.to_string());
+        }
+    }
+    Ok(out)
+}
+
+fn store_err(e: crate::store::StoreError) -> String {
+    e.to_string()
+}
+
+/// One root's step of `sync_excludes`. `None` when nothing changed or the root is not owned.
+fn sync_root(home: &Path, cfg: &mut impl AppProjects, root: &str) -> Result<Option<RootChange>, String> {
+    let rec = cfg.record(root);
+    if !rec.owned() {
+        return Ok(None);
+    }
+    let key = excludes_key(Path::new(root));
+    let want = owned_exclude(&rec);
+    let want_v = serde_json::json!(want);
+    let written_v = rec.exclude_written.as_ref().map(|w| serde_json::json!(w));
+    let mut taken = false;
+    let wrote = update_excludes(home, |map| {
+        taken = false;
+        match map.get(&key) {
+            // Already what we want: adopt it (also covers a write whose record was lost).
+            Some(v) if *v == want_v => Ok(false),
+            // Absent, or still what we wrote last: ours to write.
+            None => {
+                map.insert(key.clone(), want_v.clone());
+                Ok(true)
+            }
+            Some(v) if Some(v) == written_v.as_ref() => {
+                map.insert(key.clone(), want_v.clone());
+                Ok(true)
+            }
+            Some(_) => {
+                taken = true;
+                Ok(false)
+            }
+        }
+    })
+    .map_err(store_err)?;
+    if taken {
+        cfg.set_managed_by_vscode(root)?;
+        return Ok(Some(RootChange::ManagedByVsCode { root: root.to_string() }));
+    }
+    if rec.exclude_written.as_ref() != Some(&want) {
+        cfg.set_exclude_written(root, &want)?;
+    }
+    Ok(wrote.then(|| RootChange::Written { root: root.to_string(), globs: want }))
+}
+
+/// For every root the app added and still owns: when `excludes.json[root]` is absent or still
+/// what the app last wrote, write the effective exclude (`owned_exclude`) and record it as
+/// `excludeWritten`; when it differs, VS Code has taken the root over: record
+/// `managedByVsCode` and never write that key again. Compares before writing, so running it on
+/// its own write's watch event writes nothing. Returns what changed.
+pub fn sync_excludes(home: &Path, cfg: &mut impl AppProjects) -> Result<Vec<RootChange>, String> {
+    let mut out = Vec::new();
+    let mut first_err = None;
+    for root in cfg.app_roots() {
+        match sync_root(home, cfg, &root) {
+            Ok(Some(c)) => out.push(c),
+            Ok(None) => {}
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    match first_err {
+        Some(e) if out.is_empty() => Err(e),
+        _ => Ok(out),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -100,16 +231,18 @@ fn open_folders(storage: &Path) -> Vec<PathBuf> {
 }
 
 /// Evidence that VS Code or Cursor uses `root` (its ClaudeGate registers the root too, and the
-/// roots file holds it once): an `excludes.json[root]` key (the app writes none yet; once it
-/// does, only a key it did not write should count), or the folder open in either editor's
-/// `storage.json`. Read only; anything unreadable is no evidence.
-pub fn vscode_uses_root(home: &Path, root: &Path, storage_files: &[PathBuf]) -> bool {
+/// roots file holds it once): an `excludes.json` key for the root whose value differs from
+/// `written`, what the app itself last wrote there (`None`: the app wrote nothing, so any key is
+/// VS Code's), or the folder open in either editor's `storage.json`. Read only; anything
+/// unreadable is no evidence.
+pub fn vscode_uses_root(home: &Path, root: &Path, written: Option<&[String]>, storage_files: &[PathBuf]) -> bool {
     let root = resolve_root(root);
     let excludes = std::fs::read_to_string(home.join("excludes.json"))
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let written = written.map(|w| serde_json::json!(w));
     if let Some(m) = excludes.as_ref().and_then(|v| v.as_object()) {
-        if m.keys().any(|k| resolve_root(Path::new(k)) == root) {
+        if m.iter().any(|(k, v)| resolve_root(Path::new(k)) == root && Some(v) != written.as_ref()) {
             return true;
         }
     }
@@ -159,6 +292,10 @@ pub fn add_project(home: &Path, cfg: &mut impl AppProjects, path: &str) -> Resul
         let _ = roots_remove(home, &root);
         return Err(RootsError::Io(format!("Couldn't record the project in the app's settings: {e}")));
     }
+    // 6. The app took ownership: hand the hook its exclude (the defaults, or VS Code's key if a
+    // window already wrote one, which makes the root VS Code's). A failure here keeps the add;
+    // the next sync (on any change of excludes.json or the config) retries.
+    let _ = sync_root(home, cfg, &name);
     Ok(Added { root: name, already: false })
 }
 
@@ -178,7 +315,8 @@ pub fn remove_project(
         return Err(RootsError::NotAppAdded);
     }
     let settings_err = |e: String| RootsError::Io(format!("Couldn't update the app's settings: {e}"));
-    if vscode_uses_root(home, &root, storage_files) {
+    let rec = cfg.record(&name);
+    if rec.managed_by_vscode || vscode_uses_root(home, &root, rec.exclude_written.as_deref(), storage_files) {
         cfg.forget(&name).map_err(settings_err)?;
         return Ok(Removed { root: name, unregistered: false });
     }
@@ -188,6 +326,9 @@ pub fn remove_project(
         let _ = roots_add(home, &root);
         return Err(settings_err(e));
     }
+    // No evidence means the key is absent or still the app's own: take it out with the root. A
+    // failure leaves a key the hook never consults (no root routes to it).
+    let _ = excludes_remove(home, &root);
     Ok(Removed { root: name, unregistered: true })
 }
 

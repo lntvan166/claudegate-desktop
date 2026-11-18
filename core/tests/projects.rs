@@ -1,7 +1,9 @@
 //! Add and remove projects: `workspace-roots.json` is appended to, never rewritten, and only the
 //! roots the app added can be removed. Temp homes only.
 
-use claudegate_core::projects::{add_project, ensure_app_roots_present, remove_project, vscode_uses_root, AppProjects};
+use claudegate_core::projects::{
+    add_project, ensure_app_roots_present, remove_project, vscode_uses_root, AppProjects, ProjectRecord,
+};
 use claudegate_core::roots::{check_new_root, read_roots, RootsError};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,6 +13,7 @@ use std::path::{Path, PathBuf};
 struct Cfg {
     roots: Vec<String>,
     fail_mark: bool,
+    written: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl AppProjects for Cfg {
@@ -28,6 +31,21 @@ impl AppProjects for Cfg {
     }
     fn forget(&mut self, root: &str) -> Result<(), String> {
         self.roots.retain(|r| r != root);
+        self.written.remove(root);
+        Ok(())
+    }
+    fn record(&self, root: &str) -> ProjectRecord {
+        ProjectRecord {
+            added_by_app: self.roots.iter().any(|r| r == root),
+            exclude_written: self.written.get(root).cloned(),
+            ..Default::default()
+        }
+    }
+    fn set_exclude_written(&mut self, root: &str, globs: &[String]) -> Result<(), String> {
+        self.written.insert(root.into(), globs.to_vec());
+        Ok(())
+    }
+    fn set_managed_by_vscode(&mut self, _root: &str) -> Result<(), String> {
         Ok(())
     }
 }
@@ -277,7 +295,7 @@ fn re_adding_skips_a_root_that_would_now_nest() {
 }
 
 #[test]
-fn remove_only_forgets_when_vs_code_has_an_excludes_key_for_the_root() {
+fn remove_only_forgets_when_vs_code_has_its_own_excludes_key_for_the_root() {
     let e = env();
     let b = e.dir("b");
     let mut cfg = Cfg::default();
@@ -305,7 +323,7 @@ fn remove_only_forgets_when_the_folder_is_open_in_vs_code() {
         serde_json::json!({ "backupWorkspaces": { "folders": [{ "folderUri": uri }] } }),
     ] {
         fs::write(&storage, v.to_string()).unwrap();
-        assert!(vscode_uses_root(&e.home, Path::new(&b), &[storage.clone()]), "{v}");
+        assert!(vscode_uses_root(&e.home, Path::new(&b), None, &[storage.clone()]), "{v}");
     }
     let before = e.raw();
     let r = remove_project(&e.home, &mut cfg, &b, &[e.ws.join("absent.json"), storage.clone()]).unwrap();
@@ -323,7 +341,7 @@ fn no_evidence_unregisters_and_bad_storage_is_no_evidence() {
     add_project(&e.home, &mut cfg, &b).unwrap();
     fs::write(e.home.join("excludes.json"), serde_json::json!({ other.clone(): [] }).to_string()).unwrap();
     fs::write(&storage, "{ not json").unwrap();
-    assert!(!vscode_uses_root(&e.home, Path::new(&b), &[storage.clone()]));
+    assert!(!vscode_uses_root(&e.home, Path::new(&b), None, &[storage.clone()]));
     let r = remove_project(&e.home, &mut cfg, &b, &[storage]).unwrap();
     assert!(r.unregistered);
     assert!(read_roots(&e.home).is_empty());

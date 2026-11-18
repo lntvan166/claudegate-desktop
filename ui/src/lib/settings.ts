@@ -18,7 +18,15 @@ export type SettingsView = {
   hookLog: Resolved<boolean>;
   /** The selected project's app-only hide patterns (`projects[root].extraHide`). */
   extraHide: string[];
+  /**
+   * Who writes the selected project's exclude for the hook: the app (it added the project and
+   * still owns it, so the list is editable here), VS Code after taking an app project over, or
+   * VS Code because the project is its own.
+   */
+  excludeOwner: ExcludeOwner;
 };
+
+export type ExcludeOwner = "owned" | "managedByVsCode" | "vsCode";
 
 /** The keys `set_setting` takes. */
 export type SettingKey = "autoAdvance" | "groupBySession" | "pendingAgeMinDays" | "maxAttached" | "protected";
@@ -38,6 +46,7 @@ export const DEFAULT_SETTINGS: SettingsView = {
   maxAttached: { value: 256, source: "default" },
   hookLog: { value: false, source: "default" },
   extraHide: [],
+  excludeOwner: "vsCode",
 };
 
 export function sourceLabel(source: Source): string {

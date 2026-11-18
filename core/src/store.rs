@@ -45,6 +45,8 @@ pub enum StoreError {
     OutsideHome,
     /// The on-disk session has fields this version does not know; a newer writer owns it.
     UnknownShape,
+    /// A shared file other than a session (`excludes.json`) could not be updated.
+    Shared(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -56,6 +58,7 @@ impl std::fmt::Display for StoreError {
                 write!(f, "refusing to write a session file outside the ClaudeGate sessions dir")
             }
             StoreError::UnknownShape => write!(f, "the session file was written by a newer ClaudeGate"),
+            StoreError::Shared(e) => write!(f, "{e}"),
         }
     }
 }
@@ -581,6 +584,92 @@ pub(crate) fn roots_remove(home: &Path, root: &Path) -> Result<(), RootsError> {
     })
     .map(|_| ())
 }
+
+/// The extension's shared exclude list, `<claudegate home>/excludes.json`:
+/// `{ "<resolved root>": ["glob", ...] }`. hook.py reads it to skip capture.
+pub const EXCLUDES_FILE: &str = "excludes.json";
+
+fn excludes_io(e: impl std::fmt::Display) -> StoreError {
+    StoreError::Shared(format!("Couldn't update {EXCLUDES_FILE}: {e}"))
+}
+
+/// Every key, as found. Missing means `{}`; anything but a JSON object is refused, so a file we
+/// cannot read is never overwritten.
+fn parse_excludes_raw(raw: Option<&str>) -> Result<serde_json::Map<String, serde_json::Value>, StoreError> {
+    let Some(raw) = raw else { return Ok(serde_json::Map::new()) };
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(serde_json::Value::Object(m)) => Ok(m),
+        Ok(_) => Err(excludes_io("it is not a JSON object; fix or delete it, then try again")),
+        Err(e) => Err(excludes_io(format!("it is not valid JSON ({e}); fix or delete it, then try again"))),
+    }
+}
+
+/// Read, edit, write `<home>/excludes.json`, the same protocol as the roots file: re-reads right
+/// before the rename and starts over if another window wrote it since our read. `edit` returns
+/// `Ok(false)` when there is nothing to change, and then nothing is written. Every key `edit`
+/// leaves alone is kept as a value (key order follows the JSON map's, sorted). Written
+/// atomically as 2-space pretty JSON, like the extension's `JSON.stringify(_, null, 2)`.
+pub(crate) fn update_excludes(
+    home: &Path,
+    mut edit: impl FnMut(&mut serde_json::Map<String, serde_json::Value>) -> Result<bool, StoreError>,
+) -> Result<bool, StoreError> {
+    if home.as_os_str().is_empty() || !home.is_absolute() {
+        return Err(excludes_io("the ClaudeGate folder is not an absolute path"));
+    }
+    let target = home.join(EXCLUDES_FILE);
+    let read = |t: &Path| match fs::read_to_string(t) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(excludes_io(e)),
+    };
+    for _ in 0..ROOTS_ATTEMPTS {
+        let raw = read(&target)?;
+        let mut map = parse_excludes_raw(raw.as_deref())?;
+        if !edit(&mut map)? {
+            return Ok(false);
+        }
+        let text = serde_json::to_string_pretty(&serde_json::Value::Object(map)).map_err(excludes_io)?;
+        roots_race_point();
+        if read(&target)? != raw {
+            continue;
+        }
+        atomic_write(&target, &text, true).map_err(excludes_io)?;
+        return Ok(true);
+    }
+    Err(excludes_io("another program kept changing it; try again"))
+}
+
+/// The key the extension uses for `root` (`path.resolve`).
+pub(crate) fn excludes_key(root: &Path) -> String {
+    crate::paths::resolve_root(root).to_string_lossy().into_owned()
+}
+
+/// Sets `excludes.json[root]` to `globs`, keeping every other key. Writes nothing when the value
+/// is already that. Unconditional: the app's own sync goes through `update_excludes` so it can
+/// refuse a key VS Code has taken over in the same read.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn excludes_set(home: &Path, root: &Path, globs: &[String]) -> Result<(), StoreError> {
+    let key = excludes_key(root);
+    let want = serde_json::json!(globs);
+    update_excludes(home, |map| {
+        if map.get(&key) == Some(&want) {
+            return Ok(false);
+        }
+        map.insert(key.clone(), want.clone());
+        Ok(true)
+    })
+    .map(|_| ())
+}
+
+/// Deletes `excludes.json[root]` and nothing else. Writes nothing when it is not there.
+pub(crate) fn excludes_remove(home: &Path, root: &Path) -> Result<(), StoreError> {
+    let key = excludes_key(root);
+    update_excludes(home, |map| Ok(map.remove(&key).is_some())).map(|_| ())
+}
+
+#[path = "../tests/unit/excludes_write.rs"]
+#[cfg(test)]
+mod excludes_write_tests;
 
 #[path = "../tests/unit/roots_write.rs"]
 #[cfg(test)]

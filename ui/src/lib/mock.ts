@@ -16,7 +16,7 @@ import type {
   SettingKey,
   SettingsView,
 } from "./api";
-import { DEFAULT_PROTECTED, type Resolved } from "./settings";
+import { DEFAULT_PROTECTED, globMatcher, type ExcludeOwner, type Resolved } from "./settings";
 
 const SHOP = "/home/dev/src/shop-api";
 const WT = `${SHOP}/.worktrees/checkout-v2`;
@@ -110,7 +110,8 @@ const views: Record<string, ProjectView> = {
     root: TIDE,
     missing: false,
     scopes: [{ root: TIDE, isWorktree: false, shapeUnknown: [], error: null }],
-    pending: [pendingIn(TIDE, "src/ocean.rs", 31, 12)],
+    // Cargo.lock is in the default exclude: it shows only once the project's list drops it.
+    pending: [pendingIn(TIDE, "src/ocean.rs", 31, 12), pendingIn(TIDE, "Cargo.lock", 40, 22)],
     accepted: [],
     rejected: [],
     nextRecheckAt: null,
@@ -359,14 +360,39 @@ let hookLog = false;
 const extraHide: Record<string, string[]> = { [SHOP]: ["**/*.snap"] };
 const DEFAULT_EXCLUDE = ["**/package-lock.json", "**/yarn.lock", "**/Cargo.lock", "**/go.sum", "**/*.min.js", "**/*.map", "**/node_modules/**"];
 
+/** The app's own exclude list of the projects it owns (`projects[root].exclude`). */
+const projectExclude: Record<string, string[]> = {};
+/** VS Code's own list for an app project it took over. */
+const takenOver: Record<string, string[]> = {};
+
+function excludeOwner(root: string | null): ExcludeOwner {
+  if (!root || !(config.appRoots ?? []).includes(root)) return "vsCode";
+  return root in takenOver ? "managedByVsCode" : "owned";
+}
+
+function mockExclude(root: string | null): Resolved<string[]> {
+  const owner = excludeOwner(root);
+  if (owner === "owned") {
+    return root! in projectExclude ? { value: projectExclude[root!], source: "app" } : { value: DEFAULT_EXCLUDE, source: "default" };
+  }
+  if (owner === "managedByVsCode") return { value: takenOver[root!], source: "vsCode" };
+  return root === SHOP
+    ? { value: [...DEFAULT_EXCLUDE, "dist/**", "coverage/**"], source: "vsCode" }
+    : { value: DEFAULT_EXCLUDE, source: "default" };
+}
+
+/** The view as the core filters it: an owned project's own exclude drops rows. */
+function filtered(v: ProjectView): ProjectView {
+  if (excludeOwner(v.root) !== "owned") return v;
+  const out = globMatcher(v.root, mockExclude(v.root).value);
+  return { ...v, pending: v.pending.filter((p) => !out(p.path)), accepted: v.accepted.filter((r) => !out(r.path)), rejected: v.rejected.filter((r) => !out(r.path)) };
+}
+
 function mockSettings(root: string | null): SettingsView {
   const r = <T>(k: SettingKey) =>
     (k in appSettings ? { value: appSettings[k], source: "app" } : ext[k]) as Resolved<T>;
   return {
-    exclude:
-      root === SHOP
-        ? { value: [...DEFAULT_EXCLUDE, "dist/**", "coverage/**"], source: "vsCode" }
-        : { value: DEFAULT_EXCLUDE, source: "default" },
+    exclude: mockExclude(root),
     protected: r<string[]>("protected"),
     autoAdvance: r<boolean>("autoAdvance"),
     groupBySession: r<boolean>("groupBySession"),
@@ -374,6 +400,7 @@ function mockSettings(root: string | null): SettingsView {
     maxAttached: r<number>("maxAttached"),
     hookLog: { value: hookLog, source: hookLog ? "app" : "default" },
     extraHide: (root && extraHide[root]) || [],
+    excludeOwner: excludeOwner(root),
   };
 }
 
@@ -400,6 +427,13 @@ const handlers = new Set<(p: ChangedPayload) => void>();
       for (const h of handlers) h({ roots: [v.root] });
     }
   },
+  /** A VS Code window writes its own exclude for an app project: the app stops owning it. */
+  takeOver(name: string, globs: string[] = ["**/node_modules/**", "target/**"]) {
+    const root = rootsList.find((r) => r.endsWith(`/${name}`));
+    if (!root) return;
+    takenOver[root] = globs;
+    for (const h of handlers) h({ roots: [] });
+  },
   drop(suffix: string) {
     for (const v of Object.values(views)) {
       const before = v.pending.length;
@@ -412,16 +446,20 @@ const handlers = new Set<(p: ChangedPayload) => void>();
 export const mockApi: Api = {
   listProjects: () =>
     delay<ProjectSummary[]>(
-      rootsList.map((root) => ({
-        root,
-        name: root.split("/").pop()!,
-        missing: views[root].missing,
-        pending: views[root].pending.length,
-        nextRecheckAt: null,
-      })),
+      rootsList.map((root) => {
+        // The sidebar count leaves out what the app-only hide patterns hide, like the tabs do.
+        const hidden = globMatcher(root, extraHide[root] ?? []);
+        return {
+          root,
+          name: root.split("/").pop()!,
+          missing: views[root].missing,
+          pending: filtered(views[root]).pending.filter((p) => !hidden(p.path)).length,
+          nextRecheckAt: null,
+        };
+      }),
     ),
   getProject: (root) =>
-    delay(views[root] ?? { root, missing: true, scopes: [], pending: [], accepted: [], rejected: [], nextRecheckAt: null }),
+    delay(views[root] ? filtered(views[root]) : { root, missing: true, scopes: [], pending: [], accepted: [], rejected: [], nextRecheckAt: null }),
   getDiff: (_root, _scope, kind: DiffKind, key) => {
     const path = key.includes("::") ? key.split("::")[1] : key;
     if (path.endsWith(".png")) return delay<DiffPayload>({ path, before: { kind: "binary" }, after: { kind: "binary" } });
@@ -478,6 +516,22 @@ export const mockApi: Api = {
   setExtraHide: (root, patterns) => {
     extraHide[root] = patterns;
     return delay(mockSettings(root));
+  },
+  setProjectExclude: async (root, globs) => {
+    await delay(null);
+    if (config.readOnly) throw "Read-only mode is on. Turn it off in Settings to change a project's exclude list.";
+    const owner = excludeOwner(root);
+    if (owner === "vsCode")
+      throw "This project comes from VS Code, which sets its exclude list. Change it there, or hide more files below.";
+    if (owner === "managedByVsCode")
+      throw "Managed by VS Code: a VS Code window wrote its own exclude list for this project, so the app no longer changes it.";
+    if (globs === null) delete projectExclude[root];
+    else {
+      const clean = [...new Set(globs.map((g) => g.trim()))];
+      if (clean.some((g) => g === "")) throw "A pattern is empty.";
+      projectExclude[root] = clean;
+    }
+    return mockSettings(root);
   },
   addProject: async (path) => {
     await delay(null);

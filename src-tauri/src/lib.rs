@@ -15,6 +15,8 @@ pub fn run() {
             let known = app.state::<watch::KnownMap>().inner().clone();
             // Re-add any of the app's projects the extension dropped while we were not running.
             commands::ensure_roots_with(&claudegate_core::paths::claudegate_home(), &config::config_path());
+            // Hand the hook the exclude of the app's own projects; notice a VS Code takeover.
+            commands::sync_excludes_with(&claudegate_core::paths::claudegate_home(), &config::config_path());
             watch::start(app.handle().clone(), claudegate_core::paths::claudegate_home(), known);
             tray::setup(app.handle());
             Ok(())
@@ -32,6 +34,7 @@ pub fn run() {
             commands::remove_project,
             commands::pick_folder,
             commands::project_in_vs_code,
+            commands::set_project_exclude,
             config::get_config,
             config::set_editor,
             config::set_read_only,

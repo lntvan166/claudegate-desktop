@@ -20,6 +20,7 @@
     removeProject,
     getSettings,
     setExtraHide,
+    setProjectExclude,
     setHookLog,
     setSetting,
     type SettingKey,
@@ -290,11 +291,21 @@
     }
   }
 
+  /**
+   * The project's pending rows as its tab shows them, without the app-only hidden ones (the
+   * core's summary leaves them out too). Before the project's settings have loaded the hide
+   * patterns are unknown, so the summary's own count stands until the next list.
+   */
+  function shownPending(v: ProjectView, current: number): number {
+    if (v.root !== settingsFor) return current;
+    return hideExtra(v, settings.extraHide).pending.length;
+  }
+
   function patchSummary(v: ProjectView) {
     projects = sortProjects(
       projects.map((p) =>
         p.root === v.root
-          ? { ...p, missing: v.missing, pending: v.pending.length, nextRecheckAt: v.nextRecheckAt }
+          ? { ...p, missing: v.missing, pending: shownPending(v, p.pending), nextRecheckAt: v.nextRecheckAt }
           : p,
       ),
     );
@@ -693,8 +704,11 @@
   const changeSetting = (key: SettingKey, value: unknown) =>
     applySettings(() => setSetting(key, value, selected), SETTING_NAMES[key], key === "maxAttached");
   const changeHookLog = (on: boolean) => applySettings(() => setHookLog(on, selected), "the hook log");
+  // Both change which rows show, so the project and every count reload.
   const changeExtraHide = (patterns: string[]) =>
-    selected ? applySettings(() => setExtraHide(selected!, patterns), "the hidden patterns") : Promise.resolve(false);
+    selected ? applySettings(() => setExtraHide(selected!, patterns), "the hidden patterns", true) : Promise.resolve(false);
+  const changeExclude = (globs: string[] | null) =>
+    selected ? applySettings(() => setProjectExclude(selected!, globs), "the exclude list", true) : Promise.resolve(false);
 
   function openSettings() {
     settingsOpen = true;
@@ -1108,6 +1122,7 @@
       onset={changeSetting}
       onhooklog={changeHookLog}
       onextrahide={changeExtraHide}
+      onexclude={changeExclude}
       oneditor={(t) =>
         setEditor(t).then(
           (c) => {

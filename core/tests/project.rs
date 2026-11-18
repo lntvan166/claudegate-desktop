@@ -310,3 +310,27 @@ fn rows_carry_their_session_id() {
     let j = serde_json::to_value(&v.pending[0]).unwrap();
     assert!(j.get("sessionId").is_some(), "serialized as sessionId");
 }
+
+#[test]
+fn an_explicit_exclude_replaces_the_excludes_json_one() {
+    use claudegate_core::project::load_project_with;
+    let h = tempfile::tempdir().unwrap();
+    let w = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(w.path()).unwrap();
+    fs::create_dir_all(root.join("gen")).unwrap();
+    let g = root.join("gen/a.txt");
+    let k = root.join("keep.txt");
+    fs::write(&g, "new").unwrap();
+    fs::write(&k, "new").unwrap();
+    let mut files = serde_json::Map::new();
+    files.insert(g.to_string_lossy().into(), entry(Some("old")));
+    files.insert(k.to_string_lossy().into(), entry(Some("old")));
+    write_session(h.path(), &root, &session(files.into(), serde_json::json!([]), serde_json::json!({})));
+    // excludes.json lags behind (it still says "keep.txt"); the owned root's own list wins.
+    fs::write(h.path().join("excludes.json"), serde_json::json!({ root.to_string_lossy(): ["keep.txt"] }).to_string())
+        .unwrap();
+    let v = load_project_with(h.path(), &root, 8, Some(&["gen".to_string()]));
+    assert_eq!(v.pending.iter().map(|p| p.rel.as_str()).collect::<Vec<_>>(), vec!["keep.txt"]);
+    let v = load_project_with(h.path(), &root, 8, None);
+    assert_eq!(v.pending.iter().map(|p| p.rel.as_str()).collect::<Vec<_>>(), vec!["gen/a.txt"]);
+}
