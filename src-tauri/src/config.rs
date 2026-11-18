@@ -114,6 +114,12 @@ pub fn load_or_create(path: &Path) -> Config {
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let c = Config::default();
+            let lock = config_guard();
+            // Another writer may have created it since the read: never replace what it wrote.
+            if path.exists() {
+                drop(lock);
+                return load_or_create(path);
+            }
             if let Err(e) = write_json(path, &serde_json::to_value(&c).unwrap_or_default()) {
                 eprintln!("claudegate: cannot create {}: {e}", path.display());
             }
@@ -175,8 +181,20 @@ pub fn allowed_template(template: &str, cfg: &Config) -> Result<String, String> 
     }
 }
 
+/// Serializes every write of config.json in this process. Each write is a read-modify-write of
+/// the whole file (and shares one temp file name), so without it two concurrent writers (a
+/// setting saved while the watcher's exclude sync records `excludeWritten`, say) would lose one
+/// another's change. Never held across anything but one config read and write.
+static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn config_guard() -> std::sync::MutexGuard<'static, ()> {
+    CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// Reads the config file as a JSON object (missing reads as `{}`), applies `f`, writes it back.
 /// Every other key is kept. `guard` is the ClaudeGate home: a config path under it is refused.
+/// Runs under `CONFIG_LOCK`, so `save_setting`, the hidden list, read-only, the editor,
+/// `mark_added` and the exclude-sync fields cannot lose each other's writes.
 fn update_config(
     path: &Path,
     guard: Option<&Path>,
@@ -187,6 +205,7 @@ fn update_config(
             return Err("Refusing to write settings inside the ClaudeGate folder.".into());
         }
     }
+    let _lock = config_guard();
     let mut v = match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str::<serde_json::Value>(&text).map_err(|e| {
             format!("{} is not valid JSON ({e}). Fix or delete it, then try again.", path.display())

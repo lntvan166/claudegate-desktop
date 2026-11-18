@@ -269,3 +269,29 @@ fn hidden_projects_ignore_a_malformed_value_and_a_bad_file_is_never_clobbered() 
     assert!(save_hidden_projects(&p, &["/w/a".into()], None).is_err());
     assert_eq!(fs::read_to_string(&p).unwrap(), "{not json");
 }
+
+/// M1: every config.json write is a read-modify-write of the whole file. Two threads writing
+/// different keys at once must not lose each other's writes (nor fail on a shared temp file).
+#[test]
+fn concurrent_writes_of_different_keys_both_survive() {
+    use claudegate_desktop_lib::config::{save_extra_hide, save_setting};
+    let dir = tempfile::tempdir().unwrap();
+    let p = config_path_in(dir.path());
+    const N: usize = 200;
+    let (pa, pb) = (p.clone(), p.clone());
+    let a = std::thread::spawn(move || {
+        for i in 0..N {
+            save_setting(&pa, "pendingAgeMinDays", serde_json::json!(i), None).unwrap();
+        }
+    });
+    let b = std::thread::spawn(move || {
+        for i in 0..N {
+            save_extra_hide(&pb, "/w/proj", &[format!("**/b{i}/**")], None).unwrap();
+        }
+    });
+    a.join().unwrap();
+    b.join().unwrap();
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+    assert_eq!(v["settings"]["pendingAge.minDays"], serde_json::json!(N - 1), "thread A's last write survives: {v}");
+    assert_eq!(v["projects"]["/w/proj"]["extraHide"], serde_json::json!([format!("**/b{}/**", N - 1)]), "thread B's last write survives: {v}");
+}
