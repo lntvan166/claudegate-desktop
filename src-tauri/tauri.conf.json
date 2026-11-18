@@ -38,7 +38,10 @@
     "shortDescription": "Review Claude Code's edits",
     "linux": {
       "deb": {
-        "desktopTemplate": "claudegate.desktop"
+        "desktopTemplate": "claudegate.desktop",
+        "files": {
+          "/usr/share/applications/dev.claudegate.desktop.desktop": "dev.claudegate.desktop.desktop"
+        }
       }
     }
   }

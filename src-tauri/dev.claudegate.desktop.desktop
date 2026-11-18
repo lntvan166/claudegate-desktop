@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ClaudeGate
+Comment=Review Claude Code's edits
+Exec=claudegate-desktop
+Icon=claudegate-desktop
+Terminal=false
+Categories=Development;
+StartupWMClass=dev.claudegate.desktop
