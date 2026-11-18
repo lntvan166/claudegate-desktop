@@ -417,23 +417,40 @@ pub fn project_record(path: &Path, root: &str) -> claudegate_core::projects::Pro
         added_by_app: p.get("addedByApp").and_then(|b| b.as_bool()) == Some(true),
         exclude: strings("exclude"),
         exclude_written: strings("excludeWritten"),
+        exclude_written_prev: strings("excludeWrittenPrev"),
         managed_by_vscode: p.get("managedByVsCode").and_then(|b| b.as_bool()) == Some(true),
     }
 }
 
-/// Records what the app last wrote to `excludes.json[root]` (`projects[root].excludeWritten`).
+/// Records what the app last wrote to `excludes.json[root]` (`projects[root].excludeWritten`),
+/// moving the value it replaces to `excludeWrittenPrev`.
 pub fn set_exclude_written(path: &Path, root: &str, globs: &[String], guard: Option<&Path>) -> Result<(), String> {
     update_config(path, guard, |obj, _| {
-        project_entry(obj, root)?.insert("excludeWritten".into(), serde_json::json!(globs));
+        let entry = project_entry(obj, root)?;
+        let new = serde_json::json!(globs);
+        if entry.get("excludeWritten") == Some(&new) {
+            return Ok(());
+        }
+        match entry.remove("excludeWritten") {
+            Some(old) => entry.insert("excludeWrittenPrev".into(), old),
+            None => None,
+        };
+        entry.insert("excludeWritten".into(), new);
         Ok(())
     })
     .map(|_| ())
 }
 
-/// Records that VS Code took `excludes.json[root]` over (`projects[root].managedByVsCode`).
-pub fn set_managed_by_vscode(path: &Path, root: &str, guard: Option<&Path>) -> Result<(), String> {
+/// Records (`on`) that VS Code took `excludes.json[root]` over (`projects[root].managedByVsCode`),
+/// or drops the mark (Take back).
+pub fn set_managed_by_vscode(path: &Path, root: &str, on: bool, guard: Option<&Path>) -> Result<(), String> {
     update_config(path, guard, |obj, _| {
-        project_entry(obj, root)?.insert("managedByVsCode".into(), serde_json::Value::Bool(true));
+        let entry = project_entry(obj, root)?;
+        if on {
+            entry.insert("managedByVsCode".into(), serde_json::Value::Bool(true));
+        } else {
+            entry.remove("managedByVsCode");
+        }
         Ok(())
     })
     .map(|_| ())
@@ -475,8 +492,8 @@ impl claudegate_core::projects::AppProjects for ConfigProjects<'_> {
     fn set_exclude_written(&mut self, root: &str, globs: &[String]) -> Result<(), String> {
         set_exclude_written(self.path, root, globs, self.guard)
     }
-    fn set_managed_by_vscode(&mut self, root: &str) -> Result<(), String> {
-        set_managed_by_vscode(self.path, root, self.guard)
+    fn set_managed_by_vscode(&mut self, root: &str, on: bool) -> Result<(), String> {
+        set_managed_by_vscode(self.path, root, on, self.guard)
     }
 }
 

@@ -117,6 +117,8 @@ export interface Api {
    * Code project, one VS Code took over, a blank pattern, and in read-only mode.
    */
   setProjectExclude(root: string, globs: string[] | null): Promise<SettingsView>;
+  /** For an app project VS Code took over: the app manages its exclude again. Blocked in read-only mode. */
+  takeBackExclude(root: string): Promise<SettingsView>;
   /**
    * Registers a folder in ~/.claudegate/workspace-roots.json so the hook captures there. Rejects
    * with a message for the user (naming the conflicting root for a nested folder).
@@ -147,6 +149,7 @@ const tauriApi: Api = {
   setHookLog: (on, root) => invoke<SettingsView>("set_hook_log", { on, root }),
   setExtraHide: (root, patterns) => invoke<SettingsView>("set_extra_hide", { root, patterns }),
   setProjectExclude: (root, globs) => invoke<SettingsView>("set_project_exclude", { root, globs }),
+  takeBackExclude: (root) => invoke<SettingsView>("take_back_exclude", { root }),
   addProject: (path) => invoke<AddedProject>("add_project", { path }),
   removeProject: (root) => invoke<RemovedProject>("remove_project", { root }),
   projectInVsCode: (root) => invoke<boolean>("project_in_vs_code", { root }),
@@ -189,6 +192,7 @@ export const setSetting = async (key: SettingKey, value: unknown, root: string |
   (await api()).setSetting(key, value, root);
 export const setHookLog = async (on: boolean, root: string | null) => (await api()).setHookLog(on, root);
 export const setExtraHide = async (root: string, patterns: string[]) => (await api()).setExtraHide(root, patterns);
+export const takeBackExclude = async (root: string) => (await api()).takeBackExclude(root);
 export const setProjectExclude = async (root: string, globs: string[] | null) =>
   (await api()).setProjectExclude(root, globs);
 export const addProject = async (path: string) => (await api()).addProject(path);

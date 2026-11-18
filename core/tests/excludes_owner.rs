@@ -2,8 +2,8 @@
 //! taken that key over. Temp homes only; the hook test runs the extension's real hook.py.
 
 use claudegate_core::projects::{
-    add_project, owned_exclude, remove_project, sync_excludes, validate_globs, vscode_uses_root, AppProjects,
-    ProjectRecord, RootChange,
+    add_project, owned_exclude, remove_project, sync_excludes, take_back_exclude, validate_globs, vscode_uses_root,
+    AppProjects, ProjectRecord, RootChange,
 };
 use claudegate_core::settings::DEFAULT_EXCLUDES;
 use serde_json::json;
@@ -33,11 +33,14 @@ impl AppProjects for Cfg {
         self.projects.get(root).cloned().unwrap_or_default()
     }
     fn set_exclude_written(&mut self, root: &str, globs: &[String]) -> Result<(), String> {
-        self.projects.entry(root.into()).or_default().exclude_written = Some(globs.to_vec());
+        let p = self.projects.entry(root.into()).or_default();
+        if p.exclude_written.as_deref() != Some(globs) {
+            p.exclude_written_prev = p.exclude_written.replace(globs.to_vec());
+        }
         Ok(())
     }
-    fn set_managed_by_vscode(&mut self, root: &str) -> Result<(), String> {
-        self.projects.entry(root.into()).or_default().managed_by_vscode = true;
+    fn set_managed_by_vscode(&mut self, root: &str, on: bool) -> Result<(), String> {
+        self.projects.entry(root.into()).or_default().managed_by_vscode = on;
         Ok(())
     }
 }
@@ -186,6 +189,74 @@ fn a_takeover_is_detected_and_the_key_is_never_written_again() {
 }
 
 #[test]
+fn a_stale_write_back_of_the_previous_value_is_not_a_takeover() {
+    let e = env();
+    let app = e.dir("app");
+    let mut cfg = Cfg::default();
+    add_project(&e.home, &mut cfg, &app).unwrap();
+    let x_new = vec!["**/new/**".to_string()];
+    cfg.projects.get_mut(&app).unwrap().exclude = Some(x_new.clone());
+    sync_excludes(&e.home, &mut cfg).unwrap();
+    assert_eq!(e.excludes()[&app], json!(x_new));
+    assert_eq!(cfg.record(&app).exclude_written_prev, Some(defaults()));
+    // The extension's unlocked rewrite read the file before our write and lands after it,
+    // putting back X_old (the defaults).
+    let mut ex = e.excludes();
+    ex[&app] = json!(defaults());
+    e.set_excludes(ex);
+    let ch = sync_excludes(&e.home, &mut cfg).unwrap();
+    assert_eq!(ch, vec![RootChange::Written { root: app.clone(), globs: x_new.clone() }]);
+    assert!(!cfg.record(&app).managed_by_vscode, "still the app's");
+    assert_eq!(e.excludes()[&app], json!(x_new));
+}
+
+#[test]
+fn a_key_spelled_differently_is_the_same_root() {
+    let e = env();
+    let app = e.dir("app");
+    let mut cfg = Cfg::default();
+    cfg.mark_added(&app).unwrap();
+    // VS Code's own value under a trailing-slash spelling is still a takeover.
+    e.set_excludes(json!({ format!("{app}/"): ["**/vs"] }));
+    assert_eq!(sync_excludes(&e.home, &mut cfg).unwrap(), vec![RootChange::ManagedByVsCode { root: app.clone() }]);
+
+    // Our own value under another spelling is rewritten under the resolved key only.
+    let mut cfg = Cfg::default();
+    cfg.mark_added(&app).unwrap();
+    cfg.set_exclude_written(&app, &["**/old".to_string()]).unwrap();
+    e.set_excludes(json!({ format!("{app}/./"): ["**/old"], "/other": ["**/o"] }));
+    sync_excludes(&e.home, &mut cfg).unwrap();
+    assert_eq!(e.excludes(), json!({ app.clone(): defaults(), "/other": ["**/o"] }));
+    assert!(!cfg.record(&app).managed_by_vscode);
+}
+
+#[test]
+fn take_back_makes_a_managed_root_the_apps_again() {
+    let e = env();
+    let app = e.dir("app");
+    let mut cfg = Cfg::default();
+    add_project(&e.home, &mut cfg, &app).unwrap();
+    e.set_excludes(json!({ app.clone(): ["**/from-vscode"], "/other": ["**/o"] }));
+    sync_excludes(&e.home, &mut cfg).unwrap();
+    assert!(cfg.record(&app).managed_by_vscode);
+    // Sticky: the key going away does not hand ownership back by itself.
+    e.set_excludes(json!({ "/other": ["**/o"] }));
+    assert!(sync_excludes(&e.home, &mut cfg).unwrap().is_empty());
+    assert!(cfg.record(&app).managed_by_vscode);
+    assert!(e.excludes().get(&app).is_none());
+
+    let ch = take_back_exclude(&e.home, &mut cfg, &app).unwrap();
+    assert_eq!(ch, RootChange::Written { root: app.clone(), globs: defaults() });
+    assert!(!cfg.record(&app).managed_by_vscode);
+    assert_eq!(e.excludes(), json!({ app.clone(): defaults(), "/other": ["**/o"] }));
+    // And it stays ours on the next sync.
+    assert!(sync_excludes(&e.home, &mut cfg).unwrap().is_empty());
+    assert!(!cfg.record(&app).managed_by_vscode);
+    // A root the app did not add cannot be taken.
+    assert!(take_back_exclude(&e.home, &mut cfg, "/other").is_err());
+}
+
+#[test]
 fn a_value_equal_to_what_the_app_wants_is_adopted_not_taken_over() {
     let e = env();
     let app = e.dir("app");
@@ -229,7 +300,7 @@ fn a_forget_only_remove_never_touches_excludes() {
     // A takeover already recorded is evidence too, even once the key is gone again.
     let b = e.dir("b");
     add_project(&e.home, &mut cfg, &b).unwrap();
-    cfg.set_managed_by_vscode(&b).unwrap();
+    cfg.set_managed_by_vscode(&b, true).unwrap();
     let raw = e.raw();
     let r = remove_project(&e.home, &mut cfg, &b, &[]).unwrap();
     assert!(!r.unregistered);
@@ -242,10 +313,13 @@ fn only_a_key_that_differs_from_what_the_app_wrote_is_evidence() {
     let app = e.dir("app");
     let written = vec!["**/x".to_string()];
     e.set_excludes(json!({ app.clone(): ["**/x"] }));
-    assert!(!vscode_uses_root(&e.home, Path::new(&app), Some(&written), &[]));
-    assert!(vscode_uses_root(&e.home, Path::new(&app), None, &[]), "never written: VS Code's");
+    let prev = vec!["**/old".to_string()];
+    assert!(!vscode_uses_root(&e.home, Path::new(&app), &[written.clone()], &[]));
+    assert!(vscode_uses_root(&e.home, Path::new(&app), &[], &[]), "never written: VS Code's");
+    e.set_excludes(json!({ app.clone(): ["**/old"] }));
+    assert!(!vscode_uses_root(&e.home, Path::new(&app), &[written.clone(), prev], &[]), "the previous write is ours too");
     e.set_excludes(json!({ app.clone(): ["**/y"] }));
-    assert!(vscode_uses_root(&e.home, Path::new(&app), Some(&written), &[]));
+    assert!(vscode_uses_root(&e.home, Path::new(&app), &[written], &[]));
 }
 
 #[test]

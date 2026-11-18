@@ -13,6 +13,7 @@
     onhooklog,
     onextrahide,
     onexclude,
+    ontakeback,
     oneditor,
     onreadonly,
     onshow,
@@ -31,6 +32,8 @@
     onextrahide: (patterns: string[]) => Promise<boolean>;
     /** The owned project's exclude list; `null` resets it to the defaults. */
     onexclude: (globs: string[] | null) => Promise<boolean>;
+    /** For an app project VS Code took over: the app manages its exclude again. */
+    ontakeback: () => Promise<boolean>;
     /** Resolves false when it failed (the app says why). */
     oneditor: (template: string) => Promise<boolean>;
     onreadonly: (on: boolean) => void;
@@ -94,6 +97,14 @@
 
   const editors = $derived(menuOptions(config));
   const owner = $derived(settings.excludeOwner);
+  const readOnly = $derived(config.readOnly === true);
+  /** The Take back confirmation is open. */
+  let confirmTakeBack = $state(false);
+  async function takeBack() {
+    const ok = await ontakeback();
+    stamp(ok);
+    if (ok) confirmTakeBack = false;
+  }
   const excludeOwned = $derived(owner === "owned" || settings.exclude.source === "app");
   const managedBy = $derived(
     settings.exclude.source === "cursor" ? "Cursor" : settings.exclude.source === "default" ? null : "VS Code",
@@ -291,7 +302,7 @@
               <span class="badge">Managed by VS Code</span>
             {:else}
               <span class="badge" class:app={excludeOwned}>{sourceLabel(settings.exclude.source)}</span>
-              {#if owner === "owned" && settings.exclude.source === "app"}
+              {#if owner === "owned" && settings.exclude.source === "app" && !readOnly}
                 <button class="link" onclick={() => void onexclude(null).then(stamp)} title="Use the extension's default list again">Reset to defaults</button>
               {/if}
             {/if}
@@ -299,13 +310,28 @@
         </div>
         <div class="control">
           {#if owner === "owned"}
-            {@render chips(settings.exclude.value, true, (p) => void removePattern("exclude", settings.exclude.value, p), `Excluded from ${project.name}`)}
-            {@render adder("exclude", settings.exclude.value, "Add a pattern to exclude")}
-            <p class="note">Added in this app, so the app hands this list to the capture hook.</p>
+            {@render chips(settings.exclude.value, !readOnly, (p) => void removePattern("exclude", settings.exclude.value, p), `Excluded from ${project.name}`)}
+            {#if readOnly}
+              <p class="note">Read-only mode is on. Turn it off to change this list.</p>
+            {:else}
+              {@render adder("exclude", settings.exclude.value, "Add a pattern to exclude")}
+              <p class="note">Added in this app, so the app hands this list to the capture hook.</p>
+            {/if}
           {:else}
             {@render chips(settings.exclude.value, false, () => {}, `Excluded from ${project.name}`)}
             {#if owner === "managedByVsCode"}
               <p class="note">Managed by VS Code. A VS Code window wrote its own list for this project, so the app no longer changes it. Change it there, or hide more files below.</p>
+              {#if readOnly}
+                <p class="note">Read-only mode is on. Turn it off to take this list back.</p>
+              {:else if confirmTakeBack}
+                <div class="confirm" role="group" aria-label="Take back the exclude list">
+                  <p class="note">ClaudeGate will manage this project's exclude again. If it's open in VS Code, VS Code will overwrite it on its next start.</p>
+                  <button class="link" onclick={() => void takeBack()}>Take back</button>
+                  <button class="link" onclick={() => (confirmTakeBack = false)}>Cancel</button>
+                </div>
+              {:else}
+                <button class="link" onclick={() => (confirmTakeBack = true)} title="Let this app manage the project's exclude list again">Take back</button>
+              {/if}
             {:else if managedBy}
               <p class="note">Managed by {managedBy}. Change it there, or hide more files below.</p>
             {:else if !excludeOwned}

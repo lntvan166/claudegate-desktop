@@ -645,9 +645,8 @@ pub(crate) fn excludes_key(root: &Path) -> String {
 }
 
 /// Sets `excludes.json[root]` to `globs`, keeping every other key. Writes nothing when the value
-/// is already that. Unconditional: the app's own sync goes through `update_excludes` so it can
-/// refuse a key VS Code has taken over in the same read.
-#[cfg_attr(not(test), allow(dead_code))]
+/// is already that. Unconditional, so only Take back uses it: the app's own sync goes through
+/// `update_excludes` so it can refuse a key VS Code has taken over in the same read.
 pub(crate) fn excludes_set(home: &Path, root: &Path, globs: &[String]) -> Result<(), StoreError> {
     let key = excludes_key(root);
     let want = serde_json::json!(globs);

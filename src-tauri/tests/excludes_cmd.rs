@@ -6,7 +6,7 @@ use claudegate_core::projects::RootChange;
 use claudegate_core::settings::{ExtSources, Source, DEFAULT_EXCLUDES};
 use claudegate_desktop_lib::commands::{
     add_project_with, get_project_for, list_projects_for, remove_project_with, set_project_exclude_with,
-    settings_view, sync_excludes_with, ExcludeOwner,
+    settings_view, sync_excludes_with, take_back_exclude_with, ExcludeOwner,
 };
 use claudegate_desktop_lib::config::{config_path_in, save_extra_hide, save_read_only};
 use claudegate_desktop_lib::watch::KnownMap;
@@ -179,4 +179,37 @@ fn the_view_filters_with_the_owned_exclude_and_counts_skip_hidden_rows() {
     let list = list_projects_for(&f.cg, &known, &f.cfg, &f.src);
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].pending, 1, "the sidebar count leaves out the extra-hidden row too");
+}
+
+#[test]
+fn take_back_returns_ownership_and_read_only_blocks_it() {
+    let f = fx();
+    let app = f.dir("app");
+    add_project_with(&f.cg, &f.cfg, &app).unwrap();
+    set_project_exclude_with(&f.cg, &f.cfg, &app, Some(vec!["**/mine".into()]), &f.src).unwrap();
+    let c = f.config();
+    assert_eq!(c["projects"][&app]["excludeWritten"], json!(["**/mine"]));
+    assert_eq!(c["projects"][&app]["excludeWrittenPrev"], json!(defaults()));
+    let mut ex = f.excludes();
+    ex[&app] = json!(["**/from-vscode"]);
+    fs::write(f.cg.join("excludes.json"), ex.to_string()).unwrap();
+    sync_excludes_with(&f.cg, &f.cfg);
+    assert_eq!(settings_view(&f.cfg, Some(&app), &f.src).exclude_owner, ExcludeOwner::ManagedByVsCode);
+
+    save_read_only(&f.cfg, true, None).unwrap();
+    let e = take_back_exclude_with(&f.cg, &f.cfg, &app, &f.src).unwrap_err();
+    assert!(e.contains("Read-only"), "{e}");
+    assert_eq!(f.excludes()[&app], json!(["**/from-vscode"]));
+    save_read_only(&f.cfg, false, None).unwrap();
+
+    let s = take_back_exclude_with(&f.cg, &f.cfg, &app, &f.src).unwrap();
+    assert_eq!(s.exclude_owner, ExcludeOwner::Owned);
+    assert_eq!(s.effective.exclude.value, vec!["**/mine".to_string()]);
+    assert_eq!(f.excludes()[&app], json!(["**/mine"]));
+    assert!(f.config()["projects"][&app].get("managedByVsCode").is_none());
+    assert!(sync_excludes_with(&f.cg, &f.cfg).is_empty());
+
+    // A VS Code project cannot be taken.
+    let vs = f.dir("vs");
+    assert!(take_back_exclude_with(&f.cg, &f.cfg, &vs, &f.src).is_err());
 }

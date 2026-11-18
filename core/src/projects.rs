@@ -8,7 +8,7 @@
 
 use crate::paths::resolve_root;
 use crate::roots::{read_roots, RootsError};
-use crate::store::{excludes_key, excludes_remove, roots_add, roots_append, roots_remove, update_excludes, ROOTS_FILE};
+use crate::store::{excludes_key, excludes_remove, excludes_set, roots_add, roots_append, roots_remove, update_excludes, ROOTS_FILE};
 use std::path::{Path, PathBuf};
 
 /// The app's record of the roots it added.
@@ -21,10 +21,12 @@ pub trait AppProjects {
     fn forget(&mut self, root: &str) -> Result<(), String>;
     /// The app's record of `root` (`projects[root]`); the default when there is none.
     fn record(&self, root: &str) -> ProjectRecord;
-    /// Records the exclude the app last wrote to `excludes.json[root]` (`excludeWritten`).
+    /// Records the exclude the app last wrote to `excludes.json[root]` (`excludeWritten`),
+    /// moving the value it replaces to `excludeWrittenPrev`.
     fn set_exclude_written(&mut self, root: &str, globs: &[String]) -> Result<(), String>;
-    /// Records that VS Code took `excludes.json[root]` over (`managedByVsCode`).
-    fn set_managed_by_vscode(&mut self, root: &str) -> Result<(), String>;
+    /// Records (`true`) that VS Code took `excludes.json[root]` over (`managedByVsCode`), or
+    /// clears it (`false`, Take back).
+    fn set_managed_by_vscode(&mut self, root: &str, on: bool) -> Result<(), String>;
 }
 
 /// `projects[root]` in the app's config, as far as exclude ownership needs it.
@@ -35,6 +37,9 @@ pub struct ProjectRecord {
     pub exclude: Option<Vec<String>>,
     /// Exactly what the app last wrote to `excludes.json[root]`.
     pub exclude_written: Option<Vec<String>>,
+    /// What the app wrote before that (`excludeWrittenPrev`): a stale write-back of it by the
+    /// extension's unlocked rewrite is not a takeover.
+    pub exclude_written_prev: Option<Vec<String>>,
     /// VS Code wrote a different `excludes.json[root]`; the app no longer writes that key.
     pub managed_by_vscode: bool,
 }
@@ -43,6 +48,11 @@ impl ProjectRecord {
     /// The app writes this root's exclude: it added the root and VS Code has not taken it over.
     pub fn owned(&self) -> bool {
         self.added_by_app && !self.managed_by_vscode
+    }
+
+    /// The values the app wrote to `excludes.json[root]` (last, then the one before).
+    pub fn written_values(&self) -> Vec<Vec<String>> {
+        [&self.exclude_written, &self.exclude_written_prev].into_iter().flatten().cloned().collect()
     }
 }
 
@@ -87,46 +97,73 @@ fn store_err(e: crate::store::StoreError) -> String {
     e.to_string()
 }
 
+/// The values the app itself wrote to `excludes.json[root]`: the last one and the one before
+/// it. The extension rewrites the file without a lock, so a stale copy of the previous value can
+/// land just after the app's write; that is still the app's, not a takeover.
+fn ours(rec: &ProjectRecord) -> Vec<serde_json::Value> {
+    [&rec.exclude_written, &rec.exclude_written_prev].into_iter().flatten().map(|w| serde_json::json!(w)).collect()
+}
+
 /// One root's step of `sync_excludes`. `None` when nothing changed or the root is not owned.
+/// Every key that resolves to the root counts (the extension writes `path.resolve` form, but a
+/// differently spelled key reaches the same root in hook.py).
 fn sync_root(home: &Path, cfg: &mut impl AppProjects, root: &str) -> Result<Option<RootChange>, String> {
     let rec = cfg.record(root);
     if !rec.owned() {
         return Ok(None);
     }
-    let key = excludes_key(Path::new(root));
+    let resolved = resolve_root(Path::new(root));
+    let key = excludes_key(&resolved);
     let want = owned_exclude(&rec);
     let want_v = serde_json::json!(want);
-    let written_v = rec.exclude_written.as_ref().map(|w| serde_json::json!(w));
+    let mine = ours(&rec);
     let mut taken = false;
     let wrote = update_excludes(home, |map| {
         taken = false;
-        match map.get(&key) {
-            // Already what we want: adopt it (also covers a write whose record was lost).
-            Some(v) if *v == want_v => Ok(false),
-            // Absent, or still what we wrote last: ours to write.
-            None => {
-                map.insert(key.clone(), want_v.clone());
-                Ok(true)
-            }
-            Some(v) if Some(v) == written_v.as_ref() => {
-                map.insert(key.clone(), want_v.clone());
-                Ok(true)
-            }
-            Some(_) => {
-                taken = true;
-                Ok(false)
-            }
+        let keys: Vec<String> = map.keys().filter(|k| resolve_root(Path::new(k)) == resolved).cloned().collect();
+        // A value that is neither what we want nor one we wrote: VS Code's.
+        if keys.iter().any(|k| map[k] != want_v && !mine.contains(&map[k])) {
+            taken = true;
+            return Ok(false);
         }
+        // Already exactly what we want, under the resolved key only: adopt it (also covers a
+        // write whose record was lost).
+        if keys.len() == 1 && keys[0] == key && map[&key] == want_v {
+            return Ok(false);
+        }
+        // Absent, or still ours (any spelling): write `want` under the resolved key.
+        for k in &keys {
+            map.remove(k);
+        }
+        map.insert(key.clone(), want_v.clone());
+        Ok(true)
     })
     .map_err(store_err)?;
     if taken {
-        cfg.set_managed_by_vscode(root)?;
+        cfg.set_managed_by_vscode(root, true)?;
         return Ok(Some(RootChange::ManagedByVsCode { root: root.to_string() }));
     }
     if rec.exclude_written.as_ref() != Some(&want) {
         cfg.set_exclude_written(root, &want)?;
     }
     Ok(wrote.then(|| RootChange::Written { root: root.to_string(), globs: want }))
+}
+
+/// "Take back" for a root VS Code took over: the app owns its exclude again. Clears
+/// `managedByVsCode`, writes the app's effective exclude over whatever is there (unconditionally:
+/// the key is VS Code's value, which a plain sync would read as a takeover again) and records it.
+/// Only for a root the app added. If a VS Code window still has the folder open, the extension
+/// overwrites the key on its next start and the next sync marks it managed again.
+pub fn take_back_exclude(home: &Path, cfg: &mut impl AppProjects, root: &str) -> Result<RootChange, String> {
+    let rec = cfg.record(root);
+    if !rec.added_by_app {
+        return Err("Only a project added in this app can be taken back.".into());
+    }
+    let want = owned_exclude(&rec);
+    excludes_set(home, Path::new(root), &want).map_err(store_err)?;
+    cfg.set_exclude_written(root, &want)?;
+    cfg.set_managed_by_vscode(root, false)?;
+    Ok(RootChange::Written { root: root.to_string(), globs: want })
 }
 
 /// For every root the app added and still owns: when `excludes.json[root]` is absent or still
@@ -231,18 +268,18 @@ fn open_folders(storage: &Path) -> Vec<PathBuf> {
 }
 
 /// Evidence that VS Code or Cursor uses `root` (its ClaudeGate registers the root too, and the
-/// roots file holds it once): an `excludes.json` key for the root whose value differs from
-/// `written`, what the app itself last wrote there (`None`: the app wrote nothing, so any key is
+/// roots file holds it once): an `excludes.json` key for the root whose value is none of
+/// `written`, the values the app itself wrote there (empty: the app wrote nothing, so any key is
 /// VS Code's), or the folder open in either editor's `storage.json`. Read only; anything
 /// unreadable is no evidence.
-pub fn vscode_uses_root(home: &Path, root: &Path, written: Option<&[String]>, storage_files: &[PathBuf]) -> bool {
+pub fn vscode_uses_root(home: &Path, root: &Path, written: &[Vec<String>], storage_files: &[PathBuf]) -> bool {
     let root = resolve_root(root);
     let excludes = std::fs::read_to_string(home.join("excludes.json"))
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-    let written = written.map(|w| serde_json::json!(w));
+    let written: Vec<serde_json::Value> = written.iter().map(|w| serde_json::json!(w)).collect();
     if let Some(m) = excludes.as_ref().and_then(|v| v.as_object()) {
-        if m.iter().any(|(k, v)| resolve_root(Path::new(k)) == root && Some(v) != written.as_ref()) {
+        if m.iter().any(|(k, v)| resolve_root(Path::new(k)) == root && !written.contains(v)) {
             return true;
         }
     }
@@ -316,7 +353,7 @@ pub fn remove_project(
     }
     let settings_err = |e: String| RootsError::Io(format!("Couldn't update the app's settings: {e}"));
     let rec = cfg.record(&name);
-    if rec.managed_by_vscode || vscode_uses_root(home, &root, rec.exclude_written.as_deref(), storage_files) {
+    if rec.managed_by_vscode || vscode_uses_root(home, &root, &rec.written_values(), storage_files) {
         cfg.forget(&name).map_err(settings_err)?;
         return Ok(Removed { root: name, unregistered: false });
     }

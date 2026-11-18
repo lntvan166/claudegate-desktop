@@ -583,6 +583,11 @@ pub fn ensure_roots_with(cg_home: &Path, config_path: &Path) -> Vec<String> {
 /// write's event cannot loop. A failure is logged, never raised (it runs from the watcher).
 pub fn sync_excludes_with(cg_home: &Path, config_path: &Path) -> Vec<claudegate_core::projects::RootChange> {
     let _g = roots_guard();
+    sync_excludes_locked(cg_home, config_path)
+}
+
+/// `sync_excludes_with` for a caller already holding `roots_guard`.
+fn sync_excludes_locked(cg_home: &Path, config_path: &Path) -> Vec<claudegate_core::projects::RootChange> {
     let mut cfg = crate::config::ConfigProjects { path: config_path, guard: Some(cg_home) };
     match claudegate_core::projects::sync_excludes(cg_home, &mut cfg) {
         Ok(v) => v,
@@ -598,9 +603,14 @@ pub const VS_CODE_EXCLUDE: &str =
 pub const MANAGED_EXCLUDE: &str =
     "Managed by VS Code: a VS Code window wrote its own exclude list for this project, so the app no longer changes it.";
 
+fn check_writable_for(config_path: &Path, what: &str) -> Result<(), String> {
+    check_writable(config_path).map_err(|e| e.replace("add or remove projects", what))
+}
+
 /// `set_project_exclude` minus Tauri: only for a root the app added and still owns. Validates
 /// the globs, saves `projects[root].exclude` (`None`: back to the defaults), then syncs so the
-/// hook sees it. Read-only mode blocks it.
+/// hook sees it. Read-only mode blocks it. The ownership check, the save and the sync run under
+/// one `roots_guard`, so a watcher sync cannot mark the root managed in between.
 pub fn set_project_exclude_with(
     cg_home: &Path,
     config_path: &Path,
@@ -608,19 +618,46 @@ pub fn set_project_exclude_with(
     globs: Option<Vec<String>>,
     sources: &ExtSources,
 ) -> Result<SettingsView, String> {
-    check_writable(config_path).map_err(|e| e.replace("add or remove projects", "change a project's exclude list"))?;
+    check_writable_for(config_path, "change a project's exclude list")?;
     let key = resolve_root(Path::new(root.trim())).to_string_lossy().into_owned();
-    let rec = crate::config::project_record(config_path, &key);
-    if !rec.added_by_app {
-        return Err(VS_CODE_EXCLUDE.into());
-    }
-    if rec.managed_by_vscode {
-        return Err(MANAGED_EXCLUDE.into());
-    }
     let globs = globs.map(|g| claudegate_core::projects::validate_globs(&g)).transpose()?;
-    crate::config::save_project_exclude(config_path, &key, globs.as_deref(), Some(cg_home))?;
-    sync_excludes_with(cg_home, config_path);
+    {
+        let _g = roots_guard();
+        let rec = crate::config::project_record(config_path, &key);
+        if !rec.added_by_app {
+            return Err(VS_CODE_EXCLUDE.into());
+        }
+        if rec.managed_by_vscode {
+            return Err(MANAGED_EXCLUDE.into());
+        }
+        crate::config::save_project_exclude(config_path, &key, globs.as_deref(), Some(cg_home))?;
+        sync_excludes_locked(cg_home, config_path);
+    }
     Ok(settings_view(config_path, Some(&key), sources))
+}
+
+/// `take_back_exclude` minus Tauri: for an app-added root VS Code took over, the app manages its
+/// exclude again (it rewrites `excludes.json[root]` with its own list). Read-only mode blocks it.
+pub fn take_back_exclude_with(cg_home: &Path, config_path: &Path, root: &str, sources: &ExtSources) -> Result<SettingsView, String> {
+    check_writable_for(config_path, "take a project's exclude list back")?;
+    let key = resolve_root(Path::new(root.trim())).to_string_lossy().into_owned();
+    {
+        let _g = roots_guard();
+        let rec = crate::config::project_record(config_path, &key);
+        if !rec.added_by_app {
+            return Err(VS_CODE_EXCLUDE.into());
+        }
+        if rec.managed_by_vscode {
+            let mut cfg = crate::config::ConfigProjects { path: config_path, guard: Some(cg_home) };
+            claudegate_core::projects::take_back_exclude(cg_home, &mut cfg, &key)?;
+        }
+    }
+    Ok(settings_view(config_path, Some(&key), sources))
+}
+
+#[tauri::command]
+pub async fn take_back_exclude(root: String) -> Result<SettingsView, String> {
+    blocking(move || take_back_exclude_with(&claudegate_home(), &crate::config::config_path(), &root, &ext_sources())).await?
 }
 
 #[tauri::command]
@@ -656,7 +693,7 @@ pub fn project_in_vs_code_with(cg_home: &Path, config_path: &Path, root: &str, s
     let storage = claudegate_core::projects::storage_files(sources);
     let rec = crate::config::project_record(config_path, root);
     rec.managed_by_vscode
-        || claudegate_core::projects::vscode_uses_root(cg_home, Path::new(root), rec.exclude_written.as_deref(), &storage)
+        || claudegate_core::projects::vscode_uses_root(cg_home, Path::new(root), &rec.written_values(), &storage)
 }
 
 /// The native folder picker: one directory, or `None` when cancelled.

@@ -21,6 +21,7 @@
     getSettings,
     setExtraHide,
     setProjectExclude,
+    takeBackExclude,
     setHookLog,
     setSetting,
     type SettingKey,
@@ -707,6 +708,8 @@
   // Both change which rows show, so the project and every count reload.
   const changeExtraHide = (patterns: string[]) =>
     selected ? applySettings(() => setExtraHide(selected!, patterns), "the hidden patterns", true) : Promise.resolve(false);
+  const takeBack = () =>
+    selected ? applySettings(() => takeBackExclude(selected!), "the exclude list", true) : Promise.resolve(false);
   const changeExclude = (globs: string[] | null) =>
     selected ? applySettings(() => setProjectExclude(selected!, globs), "the exclude list", true) : Promise.resolve(false);
 
@@ -1123,6 +1126,7 @@
       onhooklog={changeHookLog}
       onextrahide={changeExtraHide}
       onexclude={changeExclude}
+      ontakeback={takeBack}
       oneditor={(t) =>
         setEditor(t).then(
           (c) => {

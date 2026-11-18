@@ -45,7 +45,7 @@ impl AppProjects for Cfg {
         self.written.insert(root.into(), globs.to_vec());
         Ok(())
     }
-    fn set_managed_by_vscode(&mut self, _root: &str) -> Result<(), String> {
+    fn set_managed_by_vscode(&mut self, _root: &str, _on: bool) -> Result<(), String> {
         Ok(())
     }
 }
@@ -323,7 +323,7 @@ fn remove_only_forgets_when_the_folder_is_open_in_vs_code() {
         serde_json::json!({ "backupWorkspaces": { "folders": [{ "folderUri": uri }] } }),
     ] {
         fs::write(&storage, v.to_string()).unwrap();
-        assert!(vscode_uses_root(&e.home, Path::new(&b), None, &[storage.clone()]), "{v}");
+        assert!(vscode_uses_root(&e.home, Path::new(&b), &[], &[storage.clone()]), "{v}");
     }
     let before = e.raw();
     let r = remove_project(&e.home, &mut cfg, &b, &[e.ws.join("absent.json"), storage.clone()]).unwrap();
@@ -341,7 +341,7 @@ fn no_evidence_unregisters_and_bad_storage_is_no_evidence() {
     add_project(&e.home, &mut cfg, &b).unwrap();
     fs::write(e.home.join("excludes.json"), serde_json::json!({ other.clone(): [] }).to_string()).unwrap();
     fs::write(&storage, "{ not json").unwrap();
-    assert!(!vscode_uses_root(&e.home, Path::new(&b), None, &[storage.clone()]));
+    assert!(!vscode_uses_root(&e.home, Path::new(&b), &[], &[storage.clone()]));
     let r = remove_project(&e.home, &mut cfg, &b, &[storage]).unwrap();
     assert!(r.unregistered);
     assert!(read_roots(&e.home).is_empty());

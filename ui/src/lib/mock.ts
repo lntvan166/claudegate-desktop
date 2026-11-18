@@ -533,6 +533,14 @@ export const mockApi: Api = {
     }
     return mockSettings(root);
   },
+  takeBackExclude: async (root) => {
+    await delay(null);
+    if (config.readOnly) throw "Read-only mode is on. Turn it off in Settings to take a project's exclude list back.";
+    if (excludeOwner(root) === "vsCode")
+      throw "This project comes from VS Code, which sets its exclude list. Change it there, or hide more files below.";
+    delete takenOver[root];
+    return mockSettings(root);
+  },
   addProject: async (path) => {
     await delay(null);
     if (config.readOnly) throw "Read-only mode is on. Turn it off in Settings to add or remove projects.";
