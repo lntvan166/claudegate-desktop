@@ -36,8 +36,8 @@ impl AppProjects for Cfg {
         let p = self.projects.entry(root.into()).or_default();
         if p.exclude_written.as_deref() != Some(globs) {
             p.exclude_written_prev = p.exclude_written.replace(globs.to_vec());
+            p.exclude_written_at = Some(at_ms);
         }
-        p.exclude_written_at = Some(at_ms);
         Ok(())
     }
     fn set_managed_by_vscode(&mut self, root: &str, on: bool) -> Result<(), String> {

@@ -430,7 +430,9 @@ pub fn project_record(path: &Path, root: &str) -> claudegate_core::projects::Pro
 }
 
 /// Records what the app last wrote to `excludes.json[root]` (`projects[root].excludeWritten`),
-/// moving the value it replaces to `excludeWrittenPrev`.
+/// moving the value it replaces to `excludeWrittenPrev`. `excludeWrittenAt` is stamped only when
+/// the value changes: it starts the window in which the previous value still counts as the app's,
+/// and rewriting the same value (after a stale write-back) must not restart that window.
 pub fn set_exclude_written(path: &Path, root: &str, globs: &[String], at_ms: i64, guard: Option<&Path>) -> Result<(), String> {
     update_config(path, guard, |obj, _| {
         let entry = project_entry(obj, root)?;
@@ -441,8 +443,8 @@ pub fn set_exclude_written(path: &Path, root: &str, globs: &[String], at_ms: i64
                 None => None,
             };
             entry.insert("excludeWritten".into(), new);
+            entry.insert("excludeWrittenAt".into(), serde_json::json!(at_ms));
         }
-        entry.insert("excludeWrittenAt".into(), serde_json::json!(at_ms));
         Ok(())
     })
     .map(|_| ())

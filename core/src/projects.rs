@@ -22,7 +22,8 @@ pub trait AppProjects {
     /// The app's record of `root` (`projects[root]`); the default when there is none.
     fn record(&self, root: &str) -> ProjectRecord;
     /// Records the exclude the app last wrote to `excludes.json[root]` (`excludeWritten`) and
-    /// when (`excludeWrittenAt`, epoch ms), moving the value it replaces to `excludeWrittenPrev`.
+    /// when it changed (`excludeWrittenAt`, epoch ms), moving the value it replaces to
+    /// `excludeWrittenPrev`. Recording the same value again keeps the old stamp.
     fn set_exclude_written(&mut self, root: &str, globs: &[String], at_ms: i64) -> Result<(), String>;
     /// Records (`true`) that VS Code took `excludes.json[root]` over (`managedByVsCode`), or
     /// clears it (`false`, Take back).

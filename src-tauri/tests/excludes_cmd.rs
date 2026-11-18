@@ -213,3 +213,39 @@ fn take_back_returns_ownership_and_read_only_blocks_it() {
     let vs = f.dir("vs");
     assert!(take_back_exclude_with(&f.cg, &f.cfg, &vs, &f.src).is_err());
 }
+
+/// I2: `excludeWrittenAt` marks when `excludeWritten` last changed. Rewriting the same value after
+/// a stale write-back must not restart the window in which the previous value still counts as
+/// the app's, or a real takeover by a default-configured VS Code would be masked indefinitely.
+#[test]
+fn rewriting_the_same_value_does_not_restart_the_stale_write_back_window() {
+    use claudegate_core::projects::sync_excludes_at;
+    use claudegate_desktop_lib::config::{mark_added_by_app, save_project_exclude, ConfigProjects};
+    let f = fx();
+    let app = f.dir("app");
+    let t: i64 = 1_800_000_000_000;
+    let mut cfg = ConfigProjects { path: &f.cfg, guard: Some(&f.cg) };
+    mark_added_by_app(&f.cfg, &app, None).unwrap();
+    sync_excludes_at(&f.cg, &mut cfg, t - 120_000).unwrap();
+    assert_eq!(f.excludes()[&app], json!(defaults()));
+    // The user sets X at t: X is written, the defaults D become the previous value.
+    let x = vec!["**/gen/**".to_string()];
+    save_project_exclude(&f.cfg, &app, Some(&x), None).unwrap();
+    sync_excludes_at(&f.cg, &mut cfg, t).unwrap();
+    assert_eq!(f.excludes()[&app], json!(x));
+    let write_back_defaults = || {
+        let mut ex = f.excludes();
+        ex[&app] = json!(defaults());
+        fs::write(f.cg.join("excludes.json"), serde_json::to_string_pretty(&ex).unwrap()).unwrap();
+    };
+    // t+20 s: the extension's stale write-back of D: still ours, X is rewritten.
+    write_back_defaults();
+    let ch = sync_excludes_at(&f.cg, &mut cfg, t + 20_000).unwrap();
+    assert_eq!(ch, vec![RootChange::Written { root: app.clone(), globs: x.clone() }]);
+    assert_eq!(f.config()["projects"][&app]["excludeWrittenAt"], json!(t), "same value: not restamped");
+    // t+40 s: D again, now outside the window that started when X was first written: VS Code's.
+    write_back_defaults();
+    let ch = sync_excludes_at(&f.cg, &mut cfg, t + 40_000).unwrap();
+    assert_eq!(ch, vec![RootChange::ManagedByVsCode { root: app.clone() }]);
+    assert_eq!(f.excludes()[&app], json!(defaults()), "VS Code's key is left alone");
+}
