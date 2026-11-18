@@ -104,7 +104,9 @@
   function groupsOf(v: ProjectView, kind: DiffKind) {
     return bySession ? groupsBySession(v, kind) : groupsFor(v, kind);
   }
-  const isProtected = $derived(globMatcher(view?.root ?? "", settings.protected.value));
+  /** The protected globs for the selected project; the defaults until its settings have loaded. */
+  const protectedGlobs = $derived(settingsFor === selected ? settings.protected.value : DEFAULT_SETTINGS.protected.value);
+  const isProtected = $derived(globMatcher(view?.root ?? "", protectedGlobs));
   /** An accept of protected files waiting for its answer. */
   let protectAsk = $state<{ text: string; go: () => void } | null>(null);
   let protectEl: HTMLDivElement | undefined = $state();
@@ -452,7 +454,7 @@
     // Accepting a file that looks like a secret asks first, wherever the accept came from.
     if (action === "accept" && !opts.protectedOk) {
       const paths = target.kind === "file" ? [target.key] : (target.keys ?? []);
-      const hits = protectedAmong(paths, view.root, settings.protected.value);
+      const hits = protectedAmong(paths, view.root, protectedGlobs);
       if (hits.length > 0) {
         void askProtect(protectPrompt(hits), () => void runDecide(action, target, { ...opts, protectedOk: true }));
         return;
@@ -1065,7 +1067,17 @@
       onset={changeSetting}
       onhooklog={changeHookLog}
       onextrahide={changeExtraHide}
-      oneditor={(t) => void setEditor(t).then((c) => (config = c), (e) => show({ text: `Couldn't change the editor: ${e}`, tone: "error" }))}
+      oneditor={(t) =>
+        setEditor(t).then(
+          (c) => {
+            config = c;
+            return true;
+          },
+          (e) => {
+            show({ text: `Couldn't change the editor: ${e}`, tone: "error" });
+            return false;
+          },
+        )}
       onreadonly={(on) => void changeReadOnly(on)}
       onshow={(r) => void setHidden(r, false)}
       onclose={() => void closeSettings()}

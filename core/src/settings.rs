@@ -170,15 +170,54 @@ impl Layers {
 }
 
 pub fn effective(app: &AppSettings, root: Option<&Path>, sources: &ExtSources) -> Effective {
-    let layers = Layers {
-        workspace: root.and_then(|r| read_object(&r.join(".vscode").join("settings.json"))),
-        vscode: sources.vscode_user.as_deref().and_then(read_object),
-        cursor: sources.cursor_user.as_deref().and_then(read_object),
-    };
+    Resolver::new(app, sources).effective(root)
+}
 
-    let exclude = resolve_exclude(app, root, sources, &layers);
+/// The user-level settings files read once, for resolving many roots in a row (a project list):
+/// only each root's own `.vscode/settings.json` is read per call.
+pub struct Resolver<'a> {
+    app: &'a AppSettings,
+    sources: &'a ExtSources,
+    vscode: Option<serde_json::Map<String, Value>>,
+    cursor: Option<serde_json::Map<String, Value>>,
+}
+
+impl<'a> Resolver<'a> {
+    pub fn new(app: &'a AppSettings, sources: &'a ExtSources) -> Self {
+        Resolver {
+            app,
+            sources,
+            vscode: sources.vscode_user.as_deref().and_then(read_object),
+            cursor: sources.cursor_user.as_deref().and_then(read_object),
+        }
+    }
+
+    pub fn effective(&self, root: Option<&Path>) -> Effective {
+        let layers = Layers {
+            workspace: root.and_then(|r| read_object(&r.join(".vscode").join("settings.json"))),
+            vscode: self.vscode.clone(),
+            cursor: self.cursor.clone(),
+        };
+        resolve_all(self.app, root, self.sources, &layers)
+    }
+}
+
+fn resolve_all(app: &AppSettings, root: Option<&Path>, sources: &ExtSources, layers: &Layers) -> Effective {
+
+    let exclude = resolve_exclude(app, root, sources, layers);
+    // An app list replaces the user-level layers, but never drops what this project's own
+    // `.vscode` protects: those globs are added back, so an override made in one project cannot
+    // weaken protection in another. The source stays App.
     let protected = match app.settings.get("protected").and_then(|v| globs_from_map(v).or_else(|| strings(v))) {
-        Some(value) => Resolved { value, source: Source::App },
+        Some(mut value) => {
+            let ws = layers.workspace.as_ref().and_then(|m| m.get("claudegate.protected")).and_then(globs_from_map);
+            for g in ws.unwrap_or_default() {
+                if !value.contains(&g) {
+                    value.push(g);
+                }
+            }
+            Resolved { value, source: Source::App }
+        }
         None => layers.merged_globs("claudegate.protected", DEFAULT_PROTECTED),
     };
 

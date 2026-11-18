@@ -28,7 +28,8 @@
     onset: (key: SettingKey, value: unknown) => Promise<boolean>;
     onhooklog: (on: boolean) => Promise<boolean>;
     onextrahide: (patterns: string[]) => Promise<boolean>;
-    oneditor: (template: string) => void;
+    /** Resolves false when it failed (the app says why). */
+    oneditor: (template: string) => Promise<boolean>;
     onreadonly: (on: boolean) => void;
     onshow: (root: string) => void;
     onclose: () => void;
@@ -107,6 +108,13 @@
     <span class="badge" class:app={r.source === "app"}>{sourceLabel(r.source)}</span>
     {#if r.source === "app"}
       <button class="link" onclick={() => void set(key, null)} title="Drop this app's value and use the inherited one">Reset</button>
+    {:else if r.source === "workspace"}
+      <!-- An app value applies everywhere: say so before a project's own value is copied up. -->
+      <button
+        class="link"
+        onclick={() => void set(key, r.value)}
+        title="Copies this project's .vscode value into the app, where it then applies to every project"
+      >Override for all projects</button>
     {:else}
       <button class="link" onclick={() => void set(key, r.value)} title="Keep this value in the app, whatever VS Code says later">Override</button>
     {/if}
@@ -323,9 +331,9 @@
         <p class="desc">The editor “Open” uses, at the line you are looking at.</p>
       </div>
       <div class="control">
-        <div class="segmented" role="radiogroup" aria-labelledby="set-editor">
+        <div class="segmented" role="group" aria-labelledby="set-editor">
           {#each editors as o (o.template)}
-            <button role="radio" aria-checked={o.current} class:on={o.current} title={o.template} onclick={() => { oneditor(o.template); stamp(true); }}>
+            <button aria-pressed={o.current} class:on={o.current} title={o.template} onclick={() => void oneditor(o.template).then(stamp)}>
               {o.label}
             </button>
           {/each}

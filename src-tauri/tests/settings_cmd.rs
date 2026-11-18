@@ -192,3 +192,28 @@ fn max_attached_limits_the_worktree_scan() {
     // Only the scopes it loaded are watched.
     assert_eq!(known.lock().unwrap().len(), 2);
 }
+
+#[test]
+fn an_app_protected_override_keeps_each_projects_own_workspace_globs() {
+    let home = tempfile::tempdir().unwrap();
+    let p = config_path_in(home.path());
+    let src = sources(home.path());
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    fs::create_dir_all(b.path().join(".vscode")).unwrap();
+    fs::write(b.path().join(".vscode/settings.json"), r#"{ "claudegate.protected": { "secrets/**": true, "**/.env": false } }"#).unwrap();
+    let ra = a.path().to_string_lossy().into_owned();
+    let rb = b.path().to_string_lossy().into_owned();
+    assert!(settings_view(&p, Some(&rb), &src).effective.protected.value.contains(&"secrets/**".to_string()));
+
+    // Override from A: A's effective list (the defaults) becomes the app's list.
+    let from_a = settings_view(&p, Some(&ra), &src).effective.protected.value;
+    assert!(!from_a.contains(&"secrets/**".to_string()));
+    save_setting(&p, "protected", json!(from_a), None).unwrap();
+
+    let in_b = settings_view(&p, Some(&rb), &src).effective.protected;
+    assert_eq!(in_b.source, Source::App);
+    assert!(in_b.value.contains(&"secrets/**".to_string()), "B still protects its own globs: {:?}", in_b.value);
+    let in_a = settings_view(&p, Some(&ra), &src).effective.protected;
+    assert!(!in_a.value.contains(&"secrets/**".to_string()), "B's globs never leak into A");
+}

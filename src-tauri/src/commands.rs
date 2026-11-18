@@ -6,7 +6,7 @@ use claudegate_core::decide::{decide_confirmed, Action, DecideError, DecidePaths
 use claudegate_core::model::{parse_session, ReviewRecord, Session};
 use claudegate_core::paths::{claudegate_home, resolve_root, session_file_for};
 use claudegate_core::project::{load_project_max, ProjectSummary, ProjectView};
-use claudegate_core::settings::{default_ext_sources, effective, Effective, ExtSources};
+use claudegate_core::settings::{default_ext_sources, effective, Effective, ExtSources, Resolver};
 use claudegate_core::roots::read_roots;
 use claudegate_core::textfile::{read_text, TextFile};
 use serde::{Deserialize, Serialize};
@@ -186,8 +186,11 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 pub async fn list_projects(known: State<'_, KnownMap>) -> Result<Vec<ProjectSummary>, String> {
     let known = known.inner().clone();
     blocking(move || {
-        let (cfg, src) = (crate::config::config_path(), ext_sources());
-        list_projects_max(&claudegate_home(), &known, &|r| max_attached_for(&cfg, r, &src))
+        // The config and the user-level settings files are read once for the whole list.
+        let (app, _) = crate::config::read_app_settings(&crate::config::config_path());
+        let src = ext_sources();
+        let resolver = Resolver::new(&app, &src);
+        list_projects_max(&claudegate_home(), &known, &|r| resolver.effective(Some(r)).max_attached.value as usize)
     })
     .await
 }
