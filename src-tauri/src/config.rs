@@ -32,11 +32,15 @@ pub struct Config {
     /// records it; `~/.claudegate/workspace-roots.json` is never touched.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_projects: Vec<String>,
+    /// The roots the app added (`projects[root].addedByApp`), for the rail's marker and Remove.
+    /// Derived on read; config.json never stores this list itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub app_roots: Vec<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { editor: DEFAULT_EDITOR.into(), custom_editor: None, read_only: false, hidden_projects: vec![] }
+        Self { editor: DEFAULT_EDITOR.into(), custom_editor: None, read_only: false, hidden_projects: vec![], app_roots: vec![] }
     }
 }
 
@@ -69,7 +73,21 @@ fn from_value(v: &serde_json::Value) -> Config {
             .and_then(|h| h.as_array())
             .map(|a| clean_roots(a.iter().filter_map(|r| r.as_str())))
             .unwrap_or_default(),
+        app_roots: app_roots_in(v),
     }
+}
+
+/// Every `projects[root]` with `addedByApp: true`, in the file's order.
+fn app_roots_in(v: &serde_json::Value) -> Vec<String> {
+    v.get("projects")
+        .and_then(|p| p.as_object())
+        .map(|m| {
+            m.iter()
+                .filter(|(_, e)| e.get("addedByApp").and_then(|b| b.as_bool()) == Some(true))
+                .map(|(r, _)| r.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Trimmed, without blanks or repeats, in the order given.
@@ -295,6 +313,58 @@ pub fn save_extra_hide(path: &Path, root: &str, patterns: &[String], guard: Opti
     .map(|_| ())
 }
 
+/// The roots the app added. Lenient and never creates the file: unreadable reads as none.
+pub fn app_roots(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .map(|v| app_roots_in(&v))
+        .unwrap_or_default()
+}
+
+/// Records `root` as added by the app (`projects[root].addedByApp = true`), keeping every other
+/// key, including the project's own `extraHide` / `exclude`.
+pub fn mark_added_by_app(path: &Path, root: &str, guard: Option<&Path>) -> Result<(), String> {
+    update_config(path, guard, |obj, _| {
+        let projects = obj.entry("projects").or_insert_with(|| serde_json::json!({}));
+        let projects = projects.as_object_mut().ok_or("The projects entry in config.json is not an object.")?;
+        let entry = projects.entry(root.to_string()).or_insert_with(|| serde_json::json!({}));
+        let entry = entry.as_object_mut().ok_or("That project's entry in config.json is not an object.")?;
+        entry.insert("addedByApp".into(), serde_json::Value::Bool(true));
+        Ok(())
+    })
+    .map(|_| ())
+}
+
+/// Drops the app's whole record of `root` (`projects[root]`), after Remove.
+pub fn forget_project(path: &Path, root: &str, guard: Option<&Path>) -> Result<(), String> {
+    update_config(path, guard, |obj, _| {
+        if let Some(p) = obj.get_mut("projects").and_then(|p| p.as_object_mut()) {
+            p.remove(root);
+        }
+        Ok(())
+    })
+    .map(|_| ())
+}
+
+/// `projects[root].addedByApp` in config.json, as the core's add/remove/ensure read and write it.
+pub struct ConfigProjects<'a> {
+    pub path: &'a Path,
+    pub guard: Option<&'a Path>,
+}
+
+impl claudegate_core::projects::AppProjects for ConfigProjects<'_> {
+    fn app_roots(&self) -> Vec<String> {
+        app_roots(self.path)
+    }
+    fn mark_added(&mut self, root: &str) -> Result<(), String> {
+        mark_added_by_app(self.path, root, self.guard)
+    }
+    fn forget(&mut self, root: &str) -> Result<(), String> {
+        forget_project(self.path, root, self.guard)
+    }
+}
+
 /// The app's overrides as the core resolver reads them, plus each project's `extraHide`. Lenient:
 /// an unreadable file, or an entry of the wrong shape, reads as no override.
 pub fn read_app_settings(path: &Path) -> (claudegate_core::settings::AppSettings, std::collections::HashMap<String, Vec<String>>) {
@@ -372,7 +442,7 @@ mod tests {
     fn serializes_camel_case_without_absent_custom() {
         let v = serde_json::to_value(Config::default()).unwrap();
         assert_eq!(v, serde_json::json!({ "editor": "zed {path}:{line}:{col}", "readOnly": false }));
-        let c = Config { editor: VSCODE.into(), custom_editor: Some("x".into()), read_only: false, hidden_projects: vec![] };
+        let c = Config { editor: VSCODE.into(), custom_editor: Some("x".into()), ..Config::default() };
         assert_eq!(serde_json::to_value(c).unwrap()["customEditor"], "x");
     }
 }

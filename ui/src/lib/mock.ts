@@ -23,6 +23,8 @@ const WT = `${SHOP}/.worktrees/checkout-v2`;
 const HERDR = "/home/dev/src/herdr-pokemon";
 const BILLING = "/home/dev/src/legacy-billing";
 const NOTES = "/home/dev/src/field-notes";
+/** Added in the app (a Zed-only project), so it is marked and removable. */
+const TIDE = "/home/dev/src/tide-sim";
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
 
@@ -104,7 +106,51 @@ const views: Record<string, ProjectView> = {
     nextRecheckAt: null,
   },
   [BILLING]: { root: BILLING, missing: true, scopes: [], pending: [], accepted: [], rejected: [], nextRecheckAt: null },
+  [TIDE]: {
+    root: TIDE,
+    missing: false,
+    scopes: [{ root: TIDE, isWorktree: false, shapeUnknown: [], error: null }],
+    pending: [pendingIn(TIDE, "src/ocean.rs", 31, 12)],
+    accepted: [],
+    rejected: [],
+    nextRecheckAt: null,
+  },
 };
+
+/** workspace-roots.json, in order. */
+const rootsList = [SHOP, NOTES, BILLING, HERDR, TIDE];
+
+const emptyView = (root: string): ProjectView => ({
+  root,
+  missing: false,
+  scopes: [{ root, isWorktree: false, shapeUnknown: [], error: null }],
+  pending: [],
+  accepted: [],
+  rejected: [],
+  nextRecheckAt: null,
+});
+
+/** The nesting guard and messages of core/src/roots.rs, close enough for the preview. */
+function mockAdd(raw: string): { root: string; already: boolean } {
+  const path = raw.trim();
+  if (!path.startsWith("/")) throw "Give the full path of the folder, starting from /.";
+  const root = path.replace(/\/+$/, "") || "/";
+  if (root.endsWith(".txt")) throw "That is not a folder that exists.";
+  const inside = (a: string, b: string) => a.startsWith(b + "/");
+  if (rootsList.includes(root)) return { root, already: true };
+  for (const r of rootsList) {
+    if (inside(root, r)) {
+      if (root.includes("/.worktrees/"))
+        throw `This folder is a git worktree inside ${r}. It needs no project of its own: worktrees inside a project are found automatically.`;
+      throw `This folder is inside ${r}, which is already a project. Its edits are captured there.`;
+    }
+    if (inside(r, root)) throw `This folder contains ${r}, which is already a project. Add a folder that does not overlap it.`;
+  }
+  rootsList.push(root);
+  views[root] ??= emptyView(root);
+  config = { ...config, appRoots: [...(config.appRoots ?? []), root] };
+  return { root, already: false };
+}
 
 // Per-file before/after text, so the diff preview shows real-looking changes in several languages.
 const CLIENT_BEFORE = `import type { Order } from "./types";
@@ -293,7 +339,12 @@ function sample(path: string, isNew: boolean): { before: string | null; after: s
   return { before: CLIENT_BEFORE, after: CLIENT_AFTER };
 }
 
-let config: EditorConfig = { editor: "zed {path}:{line}:{col}", customEditor: "nvim +{line} {path}", readOnly: false };
+let config: EditorConfig = {
+  editor: "zed {path}:{line}:{col}",
+  customEditor: "nvim +{line} {path}",
+  readOnly: false,
+  appRoots: [TIDE],
+};
 
 /** What the extension would supply: a VS Code user setting and a project exclude list. */
 const ext: Record<string, Resolved<unknown>> = {
@@ -335,6 +386,8 @@ const handlers = new Set<(p: ChangedPayload) => void>();
  * the path a real accept in VS Code takes, so a selected row disappears under the diff pane.
  */
 (globalThis as Record<string, unknown>).__mock = {
+  /** What the next "Choose folder" returns (null: cancelled). */
+  nextPick: "/home/dev/src/kelp-forest" as string | null,
   /** The next decide fails as a store error after "changing" the files. */
   failStore: false,
   /** Marks a project's primary session unreadable, as a permission error would. */
@@ -357,7 +410,7 @@ const handlers = new Set<(p: ChangedPayload) => void>();
 export const mockApi: Api = {
   listProjects: () =>
     delay<ProjectSummary[]>(
-      [SHOP, NOTES, BILLING, HERDR].map((root) => ({
+      rootsList.map((root) => ({
         root,
         name: root.split("/").pop()!,
         missing: views[root].missing,
@@ -424,6 +477,18 @@ export const mockApi: Api = {
     extraHide[root] = patterns;
     return delay(mockSettings(root));
   },
+  addProject: async (path) => {
+    await delay(null);
+    return mockAdd(path);
+  },
+  removeProject: async (root) => {
+    await delay(null);
+    if (!(config.appRoots ?? []).includes(root))
+      throw "This project comes from VS Code. Remove it there; the app only removes projects it added.";
+    rootsList.splice(rootsList.indexOf(root), 1);
+    config = { ...config, appRoots: (config.appRoots ?? []).filter((r) => r !== root) };
+  },
+  pickFolder: () => delay(((globalThis as Record<string, unknown>).__mock as { nextPick: string | null }).nextPick),
 };
 
 const UNKNOWN = "This project was written by a newer ClaudeGate. Update the app to make decisions here.";

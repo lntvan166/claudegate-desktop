@@ -12,8 +12,11 @@
   import Splitter from "./components/Splitter.svelte";
   import {
     decide,
+    addProject,
     getConfig,
     getProject,
+    pickFolder,
+    removeProject,
     getSettings,
     setExtraHide,
     setHookLog,
@@ -564,6 +567,33 @@
     }
   }
 
+  /** Registers `path` in workspace-roots.json, then selects it. Resolves to an error message. */
+  async function addProjectAt(path: string): Promise<string | null> {
+    try {
+      const r = await addProject(path);
+      config = await getConfig();
+      await loadProjects();
+      select(r.root);
+      const name = projects.find((p) => p.root === r.root)?.name ?? basename(r.root);
+      announce(r.already ? `${name} is already a project` : `${name} added; Claude's edits there are now captured`);
+      return null;
+    } catch (e) {
+      return String(e);
+    }
+  }
+
+  async function removeProjectAt(root: string) {
+    const name = projects.find((p) => p.root === root)?.name ?? basename(root);
+    try {
+      await removeProject(root);
+      config = await getConfig();
+      await loadProjects();
+      announce(`${name} removed; its review history is kept`);
+    } catch (e) {
+      show({ text: `Couldn't remove ${name}: ${e}`, tone: "error" });
+    }
+  }
+
   async function changeReadOnly(on: boolean) {
     try {
       config = await setReadOnly(on);
@@ -915,6 +945,10 @@
     hidden={split.hidden}
     onhide={(r) => void setHidden(r, true)}
     onshow={(r) => void setHidden(r, false)}
+    appRoots={config.appRoots ?? []}
+    onpick={pickFolder}
+    onadd={addProjectAt}
+    onremove={removeProjectAt}
     {selected}
     loading={loadingList}
     collapsed={railed}

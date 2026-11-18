@@ -12,6 +12,8 @@ export type EditorConfig = {
   readOnly?: boolean;
   /** Project roots hidden from the rail, the header total and the tray. */
   hiddenProjects?: string[];
+  /** Roots the app added (`projects[root].addedByApp`): marked "Added here" and removable. */
+  appRoots?: string[];
 };
 
 const norm = (t: string) => t.trim().split(/\s+/).join(" ");

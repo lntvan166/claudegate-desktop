@@ -436,3 +436,66 @@ pub async fn decide(
     .await?;
     out.result
 }
+
+/// Serializes the app's own roots edits (add, remove, and the watcher's re-add) so they never
+/// race each other. The extension's writes are merged by the store's re-read-before-rename.
+static ROOTS_LOCK: Mutex<()> = Mutex::new(());
+
+fn roots_guard() -> std::sync::MutexGuard<'static, ()> {
+    ROOTS_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// `add_project` minus Tauri: registers `path` in `<cg_home>/workspace-roots.json` and records it
+/// in `config_path` as added by the app. The error is a message for the user (it names the
+/// conflicting root for a nested or containing folder).
+pub fn add_project_with(cg_home: &Path, config_path: &Path, path: &str) -> Result<claudegate_core::projects::Added, String> {
+    let _g = roots_guard();
+    let mut cfg = crate::config::ConfigProjects { path: config_path, guard: Some(cg_home) };
+    claudegate_core::projects::add_project(cg_home, &mut cfg, path).map_err(|e| e.to_string())
+}
+
+/// `remove_project` minus Tauri. Only roots the app added; the session file is kept.
+pub fn remove_project_with(cg_home: &Path, config_path: &Path, root: &str) -> Result<(), String> {
+    let _g = roots_guard();
+    let mut cfg = crate::config::ConfigProjects { path: config_path, guard: Some(cg_home) };
+    claudegate_core::projects::remove_project(cg_home, &mut cfg, root).map_err(|e| e.to_string())
+}
+
+/// Re-adds the app's roots that the extension's unlocked write dropped. Returns what it re-added;
+/// a failure is logged, never raised (it runs from the watcher).
+pub fn ensure_roots_with(cg_home: &Path, config_path: &Path) -> Vec<String> {
+    let _g = roots_guard();
+    let cfg = crate::config::ConfigProjects { path: config_path, guard: Some(cg_home) };
+    match claudegate_core::projects::ensure_app_roots_present(cg_home, &cfg) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("claudegate: couldn't re-add the app's projects: {e}");
+            Vec::new()
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn add_project(path: String) -> Result<claudegate_core::projects::Added, String> {
+    blocking(move || add_project_with(&claudegate_home(), &crate::config::config_path(), &path)).await?
+}
+
+#[tauri::command]
+pub async fn remove_project(root: String) -> Result<(), String> {
+    blocking(move || remove_project_with(&claudegate_home(), &crate::config::config_path(), &root)).await?
+}
+
+/// The native folder picker: one directory, or `None` when cancelled.
+#[tauri::command]
+pub async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    blocking(move || {
+        app.dialog()
+            .file()
+            .set_title("Add project")
+            .blocking_pick_folder()
+            .and_then(|p| p.into_path().ok())
+            .map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+}

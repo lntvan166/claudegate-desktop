@@ -43,7 +43,7 @@ fn missing_config_gives_default_and_creates_it() {
     let p = config_path_in(home.path());
     assert_eq!(p, home.path().join(".claudegate-desktop").join("config.json"));
     let c = load_or_create(&p);
-    assert_eq!(c, Config { editor: DEFAULT_EDITOR.into(), custom_editor: None, read_only: false, hidden_projects: vec![] });
+    assert_eq!(c, Config { editor: DEFAULT_EDITOR.into(), custom_editor: None, read_only: false, hidden_projects: vec![], app_roots: vec![] });
     assert_eq!(DEFAULT_EDITOR, "zed {path}:{line}:{col}");
     assert!(p.is_file(), "defaults written to the app's own dir");
     assert_eq!(load_or_create(&p), c);
@@ -142,7 +142,7 @@ fn resolver_falls_back_to_an_app_bundled_cli() {
 
 #[test]
 fn only_presets_the_custom_editor_or_the_hand_set_editor_are_allowed() {
-    let c = Config { editor: "subl {path}:{line}".into(), custom_editor: Some("nvim +{line} {path}".into()), read_only: false, hidden_projects: vec![] };
+    let c = Config { editor: "subl {path}:{line}".into(), custom_editor: Some("nvim +{line} {path}".into()), read_only: false, hidden_projects: vec![], app_roots: vec![] };
     assert_eq!(allowed_template(ZED, &c).unwrap(), ZED);
     assert_eq!(allowed_template("  code   -g {path}:{line}:{col} ", &c).unwrap(), VSCODE);
     assert!(allowed_template("nvim +{line}  {path}", &c).is_ok());

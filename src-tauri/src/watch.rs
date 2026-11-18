@@ -1,5 +1,6 @@
 //! Live watcher: notify events on `<home>/sessions` and `<home>` are coalesced for 150 ms and
-//! turned into one `claudegate://changed` event. Read-only: nothing here creates or writes.
+//! turned into one `claudegate://changed` event. Nothing here creates or writes; a change of
+//! `workspace-roots.json` also runs the app's re-add of its own dropped roots (`commands`).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -179,14 +180,41 @@ fn attach(w: &mut notify::RecommendedWatcher, home: &Path, watched: &mut Vec<Pat
 /// created; nothing here creates or writes.
 pub fn start(app: tauri::AppHandle, home: PathBuf, known: KnownMap) {
     use tauri::Emitter;
-    run(home, known, move |p| {
-        let _ = app.emit(CHANGED_EVENT, p);
-    });
+    let cg = home.clone();
+    run_with_roots_hook(
+        home,
+        known,
+        move |p| {
+            let _ = app.emit(CHANGED_EVENT, p);
+        },
+        // The extension rewrites workspace-roots.json without a lock and can drop a root the app
+        // added; put it back. Writes nothing when nothing is missing, so our own write's event
+        // does not loop.
+        move || {
+            crate::commands::ensure_roots_with(&cg, &crate::config::config_path());
+        },
+    );
+}
+
+/// True when a settled batch touched `workspace-roots.json`.
+pub fn touches_roots_file(batch: &[PathBuf]) -> bool {
+    batch.iter().any(|p| p.file_name().is_some_and(|n| n == "workspace-roots.json"))
 }
 
 /// The watcher loop behind `start`, with the emitter injected so it can be driven by a test.
 /// The thread lives as long as the process.
 pub fn run(home: PathBuf, known: KnownMap, emit: impl Fn(ChangedPayload) + Send + 'static) {
+    run_with_roots_hook(home, known, emit, || {});
+}
+
+/// `run`, also calling `on_roots` (before the emit) once per settled batch that touched
+/// `workspace-roots.json`; the 150 ms coalescing is its debounce.
+pub fn run_with_roots_hook(
+    home: PathBuf,
+    known: KnownMap,
+    emit: impl Fn(ChangedPayload) + Send + 'static,
+    on_roots: impl Fn() + Send + 'static,
+) {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res {
@@ -221,6 +249,9 @@ pub fn run(home: PathBuf, known: KnownMap, emit: impl Fn(ChangedPayload) + Send 
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             }
             if let Some(batch) = co.take_if_due(Instant::now()) {
+                if touches_roots_file(&batch) {
+                    on_roots();
+                }
                 let snapshot = known.lock().map(|k| k.clone()).unwrap_or_default();
                 if let Some(p) = payload_for(&batch, &snapshot) {
                     emit(p);
@@ -306,6 +337,13 @@ mod tests {
             PathBuf::from("/h/hook.log"),
         ];
         assert_eq!(affected(&ch, &known()), Affected::default());
+    }
+
+    #[test]
+    fn only_the_roots_file_runs_the_re_add() {
+        assert!(touches_roots_file(&[PathBuf::from("/h/sessions/a.json"), PathBuf::from("/h/workspace-roots.json")]));
+        assert!(!touches_roots_file(&[PathBuf::from("/h/excludes.json"), PathBuf::from("/h/sessions/a.json")]));
+        assert!(!touches_roots_file(&[PathBuf::from("/h/workspace-roots.json.0123456789ab.tmp")]));
     }
 
     #[test]

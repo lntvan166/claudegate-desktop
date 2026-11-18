@@ -8,10 +8,13 @@ use tauri::Manager;
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(watch::KnownMap::default())
         .manage(commands::WriteLock::default())
         .setup(|app| {
             let known = app.state::<watch::KnownMap>().inner().clone();
+            // Re-add any of the app's projects the extension dropped while we were not running.
+            commands::ensure_roots_with(&claudegate_core::paths::claudegate_home(), &config::config_path());
             watch::start(app.handle().clone(), claudegate_core::paths::claudegate_home(), known);
             tray::setup(app.handle());
             Ok(())
@@ -25,6 +28,9 @@ pub fn run() {
             commands::set_setting,
             commands::set_hook_log,
             commands::set_extra_hide,
+            commands::add_project,
+            commands::remove_project,
+            commands::pick_folder,
             config::get_config,
             config::set_editor,
             config::set_read_only,

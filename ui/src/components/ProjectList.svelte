@@ -12,6 +12,10 @@
     hidden = [],
     onhide = () => {},
     onshow = () => {},
+    appRoots = [],
+    onpick = async () => null,
+    onadd = async () => null,
+    onremove = async () => {},
   }: {
     projects: ProjectSummary[];
     selected: string | null;
@@ -24,17 +28,99 @@
     hidden?: ProjectSummary[];
     onhide?: (root: string) => void;
     onshow?: (root: string) => void;
+    /** Roots the app added: marked "Added here" and removable. */
+    appRoots?: string[];
+    /** The native folder picker; null when cancelled. */
+    onpick?: () => Promise<string | null>;
+    /** Adds and selects the project; resolves to an error message, or null on success. */
+    onadd?: (path: string) => Promise<string | null>;
+    onremove?: (root: string) => Promise<void>;
   } = $props();
 
   let showHidden = $state(false);
 
-  /** `h` hides the focused project, as its Hide button does. */
-  function onProjectKey(e: KeyboardEvent, root: string) {
-    if (e.key !== "h" || e.ctrlKey || e.metaKey || e.altKey) return;
-    e.preventDefault();
-    e.stopPropagation();
-    onhide(root);
+  /** The typed-path form: the keyboard route, and where a refused add explains itself. */
+  let adding = $state(false);
+  let addPath = $state("");
+  let addError = $state<string | null>(null);
+  let busy = $state(false);
+  let pathInput = $state<HTMLInputElement | null>(null);
+  /** The project whose Remove is awaiting confirmation. */
+  let confirming = $state<string | null>(null);
+  let cancelButton = $state<HTMLButtonElement | null>(null);
+
+  const isAppAdded = (root: string) => appRoots.includes(root);
+
+  async function submit(path: string) {
+    if (!path.trim() || busy) return;
+    busy = true;
+    addError = null;
+    try {
+      const err = await onadd(path.trim());
+      if (err) {
+        addPath = path.trim();
+        addError = err;
+        adding = true;
+        return;
+      }
+      adding = false;
+      addPath = "";
+    } finally {
+      busy = false;
+    }
   }
+
+  async function chooseFolder() {
+    if (busy) return;
+    if (collapsed) ontoggle();
+    let path: string | null = null;
+    try {
+      path = await onpick();
+    } catch (e) {
+      // No picker (or it failed): fall back to typing the path.
+      addError = `Couldn't open the folder picker: ${e}`;
+      openForm();
+      return;
+    }
+    if (path) await submit(path);
+  }
+
+  function openForm() {
+    adding = true;
+    queueMicrotask(() => pathInput?.focus());
+  }
+
+  function closeForm() {
+    adding = false;
+    addError = null;
+    addPath = "";
+  }
+
+  function askRemove(root: string) {
+    confirming = root;
+    // Cancel takes focus: the safe answer is the default.
+    queueMicrotask(() => cancelButton?.focus());
+  }
+
+  async function confirmRemove(root: string) {
+    confirming = null;
+    await onremove(root);
+  }
+
+  /** `h` hides the focused project, as its Hide button does; Delete asks to remove an app-added one. */
+  function onProjectKey(e: KeyboardEvent, root: string) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === "h") {
+      e.preventDefault();
+      e.stopPropagation();
+      onhide(root);
+    } else if ((e.key === "Delete" || e.key === "Backspace") && isAppAdded(root)) {
+      e.preventDefault();
+      e.stopPropagation();
+      askRemove(root);
+    }
+  }
+
 
   function railName(p: ProjectSummary): string {
     if (p.missing) return `${p.name}, folder missing`;
@@ -88,6 +174,11 @@
           {#if p.pending > 0}<span class="badge num" aria-hidden="true">{p.pending > 99 ? "99+" : p.pending}</span>{/if}
         </button>
       {/each}
+      <button class="chip add-chip" title="Add project" aria-label="Add project" onclick={() => void chooseFolder()}>
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+        </svg>
+      </button>
     </div>
   {:else}
   <div class="list">
@@ -98,7 +189,7 @@
     {:else if projects.length === 0}
       <div class="empty">
         <p class="empty-title">No projects yet</p>
-        <p class="empty-body">Open a folder in VS Code with ClaudeGate installed and it will show up here.</p>
+        <p class="empty-body">Open a folder in VS Code with ClaudeGate installed, or add one below, and it will show up here.</p>
       </div>
     {:else}
       {#each projects as p (p.root)}
@@ -109,12 +200,15 @@
             class:missing={p.missing}
             title={p.root}
             aria-current={p.root === selected ? "true" : undefined}
-            aria-keyshortcuts="h"
+            aria-keyshortcuts={isAppAdded(p.root) ? "h Delete" : "h"}
             onclick={() => onselect(p.root)}
             onkeydown={(e) => onProjectKey(e, p.root)}
           >
             <span class="text">
-              <span class="name">{p.name}</span>
+              <span class="name-row">
+                <span class="name">{p.name}</span>
+                {#if isAppAdded(p.root)}<span class="marker" title="You added this project here; ClaudeGate in VS Code did not">Added here</span>{/if}
+              </span>
               {#if p.missing}
                 <span class="sub warn">Folder missing</span>
               {:else}
@@ -127,6 +221,13 @@
               <span class="count num zero" aria-label="nothing pending">0</span>
             {/if}
           </button>
+          {#if isAppAdded(p.root)}
+            <button class="remove" tabindex="-1" aria-label="Remove {p.name}" title="Remove this project (Delete)" onclick={() => askRemove(p.root)}>
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                <path d="M4.5 4.5 11.5 11.5M11.5 4.5 4.5 11.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+              </svg>
+            </button>
+          {/if}
           <button class="hide" tabindex="-1" aria-label="Hide {p.name}" title="Hide this project (H)" onclick={() => onhide(p.root)}>
             <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
               <path d="M2 8s2.2-4 6-4 6 4 6 4-2.2 4-6 4-6-4-6-4Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
@@ -135,6 +236,26 @@
             </svg>
           </button>
         </div>
+        {#if confirming === p.root}
+          <div
+            class="confirm"
+            role="alertdialog"
+            aria-labelledby="confirm-{p.name}"
+            tabindex="-1"
+            onkeydown={(e) => {
+              if (e.key === "Escape") {
+                e.stopPropagation();
+                confirming = null;
+              }
+            }}
+          >
+            <p id="confirm-{p.name}">Stop capturing Claude's edits in {p.name}? Its review history is kept.</p>
+            <div class="confirm-actions">
+              <button class="btn" bind:this={cancelButton} onclick={() => (confirming = null)}>Cancel</button>
+              <button class="btn danger" onclick={() => void confirmRemove(p.root)}>Remove</button>
+            </div>
+          </div>
+        {/if}
       {/each}
     {/if}
   </div>
@@ -158,6 +279,52 @@
       {/if}
     </div>
   {/if}
+  <div class="add-box">
+    {#if adding}
+      <form
+        class="add-form"
+        onsubmit={(e) => {
+          e.preventDefault();
+          void submit(addPath);
+        }}
+      >
+        <label class="add-label" for="add-path">Folder to add</label>
+        <input
+          id="add-path"
+          class="path-input"
+          bind:this={pathInput}
+          bind:value={addPath}
+          placeholder="/home/you/src/project"
+          spellcheck="false"
+          autocomplete="off"
+          aria-invalid={addError ? "true" : undefined}
+          aria-describedby={addError ? "add-error" : undefined}
+          onkeydown={(e) => {
+            if (e.key === "Escape") {
+              e.stopPropagation();
+              closeForm();
+            }
+          }}
+        />
+        {#if addError}<p id="add-error" class="add-error" role="alert">{addError}</p>{/if}
+        <div class="add-actions">
+          <button type="submit" class="btn primary" disabled={busy || !addPath.trim()}>Add</button>
+          <button type="button" class="btn" onclick={() => void chooseFolder()}>Choose…</button>
+          <button type="button" class="btn quiet" onclick={closeForm}>Cancel</button>
+        </div>
+      </form>
+    {:else}
+      <div class="add-row">
+        <button class="add" disabled={busy} onclick={() => void chooseFolder()}>
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          </svg>
+          Add project
+        </button>
+        <button class="type-path" title="Type the folder's path instead" onclick={openForm}>Type path</button>
+      </div>
+    {/if}
+  </div>
   {/if}
 </nav>
 
@@ -297,6 +464,167 @@
   .item:hover .count,
   .item:focus-within .count {
     visibility: hidden;
+  }
+  /* Remove: beside Hide, only on projects the app added. */
+  .remove {
+    position: absolute;
+    top: 50%;
+    right: 36px;
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    margin-top: -13px;
+    border-radius: var(--radius-chip);
+    color: var(--muted);
+    background: var(--hover);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms var(--ease);
+  }
+  .item:hover .remove,
+  .item:focus-within .remove {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .item:has(.project.active) .remove {
+    background: var(--active);
+  }
+  .remove:hover {
+    color: var(--danger);
+  }
+
+  .name-row {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+  }
+  .marker {
+    flex: none;
+    font-size: var(--fs-meta);
+    font-weight: 500;
+    color: var(--muted);
+    padding: 0 5px;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-chip);
+    line-height: 1.5;
+  }
+
+  .confirm {
+    margin: 4px 0 6px;
+    padding: 10px;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-control);
+    background: var(--hover);
+  }
+  .confirm p {
+    margin: 0 0 8px;
+    font-size: var(--fs-small);
+    line-height: 1.45;
+  }
+  .confirm-actions,
+  .add-actions {
+    display: flex;
+    gap: 6px;
+  }
+  .btn {
+    height: 26px;
+    padding: 0 10px;
+    border-radius: var(--radius-chip);
+    font-size: var(--fs-small);
+    font-weight: 500;
+    color: var(--text);
+    border: 1px solid var(--rule);
+  }
+  .btn:hover:not(:disabled) {
+    background: var(--active);
+  }
+  .btn:disabled {
+    opacity: 0.5;
+  }
+  .btn.primary {
+    border-color: var(--text);
+  }
+  .btn.quiet {
+    border-color: transparent;
+    color: var(--muted);
+  }
+  .btn.danger {
+    color: var(--danger);
+  }
+
+  .add-box {
+    flex: none;
+    padding: 6px 10px 10px;
+    border-top: 1px solid var(--rule);
+  }
+  .add-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .add {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    height: 30px;
+    padding: 0 10px;
+    border-radius: var(--radius-control);
+    font-size: var(--fs-small);
+    font-weight: 500;
+    color: var(--muted);
+  }
+  .add:hover:not(:disabled) {
+    color: var(--text);
+    background: var(--hover);
+  }
+  .type-path {
+    flex: none;
+    height: 26px;
+    padding: 0 8px;
+    border-radius: var(--radius-chip);
+    font-size: var(--fs-meta);
+    color: var(--faint);
+  }
+  .type-path:hover {
+    color: var(--text);
+    background: var(--hover);
+  }
+  .add-form {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .add-label {
+    font-size: var(--fs-small);
+    font-weight: 500;
+    color: var(--muted);
+  }
+  .path-input {
+    height: 28px;
+    padding: 0 8px;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-chip);
+    background: var(--frame);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: var(--fs-small);
+  }
+  .path-input[aria-invalid="true"] {
+    border-color: var(--warning-ink);
+  }
+  .add-error {
+    margin: 0;
+    font-size: var(--fs-small);
+    line-height: 1.45;
+    color: var(--warning-ink);
+  }
+  .add-chip {
+    margin-top: 4px;
+    color: var(--faint);
+    border: 1px dashed var(--rule);
   }
 
   .hidden-box {

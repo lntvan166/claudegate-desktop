@@ -77,6 +77,9 @@ export type ChangedPayload = { roots: string[] };
 
 export const CHANGED_EVENT = "claudegate://changed";
 
+/** core `projects::Added`: the root as listed; `already` when it was a project before. */
+export type AddedProject = { root: string; already: boolean };
+
 export interface Api {
   listProjects(): Promise<ProjectSummary[]>;
   getProject(root: string): Promise<ProjectView>;
@@ -106,6 +109,15 @@ export interface Api {
   setHookLog(on: boolean, root: string | null): Promise<SettingsView>;
   /** The project's app-only hide patterns. */
   setExtraHide(root: string, patterns: string[]): Promise<SettingsView>;
+  /**
+   * Registers a folder in ~/.claudegate/workspace-roots.json so the hook captures there. Rejects
+   * with a message for the user (naming the conflicting root for a nested folder).
+   */
+  addProject(path: string): Promise<AddedProject>;
+  /** Unregisters a project the app added. Its review history (session file) is kept. */
+  removeProject(root: string): Promise<void>;
+  /** The native folder picker; null when cancelled. */
+  pickFolder(): Promise<string | null>;
 }
 
 const tauriApi: Api = {
@@ -124,6 +136,9 @@ const tauriApi: Api = {
   setSetting: (key, value, root) => invoke<SettingsView>("set_setting", { key, value, root }),
   setHookLog: (on, root) => invoke<SettingsView>("set_hook_log", { on, root }),
   setExtraHide: (root, patterns) => invoke<SettingsView>("set_extra_hide", { root, patterns }),
+  addProject: (path) => invoke<AddedProject>("add_project", { path }),
+  removeProject: (root) => invoke<void>("remove_project", { root }),
+  pickFolder: () => invoke<string | null>("pick_folder"),
 };
 
 let chosen: Promise<Api> | undefined;
@@ -162,3 +177,6 @@ export const setSetting = async (key: SettingKey, value: unknown, root: string |
   (await api()).setSetting(key, value, root);
 export const setHookLog = async (on: boolean, root: string | null) => (await api()).setHookLog(on, root);
 export const setExtraHide = async (root: string, patterns: string[]) => (await api()).setExtraHide(root, patterns);
+export const addProject = async (path: string) => (await api()).addProject(path);
+export const removeProject = async (root: string) => (await api()).removeProject(root);
+export const pickFolder = async () => (await api()).pickFolder();

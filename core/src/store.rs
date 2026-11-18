@@ -12,6 +12,7 @@
 
 use crate::merge::{merge_fresh_captures, MergeGuards};
 use crate::model::{parse_session, Session, Shape, Status};
+use crate::roots::RootsError;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -443,6 +444,125 @@ pub(crate) fn set_sentinel(path: &Path, on: bool) -> io::Result<()> {
 pub fn set_hook_log(on: bool) -> io::Result<()> {
     set_sentinel(&crate::paths::claudegate_home().join(HOOKLOG_SENTINEL), on)
 }
+
+/// The extension's shared roots list, `<claudegate home>/workspace-roots.json`.
+pub const ROOTS_FILE: &str = "workspace-roots.json";
+/// Re-reads before giving up when another writer keeps changing the roots file under us.
+const ROOTS_ATTEMPTS: usize = 5;
+
+#[cfg(test)]
+thread_local! {
+    static ROOTS_RACE: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam: runs between the roots writer's read and its rename, where the extension's own
+/// unlocked write can land.
+#[cfg(test)]
+pub(crate) fn set_roots_race_hook(h: Option<Box<dyn FnMut()>>) {
+    ROOTS_RACE.with(|r| *r.borrow_mut() = h);
+}
+
+fn roots_race_point() {
+    #[cfg(test)]
+    ROOTS_RACE.with(|r| {
+        if let Some(f) = r.borrow_mut().as_mut() {
+            f();
+        }
+    });
+}
+
+fn roots_io(e: impl std::fmt::Display) -> RootsError {
+    RootsError::Io(format!("Couldn't update {ROOTS_FILE}: {e}"))
+}
+
+/// The file's bytes, `None` when it does not exist.
+fn read_roots_raw(target: &Path) -> Result<Option<String>, RootsError> {
+    match fs::read_to_string(target) {
+        Ok(t) => Ok(Some(t)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(roots_io(e)),
+    }
+}
+
+/// Every entry, verbatim and in order. Missing means `[]`; anything but a JSON array is refused,
+/// so a file we cannot read is never overwritten.
+fn parse_roots_raw(raw: Option<&str>) -> Result<Vec<serde_json::Value>, RootsError> {
+    let Some(raw) = raw else { return Ok(Vec::new()) };
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(serde_json::Value::Array(a)) => Ok(a),
+        Ok(_) => Err(roots_io("it is not a JSON list; fix or delete it, then try again")),
+        Err(e) => Err(roots_io(format!("it is not valid JSON ({e}); fix or delete it, then try again"))),
+    }
+}
+
+fn same_root(v: &serde_json::Value, root: &Path) -> bool {
+    v.as_str().is_some_and(|s| crate::paths::resolve_root(Path::new(s)) == root)
+}
+
+/// Read, edit, write: re-reads immediately before the rename and starts over if the file changed
+/// since the read (the extension writes it without a lock), so its entry and ours both survive.
+/// `edit` returns false when there is nothing to change; then nothing is written. The target is
+/// always exactly `<home>/workspace-roots.json`, written atomically as 2-space pretty JSON (the
+/// extension's `JSON.stringify(_, null, 2)`).
+fn update_roots(home: &Path, edit: impl Fn(&mut Vec<serde_json::Value>) -> bool) -> Result<bool, RootsError> {
+    if home.as_os_str().is_empty() || !home.is_absolute() {
+        return Err(roots_io("the ClaudeGate folder is not an absolute path"));
+    }
+    let target = home.join(ROOTS_FILE);
+    for _ in 0..ROOTS_ATTEMPTS {
+        let raw = read_roots_raw(&target)?;
+        let mut list = parse_roots_raw(raw.as_deref())?;
+        if !edit(&mut list) {
+            return Ok(false);
+        }
+        let text = serde_json::to_string_pretty(&serde_json::Value::Array(list)).map_err(roots_io)?;
+        roots_race_point();
+        if read_roots_raw(&target)? != raw {
+            continue;
+        }
+        atomic_write(&target, &text, true).map_err(roots_io)?;
+        return Ok(true);
+    }
+    Err(roots_io("another program kept changing it; try again"))
+}
+
+/// Appends each of `roots` (resolved) that is not already listed. Every other entry is kept,
+/// unchanged and in order, including roots that no longer exist: pruning those is the
+/// extension's job. Returns whether the file was written.
+pub(crate) fn roots_append(home: &Path, roots: &[PathBuf]) -> Result<bool, RootsError> {
+    let roots: Vec<PathBuf> = roots.iter().map(|r| crate::paths::resolve_root(r)).collect();
+    update_roots(home, |list| {
+        let mut changed = false;
+        for r in &roots {
+            if !list.iter().any(|v| same_root(v, r)) {
+                list.push(serde_json::Value::String(r.to_string_lossy().into_owned()));
+                changed = true;
+            }
+        }
+        changed
+    })
+}
+
+/// Appends one root; see `roots_append`.
+pub(crate) fn roots_add(home: &Path, root: &Path) -> Result<(), RootsError> {
+    roots_append(home, &[root.to_path_buf()]).map(|_| ())
+}
+
+/// Removes `root` (every entry that resolves to it) and nothing else. A root that is not listed
+/// writes nothing. Callers check the app added it first.
+pub(crate) fn roots_remove(home: &Path, root: &Path) -> Result<(), RootsError> {
+    let root = crate::paths::resolve_root(root);
+    update_roots(home, |list| {
+        let before = list.len();
+        list.retain(|v| !same_root(v, &root));
+        list.len() != before
+    })
+    .map(|_| ())
+}
+
+#[path = "../tests/unit/roots_write.rs"]
+#[cfg(test)]
+mod roots_write_tests;
 
 #[path = "../tests/unit/store.rs"]
 #[cfg(test)]
