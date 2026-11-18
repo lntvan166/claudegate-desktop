@@ -101,10 +101,11 @@ fn exclude_order() {
     let mut src = e.sources();
     src.vscode_user = Some(fixture("vscode-user.jsonc"));
 
-    // settings file map, only true keys
+    // settings file map merges over the defaults
     let r = effective(&AppSettings::default(), Some(&root), &src);
     assert_eq!(r.exclude.source, Source::VsCode);
-    assert_eq!(r.exclude.value, vec!["**/*.log".to_string()]);
+    assert!(r.exclude.value.contains(&"**/*.log".to_string()));
+    assert!(r.exclude.value.contains(&"**/go.sum".to_string()));
 
     // excludes.json[root] beats settings files
     let key = claudegate_core::paths::resolve_root(&root).to_string_lossy().into_owned();
@@ -133,7 +134,7 @@ fn hook_log_reads_sentinel() {
     fs::write(e.p("hooklog.enabled"), "").unwrap();
     let r = effective(&AppSettings::default(), None, &e.sources());
     assert_eq!(r.hook_log.value, true);
-    assert_ne!(r.hook_log.source, Source::Default);
+    assert_eq!(r.hook_log.source, Source::App);
 }
 
 #[test]
@@ -183,4 +184,54 @@ fn jsonc_cases() {
     assert!(parse_jsonc("{ nope").is_none());
     assert!(parse_jsonc("{\"a\":1 /* unterminated").is_none());
     assert!(parse_jsonc("").is_none());
+}
+
+#[test]
+fn object_settings_merge_over_defaults() {
+    let e = Env::new();
+    let root = e.p("proj");
+    fs::create_dir_all(root.join(".vscode")).unwrap();
+    let mut src = e.sources();
+    src.vscode_user = Some(e.p("u.json"));
+
+    fs::write(e.p("u.json"), r#"{"claudegate.exclude":{"**/x":true},"claudegate.protected":{"**/secret":true}}"#).unwrap();
+    let r = effective(&AppSettings::default(), Some(&root), &src);
+    assert_eq!(r.exclude.value.len(), DEFAULT_EXCLUDES.len() + 1);
+    assert!(r.exclude.value.contains(&"**/x".to_string()));
+    assert_eq!(r.exclude.source, Source::VsCode);
+    assert_eq!(r.protected.value.len(), DEFAULT_PROTECTED.len() + 1);
+    assert!(r.protected.value.contains(&"**/.env".to_string()));
+
+    // false removes only that key
+    fs::write(e.p("u.json"), r#"{"claudegate.exclude":{"**/go.sum":false}}"#).unwrap();
+    let r = effective(&AppSettings::default(), Some(&root), &src);
+    assert_eq!(r.exclude.value.len(), DEFAULT_EXCLUDES.len() - 1);
+    assert!(!r.exclude.value.contains(&"**/go.sum".to_string()));
+
+    // workspace overrides a user-layer false, and is the reported source
+    fs::write(root.join(".vscode/settings.json"), r#"{"claudegate.exclude":{"**/go.sum":true}}"#).unwrap();
+    let r = effective(&AppSettings::default(), Some(&root), &src);
+    assert!(r.exclude.value.contains(&"**/go.sum".to_string()));
+    assert_eq!(r.exclude.source, Source::Workspace);
+
+    // app value replaces wholesale
+    let r = effective(&app_with("protected", json!(["**/only"])), Some(&root), &src);
+    assert_eq!((r.protected.value, r.protected.source), (vec!["**/only".to_string()], Source::App));
+}
+
+#[test]
+fn non_string_elements_are_dropped_from_excludes_json() {
+    let e = Env::new();
+    let root = e.p("proj");
+    let key = claudegate_core::paths::resolve_root(&root).to_string_lossy().into_owned();
+    fs::write(e.p("excludes.json"), json!({ key: ["**/a", 5, null, "**/b"] }).to_string()).unwrap();
+    let r = effective(&AppSettings::default(), Some(&root), &e.sources());
+    assert_eq!(r.exclude.value, vec!["**/a".to_string(), "**/b".to_string()]);
+}
+
+#[test]
+fn jsonc_more_edges() {
+    assert!(parse_jsonc("// only a comment\n/* and another */").is_none());
+    assert!(parse_jsonc(r#"{"a":1} /"#).is_none());
+    assert_eq!(parse_jsonc(r#"{"a":"c:\\","b":"//x"}"#).unwrap(), json!({"a":"c:\\","b":"//x"}));
 }

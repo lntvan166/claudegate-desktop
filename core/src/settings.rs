@@ -104,7 +104,8 @@ fn read_object(path: &Path) -> Option<serde_json::Map<String, Value>> {
     }
 }
 
-/// `{glob: bool}` -> globs mapped to `true` (alphabetical: serde_json's map is ordered by key).
+/// `{glob: bool}` -> globs mapped to `true`. Globs come back sorted: serde_json's map is a
+/// BTreeMap here, and glob order never affects matching.
 fn globs_from_map(v: &Value) -> Option<Vec<String>> {
     let m = v.as_object()?;
     Some(m.iter().filter(|(_, v)| v.as_bool() == Some(true)).map(|(k, _)| k.clone()).collect())
@@ -130,6 +131,25 @@ struct Layers {
 }
 
 impl Layers {
+    /// Object-valued settings merge key by key like VS Code: defaults, then Cursor user, VS Code
+    /// user, workspace (later wins); keep keys whose final value is `true`. The source is the
+    /// highest layer that contributed any key, else Default.
+    fn merged_globs(&self, key: &str, defaults: &[&str]) -> Resolved<Vec<String>> {
+        let mut map: std::collections::BTreeMap<String, bool> = defaults.iter().map(|d| (d.to_string(), true)).collect();
+        let mut source = Source::Default;
+        for (layer, src) in [(&self.cursor, Source::Cursor), (&self.vscode, Source::VsCode), (&self.workspace, Source::Workspace)] {
+            if let Some(m) = layer.as_ref().and_then(|m| m.get(key)).and_then(Value::as_object) {
+                for (k, v) in m {
+                    if let Some(b) = v.as_bool() {
+                        map.insert(k.clone(), b);
+                        source = src;
+                    }
+                }
+            }
+        }
+        Resolved { value: map.into_iter().filter(|(_, v)| *v).map(|(k, _)| k).collect(), source }
+    }
+
     /// app -> workspace -> VS Code -> Cursor -> default, skipping values of the wrong type.
     fn resolve<T>(&self, app: &AppSettings, key: &str, parse: impl Fn(&Value) -> Option<T>, default: T) -> Resolved<T> {
         if let Some(v) = app.settings.get(key).and_then(&parse) {
@@ -155,16 +175,17 @@ pub fn effective(app: &AppSettings, root: Option<&Path>, sources: &ExtSources) -
         vscode: sources.vscode_user.as_deref().and_then(read_object),
         cursor: sources.cursor_user.as_deref().and_then(read_object),
     };
-    let strs = |d: &[&str]| d.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
-    let exclude = resolve_exclude(app, root, sources, &layers).unwrap_or_else(|| Resolved {
-        value: strs(DEFAULT_EXCLUDES),
-        source: Source::Default,
-    });
-    let protected = layers.resolve(app, "protected", |v| globs_from_map(v).or_else(|| strings(v)), strs(DEFAULT_PROTECTED));
+    let exclude = resolve_exclude(app, root, sources, &layers);
+    let protected = match app.settings.get("protected").and_then(|v| globs_from_map(v).or_else(|| strings(v))) {
+        Some(value) => Resolved { value, source: Source::App },
+        None => layers.merged_globs("claudegate.protected", DEFAULT_PROTECTED),
+    };
 
+    // The sentinel is shared with the extension, so it is neither "from VS Code" nor a default:
+    // the app owns toggling it, and its presence is the value.
     let hook_log = if sources.hooklog_sentinel.exists() {
-        Resolved { value: true, source: Source::VsCode }
+        Resolved { value: true, source: Source::App }
     } else {
         Resolved { value: DEFAULT_HOOK_LOG, source: Source::Default }
     };
@@ -181,31 +202,25 @@ pub fn effective(app: &AppSettings, root: Option<&Path>, sources: &ExtSources) -
 }
 
 fn strings(v: &Value) -> Option<Vec<String>> {
-    v.as_array()?.iter().map(|x| x.as_str().map(String::from)).collect()
+    // Non-string elements are dropped, not fatal, like the extension.
+    Some(v.as_array()?.iter().filter_map(|x| x.as_str().map(String::from)).collect())
 }
 
-/// App project exclude, else `excludes.json[root]`, else the settings files' `claudegate.exclude`.
-fn resolve_exclude(app: &AppSettings, root: Option<&Path>, sources: &ExtSources, layers: &Layers) -> Option<Resolved<Vec<String>>> {
+/// App project exclude (full replacement), else `excludes.json[root]`, else the merged settings
+/// layers. The `excludes.json` hit wins over the settings files because the extension writes its
+/// already-merged effective list there, so it is the more authoritative copy for that root.
+fn resolve_exclude(app: &AppSettings, root: Option<&Path>, sources: &ExtSources, layers: &Layers) -> Resolved<Vec<String>> {
     if let Some(root) = root {
         let key = resolve_root(root).to_string_lossy().into_owned();
         let direct = root.to_string_lossy().into_owned();
         if let Some(g) = app.projects.get(&key).or_else(|| app.projects.get(&direct)).and_then(|p| p.exclude.clone()) {
-            return Some(Resolved { value: g, source: Source::App });
+            return Resolved { value: g, source: Source::App };
         }
         if let Some(Value::Object(m)) = fs::read_to_string(&sources.excludes_json).ok().and_then(|t| serde_json::from_str(&t).ok()) {
             if let Some(g) = m.get(&key).and_then(strings) {
-                return Some(Resolved { value: g, source: Source::VsCode });
+                return Resolved { value: g, source: Source::VsCode };
             }
         }
     }
-    for (layer, source) in [
-        (&layers.workspace, Source::Workspace),
-        (&layers.vscode, Source::VsCode),
-        (&layers.cursor, Source::Cursor),
-    ] {
-        if let Some(g) = layer.as_ref().and_then(|m| m.get("claudegate.exclude")).and_then(globs_from_map) {
-            return Some(Resolved { value: g, source });
-        }
-    }
-    None
+    layers.merged_globs("claudegate.exclude", DEFAULT_EXCLUDES)
 }
