@@ -252,3 +252,48 @@ construction because it has no write path.
   SQL, HTML/CSS).
 - Watcher library and coalescing interval.
 - Visual design within the layout above; show the maintainer a mockup before polishing.
+
+---
+
+## Addendum (2026-11-18): standalone app
+
+**Maintainer's decision.** The app and the extension each run on their own. When the app has no setting of its own, it may fall back to the extension's settings. The extension stays fully self-contained and is not changed.
+
+### Settings: precedence and storage
+- Each setting resolves in this order: the app's own value in `~/.claudegate-desktop/config.json`, then the extension's value, then the extension's built-in default. Defaults are copied from extension tag v1.16.1 and cross-checked by xcheck.
+- The extension's values are read-only. The app reads them from:
+  - `claudegate.*` in the VS Code and Cursor user `settings.json` (JSONC);
+  - the project's `.vscode/settings.json` (JSONC), for per-project settings;
+  - `~/.claudegate/excludes.json[root]`, for exclude.
+- The Settings screen (⚙ in the header) shows where each value comes from: "app", "from VS Code", or "default". "Override" copies the value into the app's config, and "Reset" drops the override.
+- Settings carried over:
+  - `exclude` (per project)
+  - `protected`
+  - `autoAdvance`
+  - `groupBySession`
+  - `pendingAge.minDays`
+  - `worktrees.maxAttached`
+  - `hookLog`: toggles `~/.claudegate/hooklog.enabled`, the same sentinel the extension uses
+  - the existing editor, read-only and hidden-projects settings
+- Not carried over: `fileWatcher`, `history`, `autoRevealPending`.
+
+### Projects (milestone 4, as designed above)
+- "Add project" appends a root to `workspace-roots.json`, under the same nesting guard and append-only rules as rule 6.
+- The app records the roots it added. If the extension's write drops one of them, the app re-adds it.
+
+### Exclude for capture
+- For a root the app added, the app writes its effective exclude globs to `excludes.json[root]`, merging and touching only that key, so the hook honours them.
+- If `excludes.json[root]` later differs from what the app last wrote, VS Code has taken over that root. The app stops writing that key and labels the root "managed by VS Code".
+- For a root that came from VS Code, the app's extra patterns only hide entries in the app.
+
+### Upkeep (rule 5)
+For roots the app added only, the app runs the ported upkeep: it prunes no-op entries once they have settled and heals oversized sessions. It goes through the store's write protocol.
+
+### Hook setup (formerly "Later")
+- The app bundles `hook.py` and `hook.sh` from the pinned extension tag.
+- **If a ClaudeGate hook is already registered** in `~/.claude/settings.json` (a PreToolUse entry pointing at `~/.claudegate/hook.sh`), the app changes nothing and shows "Capture: set up by VS Code".
+- **If none is registered,** "Set up capture" asks for confirmation, then:
+  1. installs both files;
+  2. patches `~/.claude/settings.json` using the extension's guarded protocol: timestamped backup, write through realpath, verify after the write, roll back on failure;
+  3. sets the matcher to `^(Write|Edit|MultiEdit|Bash)$`.
+- The app updates `hook.py` only when the app installed it, tracked by a marker `~/.claudegate/.installed-by-desktop`, and only when its bundled copy is newer. Whenever the extension is installed, the extension's own sync takes over, and the app then leaves the hook alone.
