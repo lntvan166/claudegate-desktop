@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { popoverLeft } from "../lib/popover";
   import { onMount } from "svelte";
   import { checkUpdate, installUpdate } from "../lib/api";
   import { writeClipboard } from "../lib/clipboard";
@@ -13,6 +14,17 @@
 
   let wrap: HTMLDivElement | undefined = $state();
   let chip: HTMLButtonElement | undefined = $state();
+  /** Set while open: the popover's left edge, so it stays inside a narrow window. */
+  let popLeft: number | null = $state(null);
+  const POP_WIDTH = 380;
+
+  function place() {
+    if (!chip || !wrap) return;
+    popLeft = popoverLeft(chip.getBoundingClientRect(), wrap.getBoundingClientRect().left, POP_WIDTH, window.innerWidth);
+  }
+  $effect.pre(() => {
+    if (open) place();
+  });
 
   async function check() {
     try {
@@ -71,7 +83,7 @@
   });
 </script>
 
-<svelte:window onpointerdown={outside} />
+<svelte:window onpointerdown={outside} onresize={() => open && place()} />
 
 {#if update}
   <div class="update" bind:this={wrap}>
@@ -85,12 +97,12 @@
       onclick={() => (open ? close() : ((open = true), (error = null)))}
     >
       <span class="dot" aria-hidden="true"></span>
-      {chipLabel(update)}
+      <span class="chip-text">{chipLabel(update)}</span>
     </button>
 
     {#if open}
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-      <div class="pop" role="dialog" aria-label="Update" data-confirm tabindex="-1" {onkeydown}>
+      <div class="pop" style:left={popLeft === null ? undefined : `${popLeft}px`} style:right={popLeft === null ? undefined : "auto"} role="dialog" aria-label="Update" data-confirm tabindex="-1" {onkeydown}>
         <p class="title">ClaudeGate {update.version}</p>
         <p class="body">{summary(update)}</p>
         {#if update.command}
@@ -120,10 +132,17 @@
 <style>
   .update {
     position: relative;
+    min-width: 0;
+  }
+  .chip-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .chip {
     display: inline-flex;
     flex: none;
+    max-width: 100%;
     align-items: center;
     gap: 6px;
     white-space: nowrap;
@@ -148,7 +167,7 @@
     z-index: 45;
     top: calc(100% + 6px);
     right: 0;
-    width: 380px;
+    width: 380px; /* POP_WIDTH */
     max-width: calc(100vw - 32px);
     padding: 14px 16px;
     border: 1px solid var(--border);

@@ -1449,6 +1449,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 16px;
+    min-width: 0;
     padding: 0 20px;
   }
 
@@ -1456,6 +1458,7 @@
     display: flex;
     align-items: center;
     gap: 9px;
+    flex: none;
   }
   .mark {
     display: block;
@@ -1471,13 +1474,29 @@
     display: flex;
     align-items: center;
     gap: 18px;
+    min-width: 0;
     font-size: var(--fs-small);
+  }
+  /* Only the two status chips may give way (their labels cut, their popovers say it all). */
+  .status > :global(*) {
+    flex: none;
+  }
+  .status > :global(.capture),
+  .status > :global(.update) {
+    flex: 0 1 auto;
+    min-width: 44px;
   }
   .hint {
     display: inline-flex;
     align-items: center;
     gap: 5px;
+    white-space: nowrap;
     color: var(--muted);
+  }
+  @media (max-width: 960px) {
+    .hint {
+      display: none;
+    }
   }
   /* The read-only switch: a quiet chip, filled when on. */
   .chip {

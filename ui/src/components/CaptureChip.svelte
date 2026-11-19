@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { popoverLeft } from "../lib/popover";
   import { onMount, tick } from "svelte";
   import { captureStatus, setUpCapture } from "../lib/api";
   import {
@@ -29,6 +30,17 @@
 
   let wrap: HTMLDivElement | undefined = $state();
   let chip: HTMLButtonElement | undefined = $state();
+  /** Set while open: the popover's left edge, so it stays inside a narrow window. */
+  let popLeft: number | null = $state(null);
+  const POP_WIDTH = 340;
+
+  function place() {
+    if (!chip || !wrap) return;
+    popLeft = popoverLeft(chip.getBoundingClientRect(), wrap.getBoundingClientRect().left, POP_WIDTH, window.innerWidth);
+  }
+  $effect.pre(() => {
+    if (open) place();
+  });
   let pop: HTMLDivElement | undefined = $state();
   let cancelBtn: HTMLButtonElement | undefined = $state();
 
@@ -132,7 +144,7 @@
   });
 </script>
 
-<svelte:window onpointerdown={outside} />
+<svelte:window onpointerdown={outside} onresize={() => open && place()} />
 
 <div class="capture" bind:this={wrap}>
   <button
@@ -145,12 +157,12 @@
     onclick={toggle}
   >
     <span class="dot {tone}" aria-hidden="true"></span>
-    {chipLabel(view, failed, readOnly)}
+    <span class="chip-text">{chipLabel(view, failed, readOnly)}</span>
   </button>
 
   {#if open}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div class="pop" role="dialog" aria-label="Capture" data-confirm tabindex="-1" bind:this={pop} {onkeydown}>
+    <div class="pop" style:left={popLeft === null ? undefined : `${popLeft}px`} style:right={popLeft === null ? undefined : "auto"} role="dialog" aria-label="Capture" data-confirm tabindex="-1" bind:this={pop} {onkeydown}>
       {#if confirming}
         <p class="body strong">{CONFIRM_TEXT}</p>
         <div class="buttons">
@@ -205,10 +217,19 @@
 <style>
   .capture {
     position: relative;
+    min-width: 0;
+  }
+  /* A narrow window cuts the label before it pushes the header's other controls off the edge;
+     the popover says it in full. */
+  .chip-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .chip {
     display: inline-flex;
     flex: none;
+    max-width: 100%;
     align-items: center;
     gap: 6px;
     white-space: nowrap;
@@ -244,7 +265,7 @@
     z-index: 45;
     top: calc(100% + 6px);
     right: 0;
-    width: 340px;
+    width: 340px; /* POP_WIDTH */
     max-width: calc(100vw - 32px);
     padding: 14px 16px;
     border: 1px solid var(--border);

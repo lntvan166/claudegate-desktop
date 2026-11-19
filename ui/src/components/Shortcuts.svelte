@@ -124,7 +124,7 @@
     }
   }
   .sheet {
-    width: min(760px, 100%);
+    width: min(880px, 100%);
     max-height: 100%;
     overflow: auto;
     padding: 18px 20px 20px;
@@ -170,16 +170,19 @@
     font-weight: 600;
     color: var(--muted);
   }
+  /* One key column per section, as wide as its longest chord ("Ctrl+Alt+Shift+C"), so a
+     chord never runs into its description. */
   dl {
     display: grid;
-    gap: 7px;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 7px 10px;
     margin: 0;
     font-size: var(--fs-small);
   }
   dl div {
     display: grid;
-    grid-template-columns: 84px 1fr;
-    gap: 10px;
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
     align-items: baseline;
   }
   dt {

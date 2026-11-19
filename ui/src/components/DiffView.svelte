@@ -683,10 +683,10 @@
     background: var(--active);
   }
 
+  /* Side by side or inline: the same segmented control as the file list's tree/list toggle. */
   .view {
     display: flex;
     align-items: center;
-    gap: 2px;
     flex: none;
   }
   .view button {
@@ -694,11 +694,18 @@
     place-items: center;
     width: 28px;
     height: 28px;
-    border-radius: var(--radius-control);
+    border: 1px solid var(--control-border);
     color: var(--faint);
     transition:
       color 120ms var(--ease),
       background 120ms var(--ease);
+  }
+  .view button:first-child {
+    border-radius: var(--radius-control) 0 0 var(--radius-control);
+  }
+  .view button:last-child {
+    margin-left: -1px;
+    border-radius: 0 var(--radius-control) var(--radius-control) 0;
   }
   .view button:hover {
     color: var(--text);
