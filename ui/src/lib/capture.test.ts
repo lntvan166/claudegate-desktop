@@ -142,8 +142,18 @@ describe("setupResult", () => {
     created: ["/h/.claudegate/hook.py", "/h/.claudegate/hook.sh"],
     version: "v1.16.1",
     note: null,
+    adopted: false,
     capture: v("app", { version: "v1.16.1" }),
   };
+  const ADOPTED = "The hook.py left by an earlier install was reused.";
+  it("says when a leftover hook.py was reused", () => {
+    expect(setupResult(ok).text).not.toContain(ADOPTED);
+    const r = setupResult({ ...ok, adopted: true });
+    expect(r.tone).toBe("success");
+    expect(r.text.endsWith(` ${ADOPTED}`)).toBe(true);
+    expect(setupResult({ ...ok, adopted: true, note: "a note" }).text.endsWith(` ${ADOPTED}`)).toBe(true);
+    expect(setupResult({ ...ok, adopted: true, capture: v("not-set-up") }).text.endsWith(` ${ADOPTED}`)).toBe(true);
+  });
   it("is a success naming the backup", () => {
     const r = setupResult(ok);
     expect(r.tone).toBe("success");

@@ -591,6 +591,7 @@ export const mockApi: Api = {
       created: ["/home/dev/.claudegate/hook.py", "/home/dev/.claudegate/hook.sh"],
       version: "v1.16.1",
       note: new URLSearchParams(location.search).get("captureNote"),
+      adopted: false,
       capture: { ...capture },
     };
   },

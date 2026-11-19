@@ -22,6 +22,8 @@ export type InstallView = {
   version: string;
   /** Setup worked, but something needs attention: shown as a warning. */
   note: string | null;
+  /** hook.py was a leftover (the extension's, or an earlier setup's) and was reused. */
+  adopted: boolean;
   /** The status read right after setup. */
   capture: CaptureView;
 };
@@ -110,7 +112,14 @@ export function pythonWarning(v: CaptureView | null): string | null {
 
 export type SetupResult = { tone: "success" | "warning"; text: string };
 
+const ADOPTED = "The hook.py left by an earlier install was reused.";
+
 export function setupResult(r: InstallView, projectCount: number | null = null): SetupResult {
+  const res = baseSetupResult(r, projectCount);
+  return r.adopted ? { ...res, text: `${res.text} ${ADOPTED}` } : res;
+}
+
+function baseSetupResult(r: InstallView, projectCount: number | null): SetupResult {
   const backup = r.backup ? `Your previous settings are in ${r.backup}.` : "There was no settings.json before setup.";
   // The note already names the backup (core `concurrent_note`), so it is not repeated.
   if (r.note) return { tone: "warning", text: `Capture is set up, with a warning: ${r.note}` };

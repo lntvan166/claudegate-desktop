@@ -714,8 +714,9 @@ pub(crate) fn excludes_remove(home: &Path, root: &Path) -> Result<(), StoreError
 //   copy byte for byte.
 //
 // Any failure after the first write rolls back what this call wrote and nothing else: a file is
-// removed only if this call created it and it still holds the bytes we wrote; a replaced marker
-// gets its old bytes back; a folder is removed only if this call created it and it is empty.
+// removed only if this call created it and it still holds the bytes we wrote; a replaced file (the
+// marker, or an adopted hook.py) gets its old bytes back while it still holds ours; a folder is
+// removed only if this call created it and it is empty.
 
 use crate::capture::{
     backups_to_prune, capture_status, compute_settings_patch, verify_settings_content, CaptureStatus, InstallError,
@@ -866,8 +867,9 @@ fn create_file_exclusive(path: &Path, content: &[u8], mode: Option<u32>) -> io::
 struct Undo {
     /// Files this call created, with the bytes it wrote.
     created: Vec<(PathBuf, Vec<u8>)>,
-    /// Files this call replaced, with their old bytes.
-    replaced: Vec<(PathBuf, Vec<u8>)>,
+    /// Files this call replaced: the path, its old bytes, and the bytes we wrote. The old bytes go
+    /// back only while the file still holds ours.
+    replaced: Vec<(PathBuf, Vec<u8>, Vec<u8>)>,
     /// Folders this call created (removed only while empty).
     dirs: Vec<PathBuf>,
     /// Our settings write, once it happened, while it is still ours to undo.
@@ -988,9 +990,20 @@ impl Undo {
                         }
                     }
                 }
-                for (p, old) in self.replaced {
-                    if let Err(e) = atomic_write_bytes(&p, &old, true) {
-                        problems.push(format!("could not restore {}: {e}", p.display()));
+                for (p, old, ours) in self.replaced {
+                    // A file that no longer holds our bytes (or is no longer a plain file) is
+                    // someone else's write since: left alone, like a created file.
+                    let still_ours = || match (fs::symlink_metadata(&p), fs::read(&p)) {
+                        (Ok(m), Ok(now)) if m.file_type().is_file() && now == ours => Ok(()),
+                        _ => Err(io::Error::other("changed since")),
+                    };
+                    if still_ours().is_err() {
+                        continue;
+                    }
+                    if let Err(e) = atomic_write_checked(&p, &old, true, still_ours) {
+                        if fs::read(&p).is_ok_and(|now| now == ours) {
+                            problems.push(format!("could not restore {}: {e}", p.display()));
+                        }
                     }
                 }
                 for d in self.dirs.into_iter().rev() {
@@ -1061,8 +1074,10 @@ fn create_dir_tracked(dir: &Path, undo: &mut Undo) -> io::Result<()> {
 /// Sets capture up under `home` (the user's HOME, injectable for tests). Order:
 /// 1. refuse unless read-write, the bundled hook is stamped, and `capture_status` is exactly
 ///    `NotSetUp` (python3 present, settings strict JSON object or absent, no claudegate entry);
-///    refuse an existing hook.py or a hook.sh that is not the extension's wrapper;
-/// 2. create hook.py and hook.sh (0755) without replacing anything, then the marker;
+///    refuse an existing hook.py unless it is a plain file `adoptable_hook` accepts, and a
+///    hook.sh that is not the extension's wrapper;
+/// 2. adopt that hook.py (replace it with the bundled hook, only while it holds the bytes read),
+///    or create hook.py; create hook.sh (0755) without replacing anything; then the marker;
 /// 3. back up settings.json (refusing if it changed since it was read);
 /// 4. re-compare with what was read, then write `compute_settings_patch`'s content atomically
 ///    to the realpath;
@@ -1133,9 +1148,18 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
         return Err(InstallError::AlreadySetUp(CaptureStatus::NotSetUp));
     }
     let leftover = |marker_there: bool| if marker_there { InstallError::HookFilesFromApp } else { InstallError::HookFilesExist };
-    if fs::symlink_metadata(&py).is_ok() {
-        return Err(leftover(fs::symlink_metadata(&marker).is_ok()));
-    }
+    // An existing hook.py is refused unless it is a plain file holding exactly a form setup may
+    // adopt (`adoptable_hook`): the bundled hook, or the extension's copy of it (most often left
+    // behind when the extension was uninstalled). Those bytes are what the replace compares
+    // against right before it writes.
+    let adopt: Option<Vec<u8>> = match fs::symlink_metadata(&py) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Ok(m) if m.file_type().is_file() => match fs::read(&py) {
+            Ok(b) if crate::capture::adoptable_hook(&b, bundled_hook) => Some(b),
+            _ => return Err(leftover(fs::symlink_metadata(&marker).is_ok())),
+        },
+        _ => return Err(leftover(fs::symlink_metadata(&marker).is_ok())),
+    };
     let write_sh = match fs::read(&sh) {
         Ok(b) if b == HOOK_SH_CONTENT.as_bytes() => false,
         Ok(_) => return Err(InstallError::ForeignWrapper),
@@ -1157,8 +1181,33 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
     if let Err(e) = install_fault("before_hook_py") {
         return Err(failed(undo, e));
     }
+    if let Some(old) = &adopt {
+        // Replace the leftover, but only while it still holds the bytes we decided on: the compare
+        // runs after the temp file is synced, right before the rename. Any change since is
+        // someone else's write, refused like any other existing hook.py.
+        let changed = std::cell::Cell::new(false);
+        let unchanged = || match (fs::symlink_metadata(&py), fs::read(&py)) {
+            (Ok(m), Ok(now)) if m.file_type().is_file() && &now == old => Ok(()),
+            _ => {
+                changed.set(true);
+                Err(io::Error::other("hook.py changed while setting up"))
+            }
+        };
+        let res = guard_hook_file(&cg, &py).and_then(|()| atomic_write_checked(&py, bundled_hook.as_bytes(), true, unchanged));
+        match res {
+            Ok(()) => undo.replaced.push((py.clone(), old.clone(), bundled_hook.as_bytes().to_vec())),
+            Err(_) if changed.get() => {
+                let marker_there = fs::symlink_metadata(&marker).is_ok();
+                return Err(match undo.run() {
+                    None => leftover(marker_there),
+                    Some(r) => InstallError::Failed { reason: leftover(marker_there).to_string(), rollback: Some(r) },
+                });
+            }
+            Err(e) => return Err(failed(undo, format!("could not write {}: {e}", py.display()))),
+        }
+    }
     for (path, content, mode, wanted) in
-        [(&py, bundled_hook.as_bytes(), None, true), (&sh, HOOK_SH_CONTENT.as_bytes(), Some(0o755), write_sh)]
+        [(&py, bundled_hook.as_bytes(), None, adopt.is_none()), (&sh, HOOK_SH_CONTENT.as_bytes(), Some(0o755), write_sh)]
     {
         if !wanted {
             continue;
@@ -1184,7 +1233,7 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
         match res {
             Ok(()) => match old_marker {
                 None => undo.created.push((marker.clone(), version.as_bytes().to_vec())),
-                Some(old) => undo.replaced.push((marker.clone(), old)),
+                Some(old) => undo.replaced.push((marker.clone(), old, version.as_bytes().to_vec())),
             },
             Err(e) => return Err(failed(undo, format!("could not write {}: {e}", marker.display()))),
         }
@@ -1256,7 +1305,15 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
     //    restore over it. Setup worked if that write kept our entry; otherwise it did not, and the
     //    hook files this call created go.
     let created: Vec<PathBuf> = undo.created.iter().map(|(p, _)| p.clone()).filter(|p| p != &marker).collect();
-    let report = |note| InstallReport { settings: target.clone(), backup: backup.clone(), created: created.clone(), version: version.to_owned(), note };
+    let adopted = adopt.is_some();
+    let report = |note| InstallReport {
+        settings: target.clone(),
+        backup: backup.clone(),
+        created: created.clone(),
+        version: version.to_owned(),
+        note,
+        adopted,
+    };
     let after = match fs::read(&target) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {

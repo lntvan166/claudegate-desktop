@@ -50,6 +50,8 @@ pub struct InstallView {
     pub version: String,
     /// Setup worked, but something needs the user's attention: show it as a warning.
     pub note: Option<String>,
+    /// hook.py was a leftover (the extension's, or an earlier setup's) and was reused.
+    pub adopted: bool,
     pub capture: CaptureView,
 }
 
@@ -218,6 +220,7 @@ pub fn install_view(r: &InstallReport, capture: CaptureView) -> InstallView {
         created: r.created.iter().map(|p| show(p)).collect(),
         version: r.version.clone(),
         note: r.note.clone(),
+        adopted: r.adopted,
         capture,
     }
 }

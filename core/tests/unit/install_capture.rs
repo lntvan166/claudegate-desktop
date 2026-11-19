@@ -419,3 +419,82 @@ fn guards_refuse_paths_outside_their_files() {
         assert!(guard_settings_target(&h.home, &h.settings()).is_err(), "never the link itself");
     }
 }
+
+/// `HOOK` without its stamp line: the extension's hook.py at the pinned tag.
+const UNSTAMPED: &str = "#!/usr/bin/env python3\nprint('hook')\n";
+
+#[test]
+fn a_failure_after_adopting_restores_the_leftover_hook_py() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    fs::create_dir_all(h.home.join(".claudegate")).unwrap();
+    fs::write(h.cg("hook.py"), UNSTAMPED).unwrap();
+    for stage in ["after_hooks", "before_write", "after_settings_write"] {
+        let err = install_with(&h, move |s| if s == stage { Err(io::Error::other("injected")) } else { Ok(()) }).unwrap_err();
+        assert!(matches!(err, InstallError::Failed { rollback: None, .. }), "{stage}: {err:?}");
+        assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), UNSTAMPED, "{stage}: the leftover is back, not deleted");
+        assert!(!h.cg("hook.sh").exists(), "{stage}");
+        assert!(!h.cg(".installed-by-desktop").exists(), "{stage}");
+        assert_eq!(fs::read_to_string(h.settings()).unwrap(), EXISTING, "{stage}");
+    }
+}
+
+#[test]
+fn an_adopted_hook_py_rewritten_before_rollback_is_left_alone() {
+    // Rollback restores the leftover only while hook.py still holds the bytes we wrote.
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    fs::create_dir_all(h.home.join(".claudegate")).unwrap();
+    fs::write(h.cg("hook.py"), UNSTAMPED).unwrap();
+    let py = h.cg("hook.py");
+    let err = install_with(&h, move |stage| {
+        if stage == "after_hooks" {
+            fs::write(&py, "the extension reinstalled").unwrap();
+            return Err(io::Error::other("injected"));
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(matches!(err, InstallError::Failed { .. }), "{err:?}");
+    assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), "the extension reinstalled");
+}
+
+#[test]
+fn a_leftover_that_changes_before_the_replace_is_refused() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    fs::create_dir_all(h.home.join(".claudegate")).unwrap();
+    fs::write(h.cg("hook.py"), UNSTAMPED).unwrap();
+    let py = h.cg("hook.py");
+    let err = install_with(&h, move |stage| {
+        if stage == "before_hook_py" {
+            fs::write(&py, "changed mid-install").unwrap();
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(matches!(err, InstallError::HookFilesExist), "{err:?}");
+    assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), "changed mid-install");
+    assert!(!h.cg("hook.sh").exists());
+    assert!(!h.cg(".installed-by-desktop").exists());
+    assert_eq!(fs::read_to_string(h.settings()).unwrap(), EXISTING);
+}
+
+#[test]
+fn a_hook_py_that_turns_into_the_bundled_one_mid_install_is_refused() {
+    // Byte-compare just before the write: any change refuses, even to an adoptable form.
+    let h = Home::new();
+    fs::create_dir_all(h.home.join(".claudegate")).unwrap();
+    fs::write(h.cg("hook.py"), UNSTAMPED).unwrap();
+    let py = h.cg("hook.py");
+    let err = install_with(&h, move |stage| {
+        if stage == "before_hook_py" {
+            fs::write(&py, HOOK).unwrap();
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(matches!(err, InstallError::HookFilesExist), "{err:?}");
+    assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), HOOK);
+    assert!(!h.settings().exists());
+}

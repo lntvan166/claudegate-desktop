@@ -6,7 +6,7 @@
 //! Every install runs against a temp HOME. Nothing here touches the real ~/.claude or ~/.claudegate.
 
 use claudegate_core::capture::{
-    backups_to_prune, bundled_hook_version, compute_settings_patch, set_up_capture, verify_settings_content,
+    adoptable_hook, backups_to_prune, bundled_hook_version, compute_settings_patch, set_up_capture, verify_settings_content,
     CaptureStatus, InstallError, HOOK_SH_CONTENT, PRE_TOOL_MATCHER, SETTINGS_BACKUP_RETENTION,
 };
 use serde_json::{json, Value};
@@ -419,10 +419,12 @@ fn existing_hook_py_is_refused_and_left_alone() {
 
 #[test]
 fn leftover_hook_files_from_this_app_get_their_own_message() {
+    // An older stamped hook is neither form setup adopts, so it is still refused.
+    const OLDER: &str = "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.15.0\nprint('hook')\n";
     let h = Home::new();
     fs::create_dir_all(h.home.join(".claudegate")).unwrap();
-    fs::write(h.cg("hook.py"), HOOK).unwrap();
-    fs::write(h.cg(".installed-by-desktop"), "v1.16.1").unwrap();
+    fs::write(h.cg("hook.py"), OLDER).unwrap();
+    fs::write(h.cg(".installed-by-desktop"), "v1.15.0").unwrap();
     let err = h.install().unwrap_err();
     assert!(matches!(err, InstallError::HookFilesFromApp), "{err:?}");
     assert_eq!(
@@ -430,8 +432,83 @@ fn leftover_hook_files_from_this_app_get_their_own_message() {
         "ClaudeGate's hook files from an earlier setup in this app already exist. \
          Remove ~/.claudegate/hook.py, hook.sh and .installed-by-desktop to set up again."
     );
-    assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), HOOK);
+    assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), OLDER);
     assert!(!h.settings().exists());
+}
+
+/// `HOOK` without its stamp line: the extension's hook.py at the pinned tag.
+const UNSTAMPED: &str = "#!/usr/bin/env python3\nprint('hook')\n";
+
+#[test]
+fn a_leftover_extension_hook_py_is_adopted() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    fs::create_dir_all(h.home.join(".claudegate")).unwrap();
+    fs::write(h.cg("hook.py"), UNSTAMPED).unwrap();
+
+    let report = h.install().unwrap();
+    assert!(report.adopted);
+    assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), HOOK, "replaced with the stamped bundled hook");
+    assert!(!report.created.contains(&h.cg("hook.py")), "{:?}", report.created);
+    assert!(report.created.contains(&h.cg("hook.sh")));
+    assert_eq!(fs::read_to_string(h.cg(".installed-by-desktop")).unwrap(), "v1.16.1");
+    let v: Value = serde_json::from_str(&fs::read_to_string(h.settings()).unwrap()).unwrap();
+    assert!(v["hooks"]["PreToolUse"].as_array().unwrap().contains(&our_entry(&h.cmd())));
+}
+
+#[test]
+fn the_apps_own_leftover_hook_py_is_adopted() {
+    let h = Home::new();
+    fs::create_dir_all(h.home.join(".claudegate")).unwrap();
+    fs::write(h.cg("hook.py"), HOOK).unwrap();
+    fs::write(h.cg("hook.sh"), HOOK_SH_CONTENT).unwrap();
+    fs::write(h.cg(".installed-by-desktop"), "v1.16.1").unwrap();
+
+    let report = h.install().unwrap();
+    assert!(report.adopted);
+    assert!(report.created.is_empty(), "{:?}", report.created);
+    assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), HOOK);
+    assert!(h.settings().exists());
+}
+
+#[test]
+fn a_hook_py_one_byte_off_is_refused_and_untouched() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    fs::create_dir_all(h.home.join(".claudegate")).unwrap();
+    let near = UNSTAMPED.replace("hook", "hooK");
+    fs::write(h.cg("hook.py"), &near).unwrap();
+
+    let err = h.install().unwrap_err();
+    assert!(matches!(err, InstallError::HookFilesExist), "{err:?}");
+    assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), near);
+    assert_eq!(fs::read_to_string(h.settings()).unwrap(), EXISTING);
+    assert!(!h.cg("hook.sh").exists());
+    assert!(!h.cg(".installed-by-desktop").exists());
+    assert!(h.backups().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_leftover_hook_py_is_not_adopted() {
+    let h = Home::new();
+    fs::create_dir_all(h.home.join(".claudegate")).unwrap();
+    let real = h.home.join("real-hook.py");
+    fs::write(&real, UNSTAMPED).unwrap();
+    std::os::unix::fs::symlink(&real, h.cg("hook.py")).unwrap();
+
+    let err = h.install().unwrap_err();
+    assert!(matches!(err, InstallError::HookFilesExist), "{err:?}");
+    assert_eq!(fs::read_to_string(&real).unwrap(), UNSTAMPED);
+    assert!(fs::symlink_metadata(h.cg("hook.py")).unwrap().file_type().is_symlink());
+}
+
+#[test]
+fn a_fresh_install_adopts_nothing() {
+    let h = Home::new();
+    let report = h.install().unwrap();
+    assert!(!report.adopted);
+    assert!(report.created.contains(&h.cg("hook.py")));
 }
 
 #[test]
@@ -453,4 +530,20 @@ fn identical_hook_sh_is_reused() {
     let report = h.install().unwrap();
     assert!(!report.created.contains(&h.cg("hook.sh")), "{:?}", report.created);
     assert!(report.created.contains(&h.cg("hook.py")));
+}
+
+#[test]
+fn the_real_bundled_hook_adopts_itself_and_its_unstamped_form_only() {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src-tauri/resources/hook.py");
+    let bundled = fs::read_to_string(p).unwrap();
+    let mut lines: Vec<&str> = bundled.split_inclusive('\n').collect();
+    assert!(lines[1].starts_with("# CLAUDEGATE_HOOK_VERSION="), "the stamp is line 2");
+    assert!(adoptable_hook(bundled.as_bytes(), &bundled));
+    lines.remove(1);
+    let unstamped = lines.concat();
+    assert!(adoptable_hook(unstamped.as_bytes(), &bundled));
+    assert!(!adoptable_hook(format!("{unstamped}\n").as_bytes(), &bundled));
+    assert!(!adoptable_hook(unstamped.trim_end().as_bytes(), &bundled));
+    assert!(!adoptable_hook(b"", &bundled));
+    assert!(!adoptable_hook(b"x", "no stamp here\n"), "an unstamped bundle adopts nothing but itself");
 }

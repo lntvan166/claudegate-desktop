@@ -95,6 +95,26 @@ pub fn bundled_hook_version(hook_py: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Whether an existing hook.py is a leftover setup may replace with `bundled_hook`: byte for
+/// byte either the bundled hook itself (an earlier setup by this app), or the bundled hook with
+/// its stamp line (`# CLAUDEGATE_HOOK_VERSION=…\n`) removed, which is the extension's hook.py at
+/// the tag the bundled one was cut from. Anything else is not ours to replace.
+pub fn adoptable_hook(existing: &[u8], bundled_hook: &str) -> bool {
+    if existing == bundled_hook.as_bytes() {
+        return true;
+    }
+    let mut stripped = String::with_capacity(bundled_hook.len());
+    let mut removed = false;
+    for line in bundled_hook.split_inclusive('\n') {
+        if !removed && line.starts_with(STAMP_PREFIX) && line.ends_with('\n') {
+            removed = true;
+        } else {
+            stripped.push_str(line);
+        }
+    }
+    removed && existing == stripped.as_bytes()
+}
+
 /// `computeSettingsPatch`'s result. `shape_error` is ours: a `hooks` or `hooks.PreToolUse` the
 /// extension would throw on (or, for an array `hooks`, silently drop our entry from). The app
 /// refuses those rather than guess.
@@ -249,6 +269,9 @@ pub struct InstallReport {
     /// Set when another program rewrote settings.json right after our write but kept our entry:
     /// setup worked, and the file was left as that program wrote it.
     pub note: Option<String>,
+    /// hook.py was already there as a leftover setup adopts (`adoptable_hook`) and was replaced
+    /// with the bundled hook, rather than created.
+    pub adopted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
