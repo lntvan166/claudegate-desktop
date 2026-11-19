@@ -9,7 +9,7 @@ import {
   explanation,
   pythonWarning,
   setupResult,
-  setupSupported,
+  setupUnsupported,
   type CaptureView,
   type InstallView,
 } from "./capture";
@@ -20,6 +20,7 @@ const v = (status: CaptureView["status"], extra: Partial<CaptureView> = {}): Cap
   note: null,
   pythonMissing: false,
   takenOver: false,
+  setupSupported: true,
   ...extra,
 });
 
@@ -111,11 +112,14 @@ describe("actions", () => {
     }
     expect(canSetUp(null, false)).toBe(false);
   });
-  it("offers no Set up where setup is unsupported", () => {
-    expect(canSetUp(v("not-set-up"), false, false)).toBe(false);
-    expect(setupSupported("Win32")).toBe(false);
-    expect(setupSupported("Linux x86_64")).toBe(true);
-    expect(setupSupported("MacIntel")).toBe(true);
+  it("offers no Set up where core says setup is unsupported", () => {
+    expect(canSetUp(v("not-set-up", { setupSupported: false }), false)).toBe(false);
+    expect(canSetUp(v("not-set-up", { setupSupported: true }), false)).toBe(true);
+    expect(setupUnsupported(v("not-set-up", { setupSupported: false }), false)).toBe(true);
+    expect(setupUnsupported(v("not-set-up", { setupSupported: false }), true)).toBe(false);
+    expect(setupUnsupported(v("app", { setupSupported: false }), false)).toBe(false);
+    expect(setupUnsupported(v("not-set-up"), false)).toBe(false);
+    expect(setupUnsupported(null, false)).toBe(false);
   });
   it("offers Check again for the non-capturing states", () => {
     expect(canRecheck(v("python-missing"))).toBe(true);

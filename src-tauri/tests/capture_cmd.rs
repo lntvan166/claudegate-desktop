@@ -76,7 +76,7 @@ fn status_keys_cover_every_variant() {
 fn not_set_up_when_settings_absent_or_without_entry() {
     let f = fx();
     let v = capture_view_for(&f.home, true);
-    assert_eq!(v, CaptureView { status: "not-set-up".into(), version: None, note: None, python_missing: false, taken_over: false });
+    assert_eq!(v, CaptureView { status: "not-set-up".into(), version: None, note: None, python_missing: false, taken_over: false, setup_supported: cfg!(unix) });
     f.write_settings(r#"{"model":"x","hooks":{"PreToolUse":[]}}"#);
     assert_eq!(capture_view_for(&f.home, true).status, "not-set-up");
 }
@@ -101,7 +101,7 @@ fn app_with_trimmed_marker_version() {
     let v = capture_view_for(&f.home, true);
     assert_eq!(
         v,
-        CaptureView { status: "app".into(), version: Some("v1.2.3".into()), note: None, python_missing: false, taken_over: false }
+        CaptureView { status: "app".into(), version: Some("v1.2.3".into()), note: None, python_missing: false, taken_over: false, setup_supported: cfg!(unix) }
     );
 }
 
@@ -489,4 +489,12 @@ fn macos_usr_bin_python3_needs_the_command_line_tools() {
         pick_python3(Some(&path), None, &both, true, &|| false).as_deref(),
         Some(Path::new("/opt/homebrew/bin/python3"))
     );
+}
+
+#[test]
+fn the_view_says_whether_setup_is_supported_here() {
+    let f = fx();
+    assert_eq!(capture_view_for(&f.home, true).setup_supported, cfg!(unix));
+    let json = serde_json::to_value(capture_view_for(&f.home, true)).unwrap();
+    assert_eq!(json["setupSupported"], serde_json::Value::Bool(cfg!(unix)));
 }

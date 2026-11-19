@@ -7,7 +7,7 @@
     canSetUp,
     capturing,
     UNSUPPORTED_TEXT,
-    setupSupported,
+    setupUnsupported,
     chipLabel,
     detail,
     pythonWarning,
@@ -17,7 +17,6 @@
   } from "../lib/capture";
 
   let { readOnly, projectCount = null }: { readOnly: boolean; projectCount?: number | null } = $props();
-  const supported = setupSupported();
 
   let view: CaptureView | null = $state(null);
   let open = $state(false);
@@ -179,7 +178,7 @@
         {#if view.status === "not-set-up" && readOnly}
           <p class="body muted">Read-only mode is on. Turn it off to set up capture.</p>
         {/if}
-        {#if view.status === "not-set-up" && !readOnly && !supported}
+        {#if setupUnsupported(view, readOnly)}
           <p class="body muted">{UNSUPPORTED_TEXT}</p>
         {/if}
         {#if result}
@@ -188,9 +187,9 @@
         {#if error}
           <p class="banner error" role="alert">{error}</p>
         {/if}
-        {#if canSetUp(view, readOnly, supported) || canRecheck(view)}
+        {#if canSetUp(view, readOnly) || canRecheck(view)}
           <div class="buttons">
-            {#if canSetUp(view, readOnly, supported)}
+            {#if canSetUp(view, readOnly)}
               <button class="btn go" data-setup disabled={busy} onclick={() => void askSetUp()}>Set up…</button>
             {/if}
             {#if canRecheck(view)}

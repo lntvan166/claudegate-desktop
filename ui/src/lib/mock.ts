@@ -584,7 +584,8 @@ export const mockApi: Api = {
     await delay(null);
     if (config.readOnly) throw "Read-only mode is on. Turn it off in Settings to set up capture.";
     if (capture.status !== "not-set-up") throw "Capture is already set up; nothing was changed.";
-    capture = { status: "app", version: "v1.16.1", note: null, pythonMissing: false, takenOver: false };
+    if (!capture.setupSupported) throw "Setting up capture is not supported on this platform yet.";
+    capture = { status: "app", version: "v1.16.1", note: null, pythonMissing: false, takenOver: false, setupSupported: true };
     return {
       settings: "/home/dev/.claude/settings.json",
       backup: "/home/dev/.claude/settings.json.claudegate-2026-11-18T10-20-30.123Z.bak",
@@ -615,7 +616,8 @@ export const mockApi: Api = {
 
 /**
  * The capture state the preview starts in: `?capture=vscode|app|not-set-up|settings-unreadable|python-missing`,
- * plus `&capturePython=missing` (the warning next to a capturing state) and `&captureTakenOver=1`.
+ * plus `&capturePython=missing` (the warning next to a capturing state), `&captureTakenOver=1`, and
+ * `&unsupported` (core says setup isn't supported on this platform).
  */
 let captureFails = typeof location !== "undefined" && new URLSearchParams(location.search).get("capture") === "fail";
 let capture: CaptureView = (() => {
@@ -628,6 +630,7 @@ let capture: CaptureView = (() => {
     note: status === "settings-unreadable" ? "not valid JSON: expected value at line 4 column 3" : null,
     pythonMissing: (status === "vscode" || status === "app") && q.get("capturePython") === "missing",
     takenOver: status === "vscode" && q.get("captureTakenOver") === "1",
+    setupSupported: !q.has("unsupported"),
   };
 })();
 

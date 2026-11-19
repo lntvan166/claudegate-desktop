@@ -13,6 +13,8 @@ export type CaptureView = {
   pythonMissing: boolean;
   /** For `vscode`: this app set capture up and the extension has since replaced the hook. */
   takenOver: boolean;
+  /** Core can set capture up on this platform (unix only for now; `InstallError::Unsupported`). */
+  setupSupported: boolean;
 };
 
 export type InstallView = {
@@ -40,12 +42,7 @@ const LABELS: Record<CaptureStatus, string> = {
   "python-missing": "Capture: python3 not found",
 };
 
-/** Hook-based setup is unix-only for now (core `InstallError::Unsupported`); Windows is the known miss. */
-export function setupSupported(platform: string = typeof navigator === "undefined" ? "" : navigator.platform): boolean {
-  return !/^Win/i.test(platform);
-}
-
-/** Shown in place of the Set up action when `setupSupported()` is false. */
+/** Shown in place of the Set up action when `setupUnsupported()` is true. */
 export const UNSUPPORTED_TEXT = "Setup isn't supported on this platform yet.";
 
 /** `failed`: the status could not be read at all (shown instead of "checking…" forever).
@@ -95,8 +92,14 @@ export function explanation(v: CaptureView | null): string | null {
   }
 }
 
-export function canSetUp(v: CaptureView | null, readOnly: boolean, supported = true): boolean {
-  return v?.status === "not-set-up" && !readOnly && supported;
+/** Core's `setupSupported` decides; the platform string is never consulted. */
+export function canSetUp(v: CaptureView | null, readOnly: boolean): boolean {
+  return v?.status === "not-set-up" && !readOnly && v.setupSupported;
+}
+
+/** Not set up, writes allowed, but this platform can't set up: say so instead of offering it. */
+export function setupUnsupported(v: CaptureView | null, readOnly: boolean): boolean {
+  return v?.status === "not-set-up" && !readOnly && !v.setupSupported;
 }
 
 export function canRecheck(v: CaptureView | null): boolean {

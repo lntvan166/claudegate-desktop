@@ -38,6 +38,9 @@ pub struct CaptureView {
     pub python_missing: bool,
     /// For `vscode`: this app set capture up, and the extension has since replaced hook.py.
     pub taken_over: bool,
+    /// Whether this build can set capture up at all (core refuses with `Unsupported` off unix).
+    /// The UI asks this rather than guessing from the platform string.
+    pub setup_supported: bool,
 }
 
 /// A successful `set_up_capture`, with the status read right after it.
@@ -117,7 +120,14 @@ pub fn view_of(s: &CaptureStatus) -> CaptureView {
         CaptureStatus::SettingsUnreadable(r) => (None, Some(r.clone()), false),
         _ => (None, None, false),
     };
-    CaptureView { status: status_key(s).to_owned(), version, note, python_missing, taken_over: false }
+    CaptureView {
+        status: status_key(s).to_owned(),
+        version,
+        note,
+        python_missing,
+        taken_over: false,
+        setup_supported: cfg!(unix),
+    }
 }
 
 pub fn capture_view_for(home: &Path, python3: bool) -> CaptureView {
