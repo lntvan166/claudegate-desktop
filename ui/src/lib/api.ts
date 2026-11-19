@@ -10,8 +10,9 @@ import type { DecideAction, DecideReport, DecideTarget, RejectOutcome } from "./
 import type { CaptureView, InstallView } from "./capture";
 import type { EditorConfig } from "./editors";
 import type { SettingKey, SettingsView } from "./settings";
+import type { UpdateView } from "./update";
 
-export type { CaptureView, InstallView };
+export type { CaptureView, InstallView, UpdateView };
 export type { DecideAction, DecideReport, DecideTarget, EditorConfig, SettingKey, SettingsView };
 
 export type ProjectSummary = {
@@ -140,6 +141,10 @@ export interface Api {
    * for the user; blocked in read-only mode.
    */
   setUpCapture(): Promise<InstallView>;
+  /** A newer release on GitHub, or null. Read only. */
+  checkUpdate(): Promise<UpdateView | null>;
+  /** Download, verify, install and restart (macOS, AppImage only). */
+  installUpdate(): Promise<void>;
 }
 
 const tauriApi: Api = {
@@ -166,6 +171,8 @@ const tauriApi: Api = {
   pickFolder: () => invoke<string | null>("pick_folder"),
   captureStatus: (recheck) => invoke<CaptureView>("capture_status", { recheck }),
   setUpCapture: () => invoke<InstallView>("set_up_capture"),
+  checkUpdate: () => invoke<UpdateView | null>("check_update"),
+  installUpdate: () => invoke<void>("install_update"),
 };
 
 let chosen: Promise<Api> | undefined;
@@ -213,3 +220,5 @@ export const pickFolder = async () => (await api()).pickFolder();
 export const projectInVsCode = async (root: string) => (await api()).projectInVsCode(root);
 export const captureStatus = async (recheck = false) => (await api()).captureStatus(recheck);
 export const setUpCapture = async () => (await api()).setUpCapture();
+export const checkUpdate = async () => (await api()).checkUpdate();
+export const installUpdate = async () => (await api()).installUpdate();

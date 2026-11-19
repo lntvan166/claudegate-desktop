@@ -594,6 +594,22 @@ export const mockApi: Api = {
       capture: { ...capture },
     };
   },
+  // `?update=deb|app`: a newer release is out; otherwise this is the latest.
+  checkUpdate: () => {
+    const kind = new URLSearchParams(location.search).get("update");
+    if (!kind) return delay(null);
+    const deb = kind === "deb";
+    return delay({
+      version: "0.3.0",
+      current: "0.2.0",
+      notes: "Faster diff loading.",
+      canInstall: !deb,
+      command: deb
+        ? "curl -fL -o ~/Downloads/ClaudeGate_0.3.0_amd64.deb https://github.com/lntvan166/claudegate-desktop/releases/download/v0.3.0/ClaudeGate_0.3.0_amd64.deb && pkexec apt install -y ~/Downloads/ClaudeGate_0.3.0_amd64.deb"
+        : null,
+    });
+  },
+  installUpdate: () => delay(undefined),
 };
 
 /**

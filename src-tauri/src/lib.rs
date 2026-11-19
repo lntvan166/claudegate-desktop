@@ -3,6 +3,7 @@ pub mod commands;
 pub mod config;
 pub mod editor;
 pub mod tray;
+pub mod update;
 pub mod upkeep;
 pub mod watch;
 
@@ -11,6 +12,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(watch::KnownMap::default())
         .manage(commands::WriteLock::default())
         .manage(upkeep::UpkeepState::default())
@@ -49,7 +51,9 @@ pub fn run() {
             config::set_read_only,
             config::set_hidden_projects,
             editor::open_in_editor,
-            tray::set_pending_count
+            tray::set_pending_count,
+            update::check_update,
+            update::install_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running ClaudeGate Desktop");

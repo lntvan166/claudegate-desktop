@@ -23,6 +23,19 @@ Headless (no window on your desktop):
 env -u WAYLAND_DISPLAY GDK_BACKEND=x11 xvfb-run -a <command>
 ```
 
+## Installing and updating
+
+Installers are on [GitHub Releases](https://github.com/lntvan166/claudegate-desktop/releases): a `.deb` and an AppImage for Linux, and a universal `.dmg` for macOS. They are not code-signed, so on macOS right-click the app and choose Open the first time.
+
+The app checks the latest release 5 seconds after it starts and then every six hours. When a newer version is out, an "Update" chip appears in the header:
+
+- **macOS and AppImage:** "Install and restart" downloads the update, checks its signature against the public key in `tauri.conf.json`, and replaces the app.
+- **`.deb`:** the app never touches a package dpkg owns. It shows a `curl … && pkexec apt install` command to copy.
+
+A failed check (offline) shows nothing. The update check writes no ClaudeGate state.
+
+**Releasing:** bump `version` in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `package.json` and `ui/package.json`, then push a `v<version>` tag. `.github/workflows/release.yml` builds and signs the installers and `latest.json`, and leaves a draft release to publish. Signing uses the `TAURI_SIGNING_PRIVATE_KEY` secret. Its only copies are that secret and the age-encrypted backup in bifrost (`~/.tauri/claudegate-desktop.key`). If the key is lost, installed apps can no longer verify an update.
+
 ## Decisions
 
 Each action works on one file, one folder or the whole project, in the same way as the VS Code extension.

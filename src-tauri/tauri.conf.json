@@ -43,6 +43,15 @@
           "/usr/share/applications/dev.claudegate.desktop.desktop": "dev.claudegate.desktop.desktop"
         }
       }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM1RTMzREUzMTYyMzEyMDUKUldRRkVpTVc0ejNqeFh0YjVMSVJBazJZZnUwMndJRlpvY2xHcGF6R3kvNlhheSszVHp2QU5KSEQK",
+      "endpoints": [
+        "https://github.com/lntvan166/claudegate-desktop/releases/latest/download/latest.json"
+      ]
     }
   }
 }
