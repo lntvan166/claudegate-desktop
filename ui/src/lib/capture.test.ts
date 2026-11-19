@@ -29,6 +29,8 @@ describe("chipLabel", () => {
     expect(chipLabel(v("vscode"))).toBe("Capturing (VS Code)");
     expect(chipLabel(v("app", { version: "v1.16.1" }))).toBe("Capturing (this app)");
     expect(chipLabel(v("not-set-up"))).toBe("Not capturing — Set up");
+    expect(chipLabel(v("not-set-up", { setupSupported: false }))).toBe("Not capturing");
+    expect(chipLabel(v("app", { setupSupported: false }))).toBe("Capturing (this app)");
     expect(chipLabel(v("not-set-up"), false, true)).toBe("Not capturing");
     expect(chipLabel(v("settings-unreadable", { note: "x" }))).toBe("Capture: settings unreadable");
     expect(chipLabel(v("python-missing"))).toBe("Capture: python3 not found");

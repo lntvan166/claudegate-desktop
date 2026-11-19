@@ -97,22 +97,19 @@ pub fn bundled_hook_version(hook_py: &str) -> Option<String> {
 
 /// Whether an existing hook.py is a leftover setup may replace with `bundled_hook`: byte for
 /// byte either the bundled hook itself (an earlier setup by this app), or the bundled hook with
-/// its stamp line (`# CLAUDEGATE_HOOK_VERSION=…\n`) removed, which is the extension's hook.py at
+/// its stamp line (line 2, `# CLAUDEGATE_HOOK_VERSION=…\n`) removed, which is the extension's hook.py at
 /// the tag the bundled one was cut from. Anything else is not ours to replace.
 pub fn adoptable_hook(existing: &[u8], bundled_hook: &str) -> bool {
     if existing == bundled_hook.as_bytes() {
         return true;
     }
-    let mut stripped = String::with_capacity(bundled_hook.len());
-    let mut removed = false;
-    for line in bundled_hook.split_inclusive('\n') {
-        if !removed && line.starts_with(STAMP_PREFIX) && line.ends_with('\n') {
-            removed = true;
-        } else {
-            stripped.push_str(line);
-        }
+    // The stamp is line 2 (after the shebang); a stamp anywhere else is not that line.
+    let mut lines: Vec<&str> = bundled_hook.split_inclusive('\n').collect();
+    if !lines.get(1).is_some_and(|l| l.starts_with(STAMP_PREFIX) && l.ends_with('\n')) {
+        return false;
     }
-    removed && existing == stripped.as_bytes()
+    lines.remove(1);
+    existing == lines.concat().as_bytes()
 }
 
 /// `computeSettingsPatch`'s result. `shape_error` is ours: a `hooks` or `hooks.PreToolUse` the
@@ -287,6 +284,8 @@ pub enum InstallError {
     HookFilesFromApp,
     /// `~/.claudegate/hook.sh` is there with content other than the extension's wrapper.
     ForeignWrapper,
+    /// `~/.claudegate/.installed-by-desktop` is there but is not a regular file (a symlink, say).
+    MarkerNotFile,
     /// Capture is already set up (or the status is anything but `NotSetUp`).
     AlreadySetUp(CaptureStatus),
     /// settings.json could not be read, or is not a plain JSON object of the expected shape.
@@ -317,6 +316,10 @@ impl std::fmt::Display for InstallError {
             InstallError::ForeignWrapper => write!(
                 f,
                 "~/.claudegate/hook.sh already exists with different content. Remove it, then try again."
+            ),
+            InstallError::MarkerNotFile => write!(
+                f,
+                "~/.claudegate/.installed-by-desktop is not a regular file. Remove it, then try again."
             ),
             InstallError::AlreadySetUp(s) => write!(f, "Capture is already set up ({s:?}); nothing was changed."),
             InstallError::SettingsUnreadable(r) => write!(

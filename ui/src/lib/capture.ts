@@ -46,10 +46,11 @@ const LABELS: Record<CaptureStatus, string> = {
 export const UNSUPPORTED_TEXT = "Setup isn't supported on this platform yet.";
 
 /** `failed`: the status could not be read at all (shown instead of "checking…" forever).
- *  `readOnly`: setup is off the table, so a not-set-up chip must not offer "Set up". */
+ *  `readOnly` (or core saying setup isn't supported here): setup is off the table, so a
+ *  not-set-up chip must not offer "Set up". */
 export function chipLabel(v: CaptureView | null, failed = false, readOnly = false): string {
   if (!v) return failed ? "Capture: couldn't check" : "Capture: checking…";
-  if (v.status === "not-set-up" && readOnly) return "Not capturing";
+  if (v.status === "not-set-up" && (readOnly || !v.setupSupported)) return "Not capturing";
   return LABELS[v.status] ?? "Capture: unknown";
 }
 

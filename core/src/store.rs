@@ -991,14 +991,27 @@ impl Undo {
                     }
                 }
                 for (p, old, ours) in self.replaced {
-                    // A file that no longer holds our bytes (or is no longer a plain file) is
-                    // someone else's write since: left alone, like a created file.
+                    // A plain file holding other bytes is someone else's write since: left alone,
+                    // like a created file. Anything we cannot check (a failed stat or read, or no
+                    // longer a plain file) is left too, but reported.
                     let still_ours = || match (fs::symlink_metadata(&p), fs::read(&p)) {
                         (Ok(m), Ok(now)) if m.file_type().is_file() && now == ours => Ok(()),
                         _ => Err(io::Error::other("changed since")),
                     };
-                    if still_ours().is_err() {
-                        continue;
+                    match (fs::symlink_metadata(&p), fs::read(&p)) {
+                        (Ok(m), Ok(now)) if m.file_type().is_file() => {
+                            if now != ours {
+                                continue;
+                            }
+                        }
+                        (Ok(_), Ok(_)) => {
+                            problems.push(format!("{} was not restored: it is no longer a regular file", p.display()));
+                            continue;
+                        }
+                        (Err(e), _) | (_, Err(e)) => {
+                            problems.push(format!("{} was not restored: could not read it: {e}", p.display()));
+                            continue;
+                        }
                     }
                     if let Err(e) = atomic_write_checked(&p, &old, true, still_ours) {
                         if fs::read(&p).is_ok_and(|now| now == ours) {
@@ -1166,6 +1179,11 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
         Err(e) if e.kind() == io::ErrorKind::NotFound && fs::symlink_metadata(&sh).is_err() => true,
         Err(_) => return Err(InstallError::ForeignWrapper),
     };
+    // The marker is replaced in place and restored on rollback; only a regular file can be.
+    match fs::symlink_metadata(&marker) {
+        Ok(m) if !m.file_type().is_file() => return Err(InstallError::MarkerNotFile),
+        _ => {}
+    }
     let old_marker = match fs::read(&marker) {
         Ok(b) => Some(b),
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,

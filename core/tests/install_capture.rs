@@ -547,3 +547,39 @@ fn the_real_bundled_hook_adopts_itself_and_its_unstamped_form_only() {
     assert!(!adoptable_hook(b"", &bundled));
     assert!(!adoptable_hook(b"x", "no stamp here\n"), "an unstamped bundle adopts nothing but itself");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_marker_is_refused_before_anything_is_written() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    fs::create_dir_all(h.home.join(".claudegate")).unwrap();
+    let real = h.home.join("real-marker");
+    fs::write(&real, "v0.0.1").unwrap();
+    std::os::unix::fs::symlink(&real, h.cg(".installed-by-desktop")).unwrap();
+
+    let err = h.install().unwrap_err();
+    assert!(matches!(err, InstallError::MarkerNotFile), "{err:?}");
+    assert!(err.to_string().contains("~/.claudegate/.installed-by-desktop is not a regular file"), "{err}");
+    assert_eq!(fs::read_to_string(&real).unwrap(), "v0.0.1");
+    assert!(fs::symlink_metadata(h.cg(".installed-by-desktop")).unwrap().file_type().is_symlink());
+    assert!(!h.cg("hook.py").exists());
+    assert_eq!(fs::read_to_string(h.settings()).unwrap(), EXISTING);
+    assert!(h.backups().is_empty());
+}
+
+#[test]
+fn the_stamp_is_removed_only_from_line_two() {
+    // Line 1 or line 3 stamps: only the bundled hook itself is adoptable.
+    for bundled in [
+        "# CLAUDEGATE_HOOK_VERSION=v1.16.1\n#!/usr/bin/env python3\nprint('hook')\n",
+        "#!/usr/bin/env python3\nprint('hook')\n# CLAUDEGATE_HOOK_VERSION=v1.16.1\n",
+    ] {
+        assert!(adoptable_hook(bundled.as_bytes(), bundled));
+        assert!(!adoptable_hook(b"#!/usr/bin/env python3\nprint('hook')\n", bundled), "{bundled:?}");
+    }
+    let line2 = "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.16.1\nprint('hook')\n";
+    assert!(adoptable_hook(b"#!/usr/bin/env python3\nprint('hook')\n", line2));
+    // A stamp without its newline (the last line) is not "that line".
+    assert!(!adoptable_hook(b"#!/usr/bin/env python3\n", "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1"));
+}

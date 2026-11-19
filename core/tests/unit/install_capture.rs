@@ -498,3 +498,45 @@ fn a_hook_py_that_turns_into_the_bundled_one_mid_install_is_refused() {
     assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), HOOK);
     assert!(!h.settings().exists());
 }
+
+#[test]
+fn a_marker_rewritten_by_someone_else_before_rollback_is_left_alone() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    fs::create_dir_all(h.home.join(".claudegate")).unwrap();
+    fs::write(h.cg(".installed-by-desktop"), "v0.0.1").unwrap();
+    let marker = h.cg(".installed-by-desktop");
+    let err = install_with(&h, move |stage| {
+        if stage == "after_hooks" {
+            fs::write(&marker, "v9.9.9").unwrap();
+            return Err(io::Error::other("injected"));
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(matches!(err, InstallError::Failed { rollback: None, .. }), "{err:?}");
+    assert_eq!(fs::read_to_string(h.cg(".installed-by-desktop")).unwrap(), "v9.9.9");
+}
+
+#[test]
+fn a_replaced_file_that_cannot_be_read_at_rollback_is_a_rollback_problem() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    fs::create_dir_all(h.home.join(".claudegate")).unwrap();
+    fs::write(h.cg(".installed-by-desktop"), "v0.0.1").unwrap();
+    let marker = h.cg(".installed-by-desktop");
+    let err = install_with(&h, move |stage| {
+        if stage == "after_hooks" {
+            fs::remove_file(&marker).unwrap();
+            fs::create_dir(&marker).unwrap(); // stat works, read fails
+            return Err(io::Error::other("injected"));
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    match err {
+        InstallError::Failed { rollback: Some(r), .. } => assert!(r.contains(".installed-by-desktop"), "{r}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(h.cg(".installed-by-desktop").is_dir(), "left as found");
+}
