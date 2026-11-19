@@ -86,7 +86,7 @@
   import { headerTotal, projectLine } from "./lib/counts";
   import { collapseKeysToReveal, fileOrder, visibleItems } from "./lib/visible";
   import { filterBulk, filterGroups, normalizeFilter, stillShown } from "./lib/filter";
-  import { addFolderFor, findPendingRow, ownerOf, type LaunchTarget } from "./lib/launch";
+  import { addFolderFor, addLabel, findPendingRow, launchNotice, ownerOf, type LaunchTarget } from "./lib/launch";
   import { alreadyExcluded, excludedNotice, extensionGlob, folderGlob, hidePrompt } from "./lib/excludeSuggest";
   import {
     DEFAULT_SETTINGS,
@@ -663,15 +663,15 @@
   /** Selects the project owning `t.path` (and the pending row, for a file); otherwise asks. */
   async function openLaunchTarget(t: LaunchTarget) {
     launchAsk = null;
-    let owner = ownerOf(t.path, projects.map((p) => ({ root: p.root, scopes: [] })));
-    if (!owner) {
-      // A worktree scope can live outside its project's root; only a project's view lists them.
-      const views = await Promise.all(projects.map((p) => getProject(p.root).catch(() => null)));
-      owner = ownerOf(
-        t.path,
-        projects.map((p, i) => ({ root: p.root, scopes: views[i]?.scopes.map((s) => s.root) ?? [] })),
-      );
-    }
+    settingsOpen = false;
+    // A worktree scope can live anywhere, even inside another project's root; only a project's
+    // view lists them, so roots and scopes are matched together, longest prefix wins.
+    const views = await Promise.all(projects.map((p) => getProject(p.root).catch(() => null)));
+    const owner = ownerOf(
+      t.path,
+      projects.map((p, i) => ({ root: p.root, scopes: views[i]?.scopes.map((s) => s.root) ?? [] })),
+      t.canonical,
+    );
     if (!owner) {
       launchAsk = t;
       return;
@@ -681,7 +681,8 @@
     if (t.isDir) return;
     const v = await loadView(owner);
     if (!v || owner !== selected) return;
-    const row = findPendingRow(t.path, groupsOf(hideExtra(v, extraHide), "pending").flatMap((g) => g.rows));
+    const rows = groupsOf(hideExtra(v, extraHide), "pending").flatMap((g) => g.rows);
+    const row = findPendingRow(t.path, rows) ?? (t.canonical ? findPendingRow(t.canonical, rows) : null);
     if (row) selectedRow = row;
   }
 
@@ -1047,7 +1048,11 @@
     // A launch path: asked for once (the first event can fire before this listener exists), then
     // heard for every later launch. It waits for the project list so there is something to match.
     const offLaunch = onLaunch((t) => void listLoaded.then(() => openLaunchTarget(t)));
-    void listLoaded.then(() => launchPath()).then((t) => t && openLaunchTarget(t), () => {});
+    void listLoaded
+      .then(() => launchPath())
+      .then(async (ts) => {
+        for (const t of ts) await openLaunchTarget(t);
+      }, () => {});
 
     return () => {
       void offLaunch.then((f) => f());
@@ -1110,8 +1115,10 @@
 
 {#if launchAsk}
   <div class="launch-ask" role="alertdialog" aria-label="Not a ClaudeGate project">
-    <p class="path">{launchAsk.path} isn't a ClaudeGate project.</p>
-    <button class="protect-btn go" onclick={() => void addLaunchFolder()}>Add project</button>
+    <p class="path">{launchNotice(launchAsk)}</p>
+    {#if launchAsk.exists}
+      <button class="protect-btn go" onclick={() => void addLaunchFolder()}>{addLabel(launchAsk)}</button>
+    {/if}
     <button class="protect-btn" onclick={() => (launchAsk = null)}>Dismiss</button>
   </div>
 {/if}

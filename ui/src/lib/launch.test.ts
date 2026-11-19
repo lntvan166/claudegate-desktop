@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addFolderFor, findPendingRow, ownerOf } from "./launch";
+import { addFolderFor, addLabel, launchNotice, findPendingRow, ownerOf } from "./launch";
 
 const owners = [
   { root: "/w/app", scopes: ["/w/app", "/w/app-wt/feat"] },
@@ -31,6 +31,31 @@ describe("ownerOf", () => {
   });
 });
 
+describe("ownerOf, nested and symlinked", () => {
+  it("a worktree of B inside A's root belongs to B", () => {
+    const o = [
+      { root: "/w/a", scopes: ["/w/a"] },
+      { root: "/elsewhere/b", scopes: ["/elsewhere/b", "/w/a/.wt/b-feat"] },
+    ];
+    expect(ownerOf("/w/a/.wt/b-feat/src/x.ts", o)).toBe("/elsewhere/b");
+    expect(ownerOf("/w/a/src/x.ts", o)).toBe("/w/a");
+  });
+  it("tries the canonical path too", () => {
+    expect(ownerOf("/link/x.ts", owners, "/w/other/x.ts")).toBe("/w/other");
+    expect(ownerOf("/link/x.ts", owners, null)).toBeNull();
+  });
+});
+
+describe("launch notice", () => {
+  const file = { path: "/w/n/a.ts", exists: true, isDir: false, canonical: null };
+  it("says what is wrong and what Add would add", () => {
+    expect(launchNotice(file)).toBe("/w/n/a.ts isn't a ClaudeGate project.");
+    expect(launchNotice({ ...file, exists: false })).toBe("/w/n/a.ts doesn't exist.");
+    expect(addLabel(file)).toBe("Add /w/n");
+    expect(addLabel({ ...file, isDir: true })).toBe("Add project");
+  });
+});
+
 describe("findPendingRow", () => {
   const rows = [{ path: "/w/app/a.ts" }, { path: "/w/app-wt/feat/b.ts" }];
   it("finds a file's row, only on an exact path", () => {
@@ -42,7 +67,7 @@ describe("findPendingRow", () => {
 
 describe("addFolderFor", () => {
   it("is the folder itself, or the file's folder", () => {
-    expect(addFolderFor({ path: "/w/new/", isDir: true })).toBe("/w/new");
-    expect(addFolderFor({ path: "/w/new/src/a.ts", isDir: false })).toBe("/w/new/src");
+    expect(addFolderFor({ path: "/w/new/", exists: true, isDir: true, canonical: null })).toBe("/w/new");
+    expect(addFolderFor({ path: "/w/new/src/a.ts", exists: true, isDir: false, canonical: null })).toBe("/w/new/src");
   });
 });

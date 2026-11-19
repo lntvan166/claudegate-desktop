@@ -1,7 +1,7 @@
 // `claudegate [PATH]`: which project owns the path the app was launched with.
 
 /** The path from Rust (src-tauri/src/launch.rs); `isDir` because the UI cannot stat. */
-export type LaunchTarget = { path: string; isDir: boolean };
+export type LaunchTarget = { path: string; exists: boolean; isDir: boolean; canonical: string | null };
 
 /** A project and every root it shows: its own and its worktrees'. */
 export type Owner = { root: string; scopes: string[] };
@@ -13,14 +13,14 @@ const norm = (p: string) => {
 const within = (root: string, path: string) => path === root || path.startsWith(root === "/" ? "/" : `${root}/`);
 
 /** The project whose root or worktree scope is the longest prefix of `path`; null when none is. */
-export function ownerOf(path: string, owners: Owner[]): string | null {
-  const p = norm(path);
+export function ownerOf(path: string, owners: Owner[], canonical?: string | null): string | null {
+  const paths = [norm(path), ...(canonical ? [norm(canonical)] : [])];
   let best: string | null = null;
   let bestLen = -1;
   for (const o of owners) {
     for (const r of [o.root, ...o.scopes]) {
       const n = norm(r);
-      if (within(n, p) && n.length > bestLen) {
+      if (n.length > bestLen && paths.some((p) => within(n, p))) {
         best = o.root;
         bestLen = n.length;
       }
@@ -33,6 +33,16 @@ export function ownerOf(path: string, owners: Owner[]): string | null {
 export function findPendingRow<R extends { path: string }>(path: string, rows: R[]): R | null {
   const p = norm(path);
   return rows.find((r) => norm(r.path) === p) ?? null;
+}
+
+/** The Add project button's label: names the folder when the path is a file. */
+export function addLabel(t: LaunchTarget): string {
+  return t.isDir ? "Add project" : `Add ${addFolderFor(t)}`;
+}
+
+/** What the launch notice says. */
+export function launchNotice(t: LaunchTarget): string {
+  return t.exists ? `${t.path} isn't a ClaudeGate project.` : `${t.path} doesn't exist.`;
 }
 
 /** The folder the Add project flow gets: the folder itself, or the file's folder. */

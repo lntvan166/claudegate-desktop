@@ -479,7 +479,7 @@ export const mockApi: Api = {
     return () => void handlers.delete(handler);
   },
   onLaunch: async () => () => {},
-  launchPath: async () => null,
+  launchPath: async () => [],
   getConfig: () => delay(config),
   setEditor: (template) => {
     config = { ...config, editor: template };

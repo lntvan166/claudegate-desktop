@@ -94,8 +94,8 @@ export interface Api {
   onChanged(handler: (p: ChangedPayload) => void): Promise<() => void>;
   /** A launch (`claudegate [PATH]`, first or second instance) asked for this path. */
   onLaunch(handler: (t: LaunchTarget) => void): Promise<() => void>;
-  /** The path the app was started with, once; null when none. The first event can precede the listener. */
-  launchPath(): Promise<LaunchTarget | null>;
+  /** The launch paths stored so far (the first launch, second ones before this call), once; later ones are events. */
+  launchPath(): Promise<LaunchTarget[]>;
   getConfig(): Promise<EditorConfig>;
   /** Remembers `template` as the editor in ~/.claudegate-desktop/config.json. */
   setEditor(template: string): Promise<EditorConfig>;
@@ -159,7 +159,7 @@ const tauriApi: Api = {
   getDiff: (root, scope, kind, key) => invoke<DiffPayload>("get_diff", { root, scope, kind, key }),
   onChanged: (handler) => listen<ChangedPayload>(CHANGED_EVENT, (e) => handler(e.payload)),
   onLaunch: (handler) => listen<LaunchTarget>(LAUNCH_EVENT, (e) => handler(e.payload)),
-  launchPath: () => invoke<LaunchTarget | null>("launch_path"),
+  launchPath: () => invoke<LaunchTarget[]>("launch_path"),
   getConfig: () => invoke<EditorConfig>("get_config"),
   setEditor: (template) => invoke<EditorConfig>("set_editor", { template }),
   openInEditor: (path, line, col, template) => invoke<void>("open_in_editor", { path, line, col, template }),
