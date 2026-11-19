@@ -1585,6 +1585,9 @@
     overflow: hidden;
     overflow: clip;
     border-right: 1px solid var(--rule);
+    /* The file column's own width (the Splitter moves it), so its header, bars and rows fold
+       by the room they really have rather than by the window's width. */
+    container: review / inline-size;
   }
 
   .title-row {
