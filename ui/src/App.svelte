@@ -1148,9 +1148,13 @@
             <path d="M5.5 7V5a2.5 2.5 0 0 1 4.9-.7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
           {/if}
         </svg>
-        Read-only
+        <span class="chip-label">Read-only</span>
       </button>
-      <span class="total" class:none={totalPending === 0}>{headerTotal(split.visible)}</span>
+      <span class="total" class:none={totalPending === 0} title={headerTotal(split.visible)}>
+        <span class="total-long">{headerTotal(split.visible)}</span>
+        <!-- A narrow window: the count alone; the list right below says where. -->
+        <span class="total-short" aria-hidden="true">{totalPending === 0 ? "Nothing pending" : `${totalPending} pending`}</span>
+      </span>
       <button
         class="chip gear"
         class:on={settingsOpen}
@@ -1555,7 +1559,11 @@
 
   .total {
     font-weight: 500;
+    white-space: nowrap;
     color: var(--pending);
+  }
+  .total-short {
+    display: none;
   }
   .total.none {
     color: var(--muted);
@@ -1608,6 +1616,7 @@
     margin-top: 3px;
     font-size: var(--fs-small);
     color: var(--muted);
+    text-wrap: pretty;
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
@@ -1789,6 +1798,24 @@
     }
   }
 
+  /* A phone-narrow window: the header keeps every control, in fewer words. The full total and
+     the read-only label stay for screen readers. */
+  @media (max-width: 520px) {
+    .wordmark,
+    .chip-label,
+    .total-long {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
+    .total-short {
+      display: inline;
+    }
+  }
+
   /* Narrow windows (a browser preview, a tiled window): one column, projects on top. */
   @media (max-width: 720px) {
     .app {
@@ -1796,7 +1823,12 @@
       grid-template-rows: var(--toolbar-h) auto minmax(0, 1fr);
     }
     .toolbar {
+      gap: 12px;
       padding: 0 16px;
+    }
+    .status {
+      gap: 8px;
+      min-width: 0;
     }
     .hint {
       display: none;

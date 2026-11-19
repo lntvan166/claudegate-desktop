@@ -177,14 +177,16 @@
       <button class="btn quiet" disabled={busy || count === 0} onclick={() => void ask("clear")}>Clear</button>
     {/if}
     {#if count > 0}
-      <span class="count num" title={count !== tabCount ? "Files whose write has landed; the rest can't be decided yet" : undefined}>{bulkLabel(count, tabCount, tab)}</span>
+      <span class="count tnum" title={count !== tabCount ? "Files whose write has landed; the rest can't be decided yet" : undefined}>{bulkLabel(count, tabCount, tab)}</span>
     {/if}
   </div>
 {/if}
 
 <style>
+  /* Buttons keep their words; in a narrow column the count, then a button, takes the next line. */
   .bar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 6px;
     min-height: 44px;

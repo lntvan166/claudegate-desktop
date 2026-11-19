@@ -368,7 +368,7 @@
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
             <path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
           </svg>
-          Add project
+          <span>Add<span class="add-tail">{" project"}</span></span>
         </button>
         <button class="type-path" title="Type the folder's path instead" onclick={openForm}>Type path</button>
       </div>
@@ -382,6 +382,8 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    /* The column's own width, which its Splitter sets. */
+    container: projects / inline-size;
   }
 
   header {
@@ -494,21 +496,27 @@
     margin-top: -13px;
     border-radius: var(--radius-chip);
     color: var(--muted);
-    background: var(--hover);
     opacity: 0;
     pointer-events: none;
-    transition: opacity 120ms var(--ease);
+    transition:
+      opacity 120ms var(--ease),
+      background 120ms var(--ease);
   }
+  /* Filled with the row's own tone only while shown, so a long name runs under it, not through it. */
   .item:hover .hide,
   .item:focus-within .hide {
     opacity: 1;
     pointer-events: auto;
+    background: var(--hover);
   }
-  .item:has(.project.active) .hide {
+  .item:has(.project.active):hover .hide,
+  .item:has(.project.active):focus-within .hide {
     background: var(--active);
   }
-  .hide:hover {
+  .item .hide:hover,
+  .item:has(.project.active) .hide:hover:hover {
     color: var(--text);
+    background: color-mix(in srgb, var(--text) 9%, var(--hover));
   }
   .item:hover .count,
   .item:focus-within .count {
@@ -526,21 +534,26 @@
     margin-top: -13px;
     border-radius: var(--radius-chip);
     color: var(--muted);
-    background: var(--hover);
     opacity: 0;
     pointer-events: none;
-    transition: opacity 120ms var(--ease);
+    transition:
+      opacity 120ms var(--ease),
+      background 120ms var(--ease);
   }
   .item:hover .remove,
   .item:focus-within .remove {
     opacity: 1;
     pointer-events: auto;
+    background: var(--hover);
   }
-  .item:has(.project.active) .remove {
+  .item:has(.project.active):hover .remove,
+  .item:has(.project.active):focus-within .remove {
     background: var(--active);
   }
-  .remove:hover {
+  .item .remove:hover,
+  .item:has(.project.active) .remove:hover:hover {
     color: var(--danger);
+    background: color-mix(in srgb, var(--text) 9%, var(--hover));
   }
 
   .name-row {
@@ -626,6 +639,8 @@
     align-items: center;
     gap: 6px;
     flex: 1;
+    min-width: 0;
+    white-space: nowrap;
     height: 30px;
     padding: 0 10px;
     border-radius: var(--radius-control);
@@ -639,6 +654,7 @@
   }
   .type-path {
     flex: none;
+    white-space: nowrap;
     height: 26px;
     padding: 0 8px;
     border-radius: var(--radius-chip);
@@ -824,6 +840,22 @@
 
   .empty {
     padding: 12px 10px;
+  }
+
+  /* A narrow column: the name keeps its room. "Added here" and the footer's "project" stay
+     for screen readers; the remove button still marks a project you added, on hover. */
+  @container projects (max-width: 199px) {
+    .marker,
+    .add-tail {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      border: 0;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
   }
   .empty-title {
     margin: 0 0 4px;

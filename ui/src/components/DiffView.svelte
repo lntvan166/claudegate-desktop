@@ -398,7 +398,7 @@
       {/if}
       <img src={iconFor(fileName(row.rel), "file", false, theme)} alt="" width="16" height="16" draggable="false" />
       <span class="diff-path" title={row.path}>
-        {#if row.rel.includes("/")}<span class="diff-dir">{row.rel.slice(0, row.rel.lastIndexOf("/") + 1)}</span>{/if}<span class="diff-file">{fileName(row.rel)}</span>
+        {#if row.rel.includes("/")}<span class="diff-dir"><bdi>{row.rel.slice(0, row.rel.lastIndexOf("/") + 1)}</bdi></span>{/if}<span class="diff-file">{fileName(row.rel)}</span>
       </span>
       {#if row.newFile}<span class="tag new">New file</span>{/if}
       {#if row.waiting}
@@ -534,19 +534,27 @@
     border-bottom: 1px solid var(--rule);
     flex: none;
   }
+  /* Short of room, the folders give way from the left ("…/routes/orders.ts") and the file's
+     own name is the last thing cut. */
   .diff-path {
+    display: flex;
     min-width: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
     font-family: var(--font-mono);
     font-size: var(--fs-small);
     user-select: text;
   }
   .diff-dir {
+    flex: 0 1000 auto;
+    min-width: 2ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    direction: rtl;
     color: var(--muted);
   }
   .diff-file {
+    flex: none;
     font-weight: 500;
   }
   .tag.new {
@@ -815,11 +823,17 @@
   .keys dd {
     margin: 0;
   }
-  /* A narrow pane (a small window) keeps the path and the open action; the rest steps aside. */
-  @container diff (max-width: 640px) {
+  /* A narrow pane (a small window) keeps the path and the open action; the rest steps aside,
+     least useful first, so the file's name always has room to be read. */
+  @container diff (max-width: 820px) {
+    .dkey,
+    .crlabel {
+      display: none;
+    }
+  }
+  @container diff (max-width: 680px) {
     .diff-stats,
     .view,
-    .dkey,
     .tag.new {
       display: none;
     }
@@ -828,7 +842,6 @@
     }
   }
   @container diff (max-width: 500px) {
-    .crlabel,
     .diff-head :global(.split .main span) {
       display: none;
     }

@@ -207,6 +207,12 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+/* A short phrase that holds a figure ("14 to review"): the text face, with figures that do
+   not jitter as the count changes. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

@@ -796,6 +796,13 @@
     font-style: italic;
     color: var(--waiting-ink);
   }
+  /* In the row (not the hover copy) the note gives way before the file's name does. */
+  .row .meta.waiting {
+    flex: 0 1000 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 
   .stats {
     flex: none;
@@ -835,5 +842,17 @@
     line-height: 18px;
     color: var(--muted);
     background: var(--raised);
+  }
+  /* A narrow column keeps the worktree's name; the branch glyph already says what it is. */
+  @container review (max-width: 299px) {
+    .group .tag {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
   }
 </style>

@@ -144,7 +144,7 @@
   </div>
 {/if}
 {#if label}
-  <p class="filterline num" title={label}>{label}</p>
+  <p class="filterline tnum" title={label}>{label}</p>
 {/if}
 
 <style>
