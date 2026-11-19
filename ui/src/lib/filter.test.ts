@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProjectView, ScopeView } from "./api";
-import { filterGroups, filterLabel, matchesFilter, matchPrompt, normalizeFilter, pendingFilterPath } from "./filter";
+import { filterBulk, filterGroups, filterLabel, matchesFilter, matchPrompt, normalizeFilter, pendingFilterPath, stillShown } from "./filter";
 import type { Group, Row } from "./rows";
 
 const scope = (root: string, isWorktree = false): ScopeView => ({ root, isWorktree, shapeUnknown: [], error: null });
@@ -101,5 +101,23 @@ describe("matchPrompt", () => {
       go: "Reject 2",
       danger: true,
     });
+  });
+});
+
+describe("stillShown", () => {
+  const g: Group[] = [{ scope: scope(ROOT), label: "a", rows: [row(ROOT, "src/auth.ts")] }];
+  it("is true only for a row in the shown groups", () => {
+    expect(stillShown(`${ROOT}/src/auth.ts`, g)).toBe(true);
+    expect(stillShown(`${ROOT}/README.md`, g)).toBe(false);
+    expect(stillShown(`${ROOT}/src/auth.ts`, [])).toBe(false);
+  });
+});
+
+describe("filterBulk", () => {
+  it("keeps only the matching set, in order, and never adds a key", () => {
+    const shown = new Set(["/a", "/c", "/zzz"]);
+    expect(filterBulk(["/a", "/b", "/c"], shown)).toEqual(["/a", "/c"]);
+    expect(filterBulk(["/b"], shown)).toEqual([]);
+    expect(filterBulk([], shown)).toEqual([]);
   });
 });

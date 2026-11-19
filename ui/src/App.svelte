@@ -85,7 +85,7 @@
   } from "./lib/panes";
   import { headerTotal, projectLine } from "./lib/counts";
   import { collapseKeysToReveal, fileOrder, visibleItems } from "./lib/visible";
-  import { filterGroups, normalizeFilter } from "./lib/filter";
+  import { filterBulk, filterGroups, normalizeFilter, stillShown } from "./lib/filter";
   import { addFolderFor, findPendingRow, ownerOf, type LaunchTarget } from "./lib/launch";
   import { alreadyExcluded, excludedNotice, extensionGlob, folderGlob, hidePrompt } from "./lib/excludeSuggest";
   import {
@@ -138,6 +138,10 @@
   let filterText = $state("");
   const filter = $derived(normalizeFilter(filterText));
   let reviewTabs: ReviewTabs | undefined = $state();
+  // A row the filter hides must not stay selected: a/r would still decide a file nobody can see.
+  $effect(() => {
+    if (tab === "pending" && filter !== null && selectedRow && !stillShown(selectedRow.key, groups)) selectedRow = null;
+  });
   let mode = $state<"tree" | "list">("tree");
   let selectedRow = $state<Row | null>(null);
   let theme = $state<IconTheme>("dark");
@@ -309,7 +313,7 @@
     const keys = bulkKeys(view, tab);
     if (tab !== "pending" || filter === null) return keys;
     const shown = new Set(groups.flatMap((g) => g.rows.map((r) => r.path)));
-    return keys.filter((k) => shown.has(k));
+    return filterBulk(keys, shown);
   });
   const rejectOutcomes = $derived(Object.fromEntries((view?.pending ?? []).map((p) => [p.path, p.rejectOutcome])));
 
@@ -340,7 +344,7 @@
       if (selectedRow) {
         // Keep the selection on the fresh row object so its counts update; drop it if it is gone.
         const key = selectedRow.key;
-        selectedRow = groupsOf(hideExtra(v, extraHide), tab).flatMap((g) => g.rows).find((r) => r.key === key) ?? null;
+        selectedRow = shownGroups(hideExtra(v, extraHide), tab).flatMap((g) => g.rows).find((r) => r.key === key) ?? null;
       }
       return v;
     } catch (e) {
@@ -835,9 +839,16 @@
       return;
     }
     if (settingsFor !== selected) await loadSettings(selected);
-    if (!view || settingsFor !== selected) return;
+    if (!view || settingsFor !== selected) {
+      announce("Couldn't read this project's settings.");
+      return;
+    }
     if (settings.exclude.value.includes(glob)) {
       announce(alreadyExcluded(glob));
+      return;
+    }
+    if (settings.excludeOwner === "managedByVsCode") {
+      announce("Managed by VS Code: a VS Code window wrote its own exclude list for this project, so the app no longer changes it. Take it back in Settings.");
       return;
     }
     if (settings.excludeOwner !== "owned") {

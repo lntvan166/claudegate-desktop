@@ -66,3 +66,13 @@ export function matchPrompt(
     danger: true,
   };
 }
+
+/** Whether the row `key` is among the rows the filter shows (a hidden row must not stay selected). */
+export function stillShown(key: string, shown: Group[]): boolean {
+  return shown.some((g) => g.rows.some((r) => r.key === key));
+}
+
+/** The bulk keys a filtered Accept/Reject may act on: only those the filter shows, nothing else. */
+export function filterBulk(keys: string[], shownPaths: Set<string>): string[] {
+  return keys.filter((k) => shownPaths.has(k));
+}
