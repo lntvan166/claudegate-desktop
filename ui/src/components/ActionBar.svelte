@@ -3,6 +3,8 @@
   import type { DiffKind } from "../lib/api";
   import { bulkLabel } from "../lib/counts";
   import { bulkPrompt, rejectPrompt, type BulkAction, type RejectOutcome } from "../lib/decide";
+  import { matchPrompt } from "../lib/filter";
+  import { basename } from "../lib/rows";
 
   let {
     tab,
@@ -10,6 +12,7 @@
     busy,
     outcomes = {},
     tabCount = 0,
+    filter = null,
     onaction,
   }: {
     tab: DiffKind;
@@ -20,6 +23,8 @@
     outcomes?: Record<string, RejectOutcome>;
     /** The tab's own count; the bar says "N to review" when it acts on fewer. */
     tabCount?: number;
+    /** Pending: the active filter; `keys` are then only the matching rows, and the buttons say so. */
+    filter?: string | null;
     /** `keys` are exactly the rows counted in the question the user answered. */
     onaction: (a: BulkAction, keys: string[]) => void;
   } = $props();
@@ -32,8 +37,22 @@
 
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
+  /** A reject names what it deletes, so a filtered one does too, after the extension's sentence. */
+  function filteredReject(f: string) {
+    const p = matchPrompt("reject", asked.length, f);
+    const gone = asked.filter((path) => outcomes[path] === "delete").map(basename);
+    if (gone.length === 0) return p;
+    const shown = gone.slice(0, 3).join(", ");
+    const more = gone.length > 3 ? ` +${gone.length - 3} more` : "";
+    return { ...p, text: `${p.text} ${gone.length === 1 ? "1 new file" : `${gone.length} new files`} will be deleted: ${shown}${more}.` };
+  }
+
   const prompt = $derived(
-    confirming === "rejectAll"
+    filter && confirming === "acceptAll"
+      ? matchPrompt("accept", asked.length, filter)
+      : filter && confirming === "rejectAll"
+        ? filteredReject(filter)
+        : confirming === "rejectAll"
       ? rejectPrompt(asked.map((path) => ({ path, rejectOutcome: outcomes[path] ?? "restore" })))
       : confirming
         ? bulkPrompt(confirming, tab, asked.length)
@@ -59,7 +78,7 @@
 
   /** Accept all: at once for a few files, after "Accept N files?" for more. */
   function acceptAll() {
-    if (bulkPrompt("acceptAll", tab, keys.length)) void ask("acceptAll");
+    if (filter || bulkPrompt("acceptAll", tab, keys.length)) void ask("acceptAll");
     else onaction("acceptAll", [...keys]);
   }
 
@@ -72,6 +91,12 @@
     confirming = null;
     if (a) onaction(a, asked);
   }
+
+  // The filter changed under an open question: its count and wording no longer apply.
+  $effect(() => {
+    void filter;
+    confirming = null;
+  });
 
   // Nothing left to act on (the list emptied underneath): the question no longer applies.
   $effect(() => {
@@ -135,10 +160,10 @@
   <div class="bar" role="toolbar" aria-label="{tab} actions">
     {#if tab === "pending"}
       <button class="btn" disabled={busy || count === 0} onclick={() => acceptAll()}>
-        {@render check()} Accept all
+        {@render check()} {filter ? `Accept ${count} matching` : "Accept all"}
       </button>
       <button class="btn" disabled={busy || count === 0} onclick={() => void ask("rejectAll")}>
-        {@render cross()} Reject all
+        {@render cross()} {filter ? `Reject ${count} matching` : "Reject all"}
       </button>
     {:else}
       <button
@@ -170,6 +195,7 @@
 
   .count {
     margin-left: auto;
+    white-space: nowrap;
     font-size: var(--fs-small);
     color: var(--muted);
   }

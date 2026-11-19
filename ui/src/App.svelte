@@ -83,6 +83,8 @@
   } from "./lib/panes";
   import { headerTotal, projectLine } from "./lib/counts";
   import { collapseKeysToReveal, fileOrder, visibleItems } from "./lib/visible";
+  import { filterGroups, normalizeFilter } from "./lib/filter";
+  import { alreadyExcluded, excludedNotice, extensionGlob, folderGlob, hidePrompt } from "./lib/excludeSuggest";
   import {
     DEFAULT_SETTINGS,
     globMatcher,
@@ -117,13 +119,22 @@
   function groupsOf(v: ProjectView, kind: DiffKind) {
     return bySession ? groupsBySession(v, kind) : groupsFor(v, kind);
   }
+  /** The tab's groups with the Pending filter applied (the other tabs are never filtered). */
+  function shownGroups(v: ProjectView, kind: DiffKind) {
+    const g = groupsOf(v, kind);
+    return kind === "pending" ? filterGroups(g, v, filter) : g;
+  }
   /** The protected globs for the selected project; the defaults until its settings have loaded. */
   const protectedGlobs = $derived(settingsFor === selected ? settings.protected.value : DEFAULT_SETTINGS.protected.value);
   const isProtected = $derived(globMatcher(view?.root ?? "", protectedGlobs));
   /** An accept of protected files waiting for its answer. */
-  let protectAsk = $state<{ text: string; go: () => void } | null>(null);
+  let protectAsk = $state<{ text: string; go: () => void; label: string; aria: string; lock: boolean } | null>(null);
   let protectEl: HTMLDivElement | undefined = $state();
   let tab = $state<DiffKind>("pending");
+  /** The Pending filter box, per project: kept across refreshes and decisions, cleared on a switch. */
+  let filterText = $state("");
+  const filter = $derived(normalizeFilter(filterText));
+  let reviewTabs: ReviewTabs | undefined = $state();
   let mode = $state<"tree" | "list">("tree");
   let selectedRow = $state<Row | null>(null);
   let theme = $state<IconTheme>("dark");
@@ -253,7 +264,8 @@
     accepted: view?.accepted.length ?? 0,
     rejected: view?.rejected.length ?? 0,
   });
-  const groups = $derived(view ? groupsOf(view, tab) : []);
+  const groups = $derived(view ? shownGroups(view, tab) : []);
+  const shownPendingRows = $derived(tab === "pending" ? groups.reduce((n, g) => n + g.rows.length, 0) : 0);
   /** The screen's one finding: what is pending, what isn't written yet, for how long. */
   const finding = $derived(
     !view || view.missing
@@ -289,7 +301,13 @@
     result && !canDecide ? { ...result, undo: undefined, retry: undefined } : result,
   );
   /** What the tab's bulk actions touch and count: see `bulkKeys`. */
-  const bulk = $derived(view ? bulkKeys(view, tab) : []);
+  const bulk = $derived.by(() => {
+    if (!view) return [];
+    const keys = bulkKeys(view, tab);
+    if (tab !== "pending" || filter === null) return keys;
+    const shown = new Set(groups.flatMap((g) => g.rows.map((r) => r.path)));
+    return keys.filter((k) => shown.has(k));
+  });
   const rejectOutcomes = $derived(Object.fromEntries((view?.pending ?? []).map((p) => [p.path, p.rejectOutcome])));
 
   // Responses can arrive out of order when events land in quick succession.
@@ -389,6 +407,7 @@
     viewError = null;
     if (root !== selected) {
       selected = root;
+      filterText = "";
       rawView = null;
       selectedRow = null;
       result = null;
@@ -436,7 +455,7 @@
   /** Selects the pending row with `key` in `v` (a fresh fetch), unfolding whatever hides it. */
   function selectPending(v: ProjectView | null, key: string) {
     if (!v || tab !== "pending") return;
-    const row = groupsOf(hideExtra(v, extraHide), "pending").flatMap((g) => g.rows).find((r) => r.key === key);
+    const row = shownGroups(hideExtra(v, extraHide), "pending").flatMap((g) => g.rows).find((r) => r.key === key);
     if (!row) return;
     for (const k of collapseKeysToReveal(row, "pending", collapsed)) collapsed.delete(k);
     selectedRow = row;
@@ -522,7 +541,7 @@
     }
     const advanceFrom =
       settings.autoAdvance.value && target.kind === "file" && tab === "pending" && opts.row && opts.row.key === selectedRow?.key ? opts.row.key : null;
-    const nextKey = advanceFrom ? nextAfterDecision(fileOrder(groupsOf(view, "pending"), mode), advanceFrom) : null;
+    const nextKey = advanceFrom ? nextAfterDecision(fileOrder(shownGroups(view, "pending"), mode), advanceFrom) : null;
     // Undo of an accept looks for a record stamped at or after this moment, never an older one.
     const since = new Date().toISOString();
     // A bulk or folder accept/reject: the confirmed rows, with their scopes, for its Undo.
@@ -660,9 +679,13 @@
   const showGroups = $derived(bySession || (view?.scopes.length ?? 0) > 1);
 
   /** Shows the inline "looks like a secret" question; `go` runs the accept once it is answered yes. */
-  async function askProtect(text: string, go: () => void) {
+  async function askProtect(
+    text: string,
+    go: () => void,
+    how: { label: string; aria: string; lock: boolean } = { label: "Accept anyway", aria: "Confirm accept", lock: true },
+  ) {
     protectReturn = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    protectAsk = { text, go };
+    protectAsk = { text, go, ...how };
     await tick();
     // Cancel is the safe default.
     protectEl?.querySelector<HTMLButtonElement>("[data-cancel]")?.focus();
@@ -754,6 +777,45 @@
   const changeExclude = (globs: string[] | null) =>
     selected ? applySettings(() => setProjectExclude(selected!, globs), "the exclude list", true) : Promise.resolve(false);
 
+  /** The context menu's hide items for `row`, from its extension and its folder (null hides one). */
+  function hideItems(row: Row) {
+    if (tab !== "pending") return [];
+    const out: { id: string; label: string }[] = [];
+    const ext = extensionGlob(row.rel);
+    if (ext) out.push({ id: `hide:${ext}`, label: `Hide every ${ext.slice(4)} file from review` });
+    const dir = folderGlob(row.path, row.scope);
+    if (dir) out.push({ id: `hide:${dir}`, label: `Hide everything under ${dir.slice(3, -3)}/ from review` });
+    return out;
+  }
+
+  /** Asks before adding `glob` to the project's exclude; nothing is decided, only hidden. */
+  async function askHide(glob: string) {
+    if (!selected || !view) return;
+    if (lockReason) {
+      announce(lockReason);
+      return;
+    }
+    if (settingsFor !== selected) await loadSettings(selected);
+    if (!view || settingsFor !== selected) return;
+    if (settings.exclude.value.includes(glob)) {
+      announce(alreadyExcluded(glob));
+      return;
+    }
+    if (settings.excludeOwner !== "owned") {
+      announce("This project's exclude list is set by VS Code. Change it there, or hide more files in Settings.");
+      return;
+    }
+    const match = globMatcher(view.root, [glob]);
+    const n = view.pending.filter((p) => match(p.path)).length;
+    await askProtect(hidePrompt(glob, n), () => void hideGlob(glob), { label: "Hide from review", aria: "Confirm hide", lock: false });
+  }
+
+  async function hideGlob(glob: string) {
+    if (!selected) return;
+    // The writer Settings uses: the effective list plus the glob.
+    if (await changeExclude([...settings.exclude.value, glob])) announce(excludedNotice(glob));
+  }
+
   function openSettings() {
     settingsOpen = true;
     void loadSettings(selected);
@@ -838,6 +900,13 @@
       else actionBar?.trigger(a.action);
       return;
     }
+    if (a?.type === "filter") {
+      if (document.querySelector('[role="menu"], [data-confirm]') || !view || view.missing || narrowDiffOpen) return;
+      e.preventDefault();
+      setTab("pending");
+      void tick().then(() => reviewTabs?.focusFilter());
+      return;
+    }
     if (a?.type === "projects") {
       // Not while the Open-with menu is up, wherever focus is.
       if (document.querySelector('[role="menu"]')) return;
@@ -860,7 +929,7 @@
         break;
       }
       case "pending": {
-        const order = fileOrder(groupsOf(view, "pending"), mode);
+        const order = fileOrder(shownGroups(view, "pending"), mode);
         const cur = tab === "pending" ? order.findIndex((r) => r.key === selectedRow?.key) : -1;
         const i = nextIndex(cur, order.length, a.dir);
         if (i < 0) break;
@@ -941,14 +1010,16 @@
 {#snippet protectBar()}
   {#if protectAsk}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div class="protect" role="group" aria-label="Confirm accept" data-confirm bind:this={protectEl} onkeydown={protectKeys}>
-      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-        <rect x="3.5" y="7" width="9" height="6.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3" />
-        <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.3" />
-      </svg>
+    <div class="protect" role="group" aria-label={protectAsk.aria} data-confirm bind:this={protectEl} onkeydown={protectKeys}>
+      {#if protectAsk.lock}
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <rect x="3.5" y="7" width="9" height="6.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3" />
+          <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.3" />
+        </svg>
+      {/if}
       <p class="protect-text">{protectAsk.text}</p>
       <div class="protect-buttons">
-        <button class="protect-btn go" disabled={busy} onclick={() => answerProtect(true)}>Accept anyway</button>
+        <button class="protect-btn go" disabled={busy} onclick={() => answerProtect(true)}>{protectAsk.label}</button>
         <button class="protect-btn" data-cancel onclick={() => answerProtect(false)}>Cancel</button>
       </div>
     </div>
@@ -960,11 +1031,11 @@
   <ContextMenu
     x={m.x}
     y={m.y}
-    label="Copy reference for Claude"
-    hint={isMac ? "⌘⌥C" : "Ctrl+Alt+C"}
-    onpick={() => {
+    items={[{ id: "copy", label: "Copy reference for Claude", hint: isMac ? "⌘⌥C" : "Ctrl+Alt+C" }, ...hideItems(m.row)]}
+    onpick={(id) => {
       rowMenu = null;
-      void copyRef(m.row);
+      if (id === "copy") void copyRef(m.row);
+      else if (id.startsWith("hide:")) void askHide(id.slice(5));
     }}
     onclose={() => (rowMenu = null)}
   />
@@ -1092,7 +1163,7 @@
           <h1>{current.name}</h1>
           <p class="finding" title={finding?.detail ?? finding?.text}>{finding?.text ?? "\u00a0"}</p>
         </div>
-        <ReviewTabs {tab} {counts} {mode} ontab={setTab} onmode={(m) => (mode = m)} />
+        <ReviewTabs bind:this={reviewTabs} bind:filter={filterText} shown={shownPendingRows} total={counts.pending} {tab} {counts} {mode} ontab={setTab} onmode={(m) => (mode = m)} />
         {#each troubled as s (s.root)}
           <div class="notice error">
             Couldn't read the session for <b>{scopeLabel(view!, s)}</b>: {s.error}
@@ -1116,7 +1187,7 @@
           </div>
         {:else if view && canDecide && bulk.length > 0}
           {#key tab}
-            <ActionBar bind:this={actionBar} {tab} keys={bulk} {busy} outcomes={rejectOutcomes} tabCount={counts[tab]} onaction={runBulk} />
+            <ActionBar bind:this={actionBar} {tab} keys={bulk} {busy} outcomes={rejectOutcomes} tabCount={filter !== null && tab === "pending" ? bulk.length : counts[tab]} filter={tab === "pending" ? filter : null} onaction={runBulk} />
           {/key}
         {/if}
         {#if !narrowDiffOpen}{@render protectBar()}{/if}
@@ -1134,7 +1205,10 @@
             </div>
           {:else if groups.length === 0}
             <div class="state small">
-              {#if tab === "pending"}
+              {#if tab === "pending" && filter !== null && counts.pending > 0}
+                <p class="state-title">No pending files match</p>
+                <p class="state-body">Press Esc in the filter box to clear it.</p>
+              {:else if tab === "pending"}
                 <p class="state-title">All caught up</p>
                 <p class="state-body">Claude's next edits to this project will show up here.</p>
               {:else}

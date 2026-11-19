@@ -47,6 +47,7 @@ describe("actionFor", () => {
     expect(actionFor(k("A"))).toEqual({ type: "bulk", action: "acceptAll" });
     expect(actionFor(k("R"))).toEqual({ type: "bulk", action: "rejectAll" });
     expect(actionFor(k("?"))).toEqual({ type: "help" });
+    expect(actionFor(k("/"))).toEqual({ type: "filter" });
     expect(actionFor(k("A", { ctrlKey: true }))).toBeNull();
   });
 

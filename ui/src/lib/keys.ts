@@ -16,7 +16,9 @@ export type KeyAction =
   /** Shift+A / Shift+R: Accept all / Reject all, through their confirmations. */
   | { type: "bulk"; action: "acceptAll" | "rejectAll" }
   /** `?`: the shortcut overlay. */
-  | { type: "help" };
+  | { type: "help" }
+  /** `/`: the Pending filter box. */
+  | { type: "filter" };
 
 type KeyLike = { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean };
 
@@ -46,6 +48,8 @@ export function actionFor(e: KeyLike): KeyAction | null {
       return { type: "bulk", action: "rejectAll" };
     case "?":
       return { type: "help" };
+    case "/":
+      return { type: "filter" };
   }
   const tab = TABS[e.key];
   return tab ? { type: "tab", tab } : null;

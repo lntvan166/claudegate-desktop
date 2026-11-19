@@ -1,16 +1,25 @@
 <script lang="ts">
   import type { DiffKind } from "../lib/api";
+  import { filterLabel, normalizeFilter } from "../lib/filter";
 
   let {
     tab,
     counts,
     mode,
+    filter = $bindable(""),
+    shown = 0,
+    total = 0,
     ontab,
     onmode,
   }: {
     tab: DiffKind;
     counts: Record<DiffKind, number>;
     mode: "tree" | "list";
+    /** The Pending filter text, raw; the box is on the Pending tab only. */
+    filter?: string;
+    /** Pending rows the filter shows, and all of them, for the count label. */
+    shown?: number;
+    total?: number;
     ontab: (t: DiffKind) => void;
     onmode: (m: "tree" | "list") => void;
   } = $props();
@@ -20,6 +29,29 @@
     { id: "accepted", label: "Accepted" },
     { id: "rejected", label: "Rejected" },
   ];
+
+  let input: HTMLInputElement | undefined = $state();
+  const label = $derived(tab === "pending" ? filterLabel(normalizeFilter(filter), shown, total) : undefined);
+
+  /** `/` from anywhere in the window. */
+  export function focusFilter() {
+    input?.focus();
+    input?.select();
+  }
+
+  /** Esc clears a set filter; with nothing to clear it gives focus back to the list. Enter does too. */
+  function onfilterkey(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (filter !== "") filter = "";
+      else input?.blur();
+    } else if (e.key === "Enter" || e.key === "ArrowDown") {
+      e.preventDefault();
+      e.stopPropagation();
+      input?.blur();
+    }
+  }
 
   function onkey(e: KeyboardEvent) {
     if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
@@ -60,6 +92,35 @@
     </button>
   </div>
 </div>
+{#if tab === "pending"}
+  <div class="find" class:set={filter !== ""}>
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+      <circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stroke-width="1.3" />
+      <path d="M10.2 10.2 13.5 13.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+    </svg>
+    <input
+      bind:this={input}
+      bind:value={filter}
+      type="text"
+      spellcheck="false"
+      autocomplete="off"
+      placeholder="Filter"
+      aria-label="Filter pending files"
+      aria-keyshortcuts="/"
+      onkeydown={onfilterkey}
+    />
+    {#if filter === ""}
+      <kbd aria-hidden="true">/</kbd>
+    {:else}
+      <button class="clear" aria-label="Clear the filter" title="Clear the filter (Esc)" onclick={() => { filter = ""; input?.focus(); }}>
+        <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
+      </button>
+    {/if}
+  </div>
+{/if}
+{#if label}
+  <p class="filterline num" title={label}>{label}</p>
+{/if}
 
 <style>
   .bar {
@@ -118,6 +179,67 @@
   .count.zero {
     color: var(--faint);
     font-weight: 400;
+  }
+
+  .find {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    margin: 8px 12px 0;
+    padding: 0 6px 0 8px;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-control);
+    color: var(--faint);
+    background: var(--surface);
+  }
+  .find:focus-within {
+    border-color: var(--focus-ring);
+    color: var(--muted);
+  }
+  .find.set {
+    color: var(--muted);
+  }
+  .find input {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    font-size: var(--fs-small);
+    color: var(--text);
+    background: transparent;
+  }
+  .find input::placeholder {
+    color: var(--faint);
+  }
+  .find kbd {
+    font-family: var(--font-mono);
+    font-size: var(--fs-meta);
+    color: var(--faint);
+  }
+  .find .clear {
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    color: var(--muted);
+  }
+  .find .clear:hover {
+    color: var(--text);
+    background: var(--hover);
+  }
+  .filterline {
+    flex: none;
+    padding: 5px 12px;
+    border-bottom: 1px solid var(--rule);
+    font-size: var(--fs-small);
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .mode {
