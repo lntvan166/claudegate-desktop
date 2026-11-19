@@ -2,6 +2,7 @@ pub mod capture;
 pub mod commands;
 pub mod config;
 pub mod editor;
+pub mod launch;
 pub mod tray;
 pub mod update;
 pub mod upkeep;
@@ -11,12 +12,16 @@ use tauri::Manager;
 
 pub fn run() {
     tauri::Builder::default()
+        // First: a second launch must hand over its argv and exit before anything else starts.
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| launch::second_instance(app, &args, &cwd)))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(launch::LaunchState::default())
         .manage(watch::KnownMap::default())
         .manage(commands::WriteLock::default())
         .manage(upkeep::UpkeepState::default())
         .setup(|app| {
+            launch::remember(app.handle(), &std::env::args().collect::<Vec<_>>());
             let known = app.state::<watch::KnownMap>().inner().clone();
             // Re-add any of the app's projects the extension dropped while we were not running.
             commands::ensure_roots_with(&claudegate_core::paths::claudegate_home(), &config::config_path());
@@ -30,6 +35,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            launch::launch_path,
             commands::list_projects,
             commands::get_project,
             commands::get_diff,

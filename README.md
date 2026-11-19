@@ -36,6 +36,28 @@ A failed check (offline) shows nothing. The update check writes no ClaudeGate st
 
 **Releasing:** bump `version` in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `package.json` and `ui/package.json`, then push a `v<version>` tag. `.github/workflows/release.yml` builds and signs the installers and `latest.json`, and leaves a draft release to publish. Signing uses the `TAURI_SIGNING_PRIVATE_KEY` secret. Its only copies are that secret and the age-encrypted backup in bifrost (`~/.tauri/claudegate-desktop.key`). If the key is lost, installed apps can no longer verify an update.
 
+## From the terminal and Zed
+
+The `.deb` installs a `claudegate` command next to the app:
+
+```bash
+claudegate .          # review the project that owns this folder
+claudegate src/a.ts   # the same, with that file's row selected
+claudegate            # the current directory
+```
+
+The app opens on the project that owns the path (a worktree counts as its project). If no project owns it, it says so and offers an Add project button; it never adds one by itself. A second launch hands its path to the running window and focuses it, so there is only ever one window. The command detaches from the terminal and prints nothing.
+
+To run it from Zed, add a task to `~/.config/zed/tasks.json`:
+
+```json
+{ "label": "ClaudeGate: review", "command": "claudegate", "args": ["$ZED_WORKTREE_ROOT"], "use_new_terminal": false, "reveal": "never", "hide": "always" }
+```
+
+Bind it to a key in `keymap.json` with `task::Spawn`, for example `{ "context": "Workspace", "bindings": { "ctrl-alt-g": ["task::Spawn", { "task_name": "ClaudeGate: review" }] } }`.
+
+On macOS there is no CLI install yet; `open -a ClaudeGate --args <path>` works.
+
 ## Decisions
 
 Each action works on one file, one folder or the whole project, in the same way as the VS Code extension.

@@ -40,7 +40,8 @@
       "deb": {
         "desktopTemplate": "claudegate.desktop",
         "files": {
-          "/usr/share/applications/dev.claudegate.desktop.desktop": "dev.claudegate.desktop.desktop"
+          "/usr/share/applications/dev.claudegate.desktop.desktop": "dev.claudegate.desktop.desktop",
+          "/usr/bin/claudegate": "claudegate"
         }
       }
     },

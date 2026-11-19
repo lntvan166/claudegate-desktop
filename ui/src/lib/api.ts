@@ -6,6 +6,7 @@
 // builds drop the branch and never emit the mock chunk.
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { LaunchTarget } from "./launch";
 import type { DecideAction, DecideReport, DecideTarget, RejectOutcome } from "./decide";
 import type { CaptureView, InstallView } from "./capture";
 import type { EditorConfig } from "./editors";
@@ -79,6 +80,7 @@ export type DiffPayload = { path: string; before: TextSide; after: TextSide };
 export type ChangedPayload = { roots: string[] };
 
 export const CHANGED_EVENT = "claudegate://changed";
+export const LAUNCH_EVENT = "claudegate://launch";
 
 /** core `projects::Added`: the root as listed; `already` when it was a project before. */
 export type AddedProject = { root: string; already: boolean };
@@ -90,6 +92,10 @@ export interface Api {
   getProject(root: string): Promise<ProjectView>;
   getDiff(root: string, scope: string, kind: DiffKind, key: string): Promise<DiffPayload>;
   onChanged(handler: (p: ChangedPayload) => void): Promise<() => void>;
+  /** A launch (`claudegate [PATH]`, first or second instance) asked for this path. */
+  onLaunch(handler: (t: LaunchTarget) => void): Promise<() => void>;
+  /** The path the app was started with, once; null when none. The first event can precede the listener. */
+  launchPath(): Promise<LaunchTarget | null>;
   getConfig(): Promise<EditorConfig>;
   /** Remembers `template` as the editor in ~/.claudegate-desktop/config.json. */
   setEditor(template: string): Promise<EditorConfig>;
@@ -152,6 +158,8 @@ const tauriApi: Api = {
   getProject: (root) => invoke<ProjectView>("get_project", { root }),
   getDiff: (root, scope, kind, key) => invoke<DiffPayload>("get_diff", { root, scope, kind, key }),
   onChanged: (handler) => listen<ChangedPayload>(CHANGED_EVENT, (e) => handler(e.payload)),
+  onLaunch: (handler) => listen<LaunchTarget>(LAUNCH_EVENT, (e) => handler(e.payload)),
+  launchPath: () => invoke<LaunchTarget | null>("launch_path"),
   getConfig: () => invoke<EditorConfig>("get_config"),
   setEditor: (template) => invoke<EditorConfig>("set_editor", { template }),
   openInEditor: (path, line, col, template) => invoke<void>("open_in_editor", { path, line, col, template }),
@@ -197,6 +205,8 @@ export const getDiff = async (root: string, scope: string, kind: DiffKind, key: 
   (await api()).getDiff(root, scope, kind, key);
 export const onChanged = async (handler: (p: ChangedPayload) => void) =>
   (await api()).onChanged(handler);
+export const onLaunch = async (handler: (t: LaunchTarget) => void) => (await api()).onLaunch(handler);
+export const launchPath = async () => (await api()).launchPath();
 export const getConfig = async () => (await api()).getConfig();
 export const setEditor = async (template: string) => (await api()).setEditor(template);
 export const openInEditor = async (path: string, line: number, col = 1, template: string | null = null) =>

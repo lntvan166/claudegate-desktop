@@ -18,6 +18,8 @@
     addProject,
     getConfig,
     getProject,
+    launchPath,
+    onLaunch,
     pickFolder,
     projectInVsCode,
     removeProject,
@@ -84,6 +86,7 @@
   import { headerTotal, projectLine } from "./lib/counts";
   import { collapseKeysToReveal, fileOrder, visibleItems } from "./lib/visible";
   import { filterGroups, normalizeFilter } from "./lib/filter";
+  import { addFolderFor, findPendingRow, ownerOf, type LaunchTarget } from "./lib/launch";
   import { alreadyExcluded, excludedNotice, extensionGlob, folderGlob, hidePrompt } from "./lib/excludeSuggest";
   import {
     DEFAULT_SETTINGS,
@@ -650,6 +653,42 @@
     }
   }
 
+  /** `claudegate [PATH]` asked for a path that no listed project owns; the answer is the user's. */
+  let launchAsk = $state<LaunchTarget | null>(null);
+
+  /** Selects the project owning `t.path` (and the pending row, for a file); otherwise asks. */
+  async function openLaunchTarget(t: LaunchTarget) {
+    launchAsk = null;
+    let owner = ownerOf(t.path, projects.map((p) => ({ root: p.root, scopes: [] })));
+    if (!owner) {
+      // A worktree scope can live outside its project's root; only a project's view lists them.
+      const views = await Promise.all(projects.map((p) => getProject(p.root).catch(() => null)));
+      owner = ownerOf(
+        t.path,
+        projects.map((p, i) => ({ root: p.root, scopes: views[i]?.scopes.map((s) => s.root) ?? [] })),
+      );
+    }
+    if (!owner) {
+      launchAsk = t;
+      return;
+    }
+    tab = "pending";
+    select(owner);
+    if (t.isDir) return;
+    const v = await loadView(owner);
+    if (!v || owner !== selected) return;
+    const row = findPendingRow(t.path, groupsOf(hideExtra(v, extraHide), "pending").flatMap((g) => g.rows));
+    if (row) selectedRow = row;
+  }
+
+  async function addLaunchFolder() {
+    const t = launchAsk;
+    launchAsk = null;
+    if (!t) return;
+    const err = await addProjectAt(addFolderFor(t));
+    if (err) show({ text: `Couldn't add the project: ${err}`, tone: "error" });
+  }
+
   async function removeProjectAt(root: string) {
     const name = projects.find((p) => p.root === root)?.name ?? basename(root);
     try {
@@ -977,12 +1016,12 @@
     mq.addEventListener("change", sync);
 
     // The config first: it says which projects are hidden, so the first pick is a shown one.
-    getConfig()
+    const listLoaded = getConfig()
       .then(
         (c) => (config = c),
         () => {},
       )
-      .finally(() => void loadProjects());
+      .then(() => loadProjects());
     window.addEventListener("keydown", onKey);
     const off = onChanged(({ roots }) => {
       // A takeover, a config change or the selected project's own change can alter what Settings shows.
@@ -994,7 +1033,13 @@
       for (const root of roots) refresh(root);
     });
 
+    // A launch path: asked for once (the first event can fire before this listener exists), then
+    // heard for every later launch. It waits for the project list so there is something to match.
+    const offLaunch = onLaunch((t) => void listLoaded.then(() => openLaunchTarget(t)));
+    void listLoaded.then(() => launchPath()).then((t) => t && openLaunchTarget(t), () => {});
+
     return () => {
+      void offLaunch.then((f) => f());
       mq.removeEventListener("change", sync);
       document.removeEventListener("scroll", pinScroll, true);
       window.removeEventListener("scroll", pinWindow);
@@ -1051,6 +1096,14 @@
     {#key notice.id}<p class="toast">{notice.text}</p>{/key}
   {/if}
 </div>
+
+{#if launchAsk}
+  <div class="launch-ask" role="alertdialog" aria-label="Not a ClaudeGate project">
+    <p class="path">{launchAsk.path} isn't a ClaudeGate project.</p>
+    <button class="protect-btn go" onclick={() => void addLaunchFolder()}>Add project</button>
+    <button class="protect-btn" onclick={() => (launchAsk = null)}>Dismiss</button>
+  </div>
+{/if}
 
 <div class="app" class:animate={animatePanes} class:narrow-diff={narrowFull} style:--sidebar-w="{panes.projects}px" style:--tree-w="{panes.tree}px">
   <header class="toolbar">
@@ -1673,6 +1726,29 @@
     z-index: 50;
     transform: translateX(-50%);
     pointer-events: none;
+  }
+  .launch-ask {
+    position: fixed;
+    top: calc(var(--toolbar-h) + 12px);
+    left: 50%;
+    z-index: 50;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: min(90vw, 720px);
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    font-size: var(--fs-small);
+    color: var(--text);
+    background: var(--surface);
+    box-shadow: var(--menu-shadow);
+  }
+  .launch-ask p {
+    margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   .toast {
     padding: 7px 12px;
