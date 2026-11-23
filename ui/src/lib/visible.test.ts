@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ScopeView } from "./api";
 import type { Group, Row } from "./rows";
-import { collapseKeysToReveal, fileOrder, visibleItems } from "./visible";
+import { collapseKeysToReveal, fileOrder, firstVisibleRow, folderCollapseKey, groupCollapseKey, visibleItems } from "./visible";
 
 const scope = (root: string, isWorktree = false): ScopeView => ({ root, isWorktree, shapeUnknown: [], error: null });
 const row = (scopeRoot: string, rel: string): Row => ({
@@ -69,5 +69,23 @@ describe("collapseKeysToReveal", () => {
     expect(collapseKeysToReveal(row(A, "src/api/b.ts"), "pending", collapsed).sort()).toEqual(
       [`pending|${A}|src`, `pending|${A}|src/api`, `pending|group|${A}`].sort(),
     );
+  });
+});
+
+describe("firstVisibleRow", () => {
+  it("is the first file in display order", () => {
+    expect(firstVisibleRow(groups, { mode: "tree", showGroups: true, tab: "accepted", collapsed: none })?.rel).toBe("src/api/b.ts");
+    expect(firstVisibleRow(groups, { mode: "list", showGroups: false, tab: "accepted", collapsed: none })?.rel).toBe("README.md");
+  });
+  it("skips what the tab has collapsed", () => {
+    const collapsed = new Set([groupCollapseKey("rejected", A)]);
+    expect(firstVisibleRow(groups, { mode: "tree", showGroups: true, tab: "rejected", collapsed })?.rel).toBe("z.ts");
+    const folder = new Set([folderCollapseKey("rejected", A, "src")]);
+    expect(firstVisibleRow(groups, { mode: "tree", showGroups: true, tab: "rejected", collapsed: folder })?.rel).toBe("README.md");
+  });
+  it("is null for an empty tab or nothing on screen", () => {
+    expect(firstVisibleRow([], { mode: "tree", showGroups: true, tab: "pending", collapsed: none })).toBeNull();
+    const all = new Set([groupCollapseKey("pending", A), groupCollapseKey("pending", W)]);
+    expect(firstVisibleRow(groups, { mode: "tree", showGroups: true, tab: "pending", collapsed: all })).toBeNull();
   });
 });

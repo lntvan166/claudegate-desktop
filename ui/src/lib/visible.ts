@@ -87,3 +87,12 @@ export function collapseKeysToReveal(row: Row, tab: DiffKind, collapsed: Iterabl
   }
   return out;
 }
+
+/**
+ * The row a tab switch selects: the first file on screen, in display order, under the tab's own
+ * collapse state (and the filter, which the caller has applied to `groups`). Null when no file
+ * shows: an empty tab keeps its empty state, and a fully collapsed one selects nothing hidden.
+ */
+export function firstVisibleRow(groups: Group[], o: Opts): Row | null {
+  return visibleItems(groups, o).find((i) => i.kind === "file")?.row ?? null;
+}

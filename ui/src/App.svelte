@@ -94,7 +94,7 @@
     writeStore,
     type ListMode,
   } from "./lib/uiState";
-  import { collapseKeysToReveal, fileOrder, visibleItems } from "./lib/visible";
+  import { collapseKeysToReveal, fileOrder, firstVisibleRow, visibleItems } from "./lib/visible";
   import { filterBulk, filterGroups, normalizeFilter, stillShown } from "./lib/filter";
   import { addFolderFor, addLabel, findPendingRow, launchNotice, ownerOf, type LaunchTarget } from "./lib/launch";
   import { alreadyExcluded, excludedNotice, extensionGlob, folderGlob, hidePrompt } from "./lib/excludeSuggest";
@@ -463,7 +463,9 @@
   function setTab(t: DiffKind) {
     if (t === tab) return;
     tab = t;
-    selectedRow = null;
+    // The new tab's first row on screen (after the filter), so its diff shows at once. Focus stays
+    // where it was: a click on a tab does not pull the keyboard into the list.
+    selectedRow = view ? firstVisibleRow(shownGroups(view, t), { mode, showGroups, tab: t, collapsed }) : null;
   }
 
   async function open(row: Row, line: number, template: string | null = null, col = 1) {
