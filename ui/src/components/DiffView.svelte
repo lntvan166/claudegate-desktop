@@ -9,7 +9,7 @@
   import { modifiedPositionFor } from "../lib/navigate";
   import { deletedOnDisk, diffErrorText, paneState } from "../lib/paneState";
   import { loadWrap, readStore, WRAP_KEY, writeStore } from "../lib/uiState";
-  import { chooseSelection, selectionOnModified, type LineRange } from "../lib/ref";
+  import { chooseSelection, refLines, selectionOnModified, type LineRange } from "../lib/ref";
   import type { Row } from "../lib/rows";
   import OpenWith from "./OpenWith.svelte";
 
@@ -67,7 +67,7 @@
     onback?: (() => void) | null;
     /** Open the file at a position on its current (modified) side: Ctrl/Cmd+click, F12, the menu. */
     onopenat?: (line: number, col: number) => void;
-    /** Copy a reference for Claude: the selection's lines on the file's side, or null for the file. */
+    /** Copy a reference for Claude: the selection's (or cursor's) lines on the file's side, or null for the file. */
     oncopyref?: (sel: LineRange | null) => void;
     /** The shortcut shown in the Copy @ref button's tooltip. */
     copyRefHint?: string;
@@ -116,9 +116,10 @@
   }
 
   /**
-   * The selected lines as lines of the file on disk, or null with none. With `focusedOnly` (the
-   * keyboard) a selection counts only in the side that has focus; the header button and menu take
-   * whichever side holds one, the side last used first.
+   * The lines a reference carries, as lines of the file on disk: the selection, else the line of
+   * the cursor the user placed, else null (the file). With `focusedOnly` (the keyboard) a selection
+   * or cursor counts only in the side that has focus; the header button and menu take whichever
+   * side holds one, the side last used first.
    */
   export function selection(focusedOnly = false): LineRange | null {
     if (!editor) return null;
@@ -127,7 +128,7 @@
       { side: "modified" as const, e: editor.getModifiedEditor() },
     ].sort((a, b) => Number(b.side === cursor?.side) - Number(a.side === cursor?.side));
     const changes = editor.getLineChanges() ?? [];
-    return chooseSelection(
+    const sel = chooseSelection(
       sides.map(({ side, e }) => {
         const sel = e.getSelection();
         const range = sel && !sel.isEmpty() ? selectionOnModified(side, { start: sel.startLineNumber, end: sel.endLineNumber }, changes) : null;
@@ -135,6 +136,8 @@
       }),
       focusedOnly,
     );
+    const placed = cursor && (!focusedOnly || sides.find((s) => s.side === cursor!.side)!.e.hasTextFocus()) ? cursor : null;
+    return refLines(sel, placed, changes);
   }
 
   type CodeEditor = import("monaco-editor/editor/editor.api.js").editor.IStandaloneCodeEditor;
@@ -179,7 +182,10 @@
       run: (ed) => {
         const sel = ed.getSelection();
         const lines = sel && !sel.isEmpty() ? { start: sel.startLineNumber, end: sel.endLineNumber } : null;
-        oncopyref(lines && selectionOnModified(side, lines, editor?.getLineChanges() ?? []));
+        const changes = editor?.getLineChanges() ?? [];
+        // No selection: this side's cursor, when the user placed it.
+        const placed = cursor?.side === side ? cursor : null;
+        oncopyref(refLines(lines && selectionOnModified(side, lines, changes), placed, changes));
       },
     });
     // VS Code's diff keys; the window answers them too while focus is elsewhere.
@@ -530,7 +536,7 @@
       </div>
       <button
         class="copyref"
-        title="Copy a reference for Claude: the selection, or the file ({copyRefHint})"
+        title="Copy a reference for Claude: the selection, the cursor line, or the file ({copyRefHint})"
         aria-label="Copy reference for Claude"
         aria-keyshortcuts="Control+Alt+C"
         onclick={() => oncopyref(selection(false))}
@@ -573,7 +579,7 @@
           <div><dt><kbd>N</kbd> <kbd>P</kbd></dt><dd>Next and previous pending, across worktrees</dd></div>
           <div><dt><kbd>A</kbd> <kbd>R</kbd></dt><dd>Accept or reject the selected file or focused folder</dd></div>
           <div><dt><kbd>O</kbd></dt><dd>Open in {label} at the cursor, or the first change</dd></div>
-          <div><dt><kbd>{copyRefHint}</kbd></dt><dd>Copy a reference for Claude: selection or file</dd></div>
+          <div><dt><kbd>{copyRefHint}</kbd></dt><dd>Copy a reference for Claude: selection, cursor line or file</dd></div>
           <div><dt><kbd>{copyRefHint.replace(/C$/, "Shift+C")}</kbd></dt><dd>Copy a reference to the whole file</dd></div>
           <div><dt><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></dt><dd>Pending, accepted, rejected</dd></div>
           <div><dt><kbd>[</kbd></dt><dd>Collapse or expand projects</dd></div>

@@ -207,7 +207,7 @@
       show({ text: `Couldn't copy the reference: ${e instanceof Error ? e.message : e}`, tone: "error" });
     }
   }
-  /** The keyboard and header-button entry: the diff's selection (or the file) for the selected row. */
+  /** The keyboard and header-button entry: the diff's selection, cursor line, or the file for the selected row. */
   function copySelectedRef(wholeFile: boolean, focusedOnly: boolean) {
     if (!selectedRow) {
       announce("Select a file to copy its reference");

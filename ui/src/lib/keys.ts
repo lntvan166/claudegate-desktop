@@ -58,7 +58,7 @@ export function actionFor(e: KeyLike): KeyAction | null {
 type RefKeyLike = { code: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean };
 
 /**
- * Copy reference for Claude: Ctrl+Alt+C (Cmd+Alt+C on macOS) copies the selection, or the whole
+ * Copy reference for Claude: Ctrl+Alt+C (Cmd+Alt+C on macOS) copies the selection, the cursor line, or the whole
  * file with none; adding Shift always copies the whole file. `code`, not `key`: Alt changes the
  * character on macOS.
  */

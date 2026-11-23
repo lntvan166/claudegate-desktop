@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chooseSelection, clipboardText, formatRef, pasteHint, refRange, selectionOnModified } from "./ref";
+import { chooseSelection, clipboardText, formatRef, pasteHint, refLines, refRange, selectionOnModified } from "./ref";
 
 const ROOT = "/home/dev/shop";
 
@@ -84,5 +84,27 @@ describe("pasteHint", () => {
   it("is Cmd+V on macOS and Ctrl+Shift+V elsewhere (terminals)", () => {
     expect(pasteHint(true)).toBe("Cmd+V");
     expect(pasteHint(false)).toBe("Ctrl+Shift+V");
+  });
+});
+
+describe("refLines (cursor line)", () => {
+  const inserted = [{ originalStartLineNumber: 0, originalEndLineNumber: 0, modifiedStartLineNumber: 1, modifiedEndLineNumber: 2 }];
+  it("prefers the selection", () => {
+    expect(refLines({ start: 2, end: 4 }, { side: "modified", line: 9 }, [])).toEqual({ start: 2, end: 4 });
+  });
+  it("uses the cursor line with no selection, in the one-line format", () => {
+    const r = refLines(null, { side: "modified", line: 7 }, []);
+    expect(r).toEqual({ start: 7, end: 7 });
+    expect(formatRef("/r/src/a.ts", "/r", "relative", r)).toBe("@src/a.ts:7-7");
+  });
+  it("carries an original-side cursor across the changes, like Open", () => {
+    expect(refLines(null, { side: "original", line: 1 }, inserted)).toEqual({ start: 3, end: 3 });
+  });
+  it("lands a cursor on a deleted line on the line above the cut", () => {
+    const deleted = [{ originalStartLineNumber: 5, originalEndLineNumber: 6, modifiedStartLineNumber: 4, modifiedEndLineNumber: 0 }];
+    expect(refLines(null, { side: "original", line: 6 }, deleted)).toEqual({ start: 4, end: 4 });
+  });
+  it("copies the whole file with no cursor", () => {
+    expect(refLines(null, null, inserted)).toBeNull();
   });
 });

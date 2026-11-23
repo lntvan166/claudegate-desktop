@@ -44,6 +44,21 @@ export function chooseSelection(cands: { range: LineRange | null; focused: boole
 }
 
 /**
+ * The lines a copy carries: the selection when there is one, else the line of a cursor the user
+ * placed (a one-line range, `@path:N-N`, carried from the original side like Open is), else null
+ * for the whole file.
+ */
+export function refLines(
+  sel: LineRange | null,
+  cursor: { side: "original" | "modified"; line: number } | null,
+  changes: LineChange[],
+): LineRange | null {
+  if (sel) return sel;
+  if (!cursor) return null;
+  return selectionOnModified(cursor.side, { start: cursor.line, end: cursor.line }, changes);
+}
+
+/**
  * The line range a copy may carry on `tab`. Only Pending: its modified side is the file on disk.
  * On Accepted and Rejected the lines would come from text that is not on disk, so the reference
  * is always the whole file.

@@ -38,7 +38,7 @@
         [["F12"], `Open in ${editorName} at the cursor`],
         [["Double-click"], `Open a file in ${editorName}`],
         [[isMac ? "⌘ click" : "Ctrl click"], `Open in ${editorName} at that token`],
-        [[isMac ? "⌘⌥C" : "Ctrl+Alt+C"], "Copy a reference for Claude: the selection, or the file"],
+        [[isMac ? "⌘⌥C" : "Ctrl+Alt+C"], "Copy a reference for Claude: the selection, the cursor line, or the file"],
         [[isMac ? "⌘⌥⇧C" : "Ctrl+Alt+Shift+C"], "Copy a reference to the whole file"],
         [["Right-click"], "On a pending row: copy a reference, or hide its extension or folder from review"],
         [["Esc"], "Close this, a menu, or the narrow diff"],
