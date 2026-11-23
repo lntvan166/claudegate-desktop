@@ -18,6 +18,8 @@
         [["/"], "Filter the pending list; Esc clears it"],
         [["["], "Collapse or expand projects"],
         [["←", "→"], "Fold or unfold a folder in the list"],
+        [[isMac ? "⌥F5" : "Alt+F5", isMac ? "⇧⌥F5" : "Shift+Alt+F5"], "Next and previous change in the diff"],
+        [[isMac ? "⌥Z" : "Alt+Z"], "Wrap long lines in the diff, or stop"],
       ],
     },
     {
@@ -34,6 +36,7 @@
       keys: [
         [["O"], `Open in ${editorName} at the cursor, or the first change`],
         [["F12"], `Open in ${editorName} at the cursor`],
+        [["Double-click"], `Open a file in ${editorName}`],
         [[isMac ? "⌘ click" : "Ctrl click"], `Open in ${editorName} at that token`],
         [[isMac ? "⌘⌥C" : "Ctrl+Alt+C"], "Copy a reference for Claude: the selection, or the file"],
         [[isMac ? "⌘⌥⇧C" : "Ctrl+Alt+Shift+C"], "Copy a reference to the whole file"],

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { paneState } from "./paneState";
+import { deletedOnDisk, diffErrorText, paneState } from "./paneState";
 
 const text = { kind: "text" as const, text: "x" };
 const bin = { kind: "binary" as const };
@@ -35,5 +35,25 @@ describe("paneState", () => {
 
   it("is the editor for text, including a new file", () => {
     expect(paneState(row, { before: missing, after: text }, false, null)).toBe("editor");
+  });
+});
+
+describe("deletedOnDisk", () => {
+  const missing = { kind: "missing" as const };
+  it("is true only when text became missing", () => {
+    expect(deletedOnDisk({ before: text, after: missing })).toBe(true);
+    expect(deletedOnDisk({ before: missing, after: text })).toBe(false);
+    expect(deletedOnDisk({ before: missing, after: missing })).toBe(false);
+    expect(deletedOnDisk({ before: bin, after: missing })).toBe(false);
+    expect(deletedOnDisk(null)).toBe(false);
+  });
+});
+
+describe("diffErrorText", () => {
+  it("explains a vanished entry", () => {
+    expect(diffErrorText("not found")).toMatch(/no longer in the review log/);
+  });
+  it("passes other errors through", () => {
+    expect(diffErrorText("Permission denied")).toBe("Permission denied");
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { refKeyFor, actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL, DIFF_HIDDEN_REFUSAL, READ_ONLY_REFUSAL } from "./keys";
+import { diffKeyFor, refKeyFor, actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL, DIFF_HIDDEN_REFUSAL, READ_ONLY_REFUSAL } from "./keys";
 
 describe("nextIndex", () => {
   it("clamps without wrapping", () => {
@@ -186,5 +186,30 @@ describe("refKeyFor", () => {
     expect(refKeyFor(k({ ctrlKey: true }), false)).toBeNull();
     expect(refKeyFor(k({ ctrlKey: true, altKey: true, code: "KeyV" }), false)).toBeNull();
     expect(refKeyFor(k({ altKey: true }), false)).toBeNull();
+  });
+});
+
+describe("diffKeyFor", () => {
+  const k = (code: string, mods: Partial<{ ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }> = {}) => ({
+    code,
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    shiftKey: false,
+    ...mods,
+  });
+  it("Alt+F5 and Shift+Alt+F5 step through changes", () => {
+    expect(diffKeyFor(k("F5", { altKey: true }))).toEqual({ type: "change", dir: 1 });
+    expect(diffKeyFor(k("F5", { altKey: true, shiftKey: true }))).toEqual({ type: "change", dir: -1 });
+  });
+  it("Alt+Z toggles wrap", () => {
+    expect(diffKeyFor(k("KeyZ", { altKey: true }))).toEqual({ type: "wrap" });
+  });
+  it("ignores the keys without Alt, or with Ctrl/Cmd", () => {
+    expect(diffKeyFor(k("F5"))).toBeNull();
+    expect(diffKeyFor(k("KeyZ"))).toBeNull();
+    expect(diffKeyFor(k("F5", { altKey: true, ctrlKey: true }))).toBeNull();
+    expect(diffKeyFor(k("KeyZ", { altKey: true, metaKey: true }))).toBeNull();
+    expect(diffKeyFor(k("KeyZ", { altKey: true, shiftKey: true }))).toBeNull();
   });
 });

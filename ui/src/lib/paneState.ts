@@ -22,3 +22,19 @@ export function paneState(
   if (payload.before.kind === "binary" || payload.after.kind === "binary") return "binary";
   return "editor";
 }
+
+/** The file had text before and is gone now: Claude (or someone) deleted it. */
+export function deletedOnDisk(payload: { before: Side; after: Side } | null): boolean {
+  return !!payload && payload.before.kind === "text" && payload.after.kind === "missing";
+}
+
+/**
+ * What the diff pane says when a diff can't be fetched. The backend's bare "not found" means the
+ * entry left the session between the list and the fetch (decided in VS Code, or pruned); say so.
+ */
+export function diffErrorText(error: string): string {
+  if (error.trim() === "not found") {
+    return "This change is no longer in the review log: it was decided or dropped elsewhere. The list updates on its own.";
+  }
+  return error;
+}

@@ -125,3 +125,18 @@ export function decisionFor(e: KeyLike, c: DecisionContext): KeyDecision | null 
   if (c.selectedWaiting) return { refused: WAITING_REFUSAL };
   return { action, key: c.selectedKey };
 }
+
+export type DiffKey = { type: "change"; dir: 1 | -1 } | { type: "wrap" };
+
+type DiffKeyLike = { code: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean };
+
+/**
+ * VS Code's diff keys: Alt+F5 / Shift+Alt+F5 go to the next / previous change, Alt+Z toggles word
+ * wrap. `code`, not `key`: Alt changes the character on macOS.
+ */
+export function diffKeyFor(e: DiffKeyLike): DiffKey | null {
+  if (!e.altKey || e.ctrlKey || e.metaKey) return null;
+  if (e.code === "F5") return { type: "change", dir: e.shiftKey ? -1 : 1 };
+  if (e.code === "KeyZ" && !e.shiftKey) return { type: "wrap" };
+  return null;
+}

@@ -7,7 +7,8 @@
   import { iconFor, type IconTheme } from "../lib/icons";
   import { languageFor } from "../lib/language";
   import { modifiedPositionFor } from "../lib/navigate";
-  import { paneState } from "../lib/paneState";
+  import { deletedOnDisk, diffErrorText, paneState } from "../lib/paneState";
+  import { loadWrap, readStore, WRAP_KEY, writeStore } from "../lib/uiState";
   import { chooseSelection, selectionOnModified, type LineRange } from "../lib/ref";
   import type { Row } from "../lib/rows";
   import OpenWith from "./OpenWith.svelte";
@@ -181,6 +182,25 @@
         oncopyref(lines && selectionOnModified(side, lines, editor?.getLineChanges() ?? []));
       },
     });
+    // VS Code's diff keys; the window answers them too while focus is elsewhere.
+    e.addAction({
+      id: `claudegate.nextChange.${side}`,
+      label: "Go to next change",
+      keybindings: [m.KeyMod.Alt | m.KeyCode.F5],
+      run: () => goToChange(1),
+    });
+    e.addAction({
+      id: `claudegate.previousChange.${side}`,
+      label: "Go to previous change",
+      keybindings: [m.KeyMod.Shift | m.KeyMod.Alt | m.KeyCode.F5],
+      run: () => goToChange(-1),
+    });
+    e.addAction({
+      id: `claudegate.toggleWrap.${side}`,
+      label: "Toggle word wrap",
+      keybindings: [m.KeyMod.Alt | m.KeyCode.KeyZ],
+      run: () => toggleWrap(),
+    });
     e.addAction({
       id: `claudegate.openAtCursor.${side}`,
       label: "Open at cursor in editor",
@@ -190,6 +210,32 @@
         if (p) openAt(side, p.lineNumber, p.column);
       },
     });
+  }
+
+  /**
+   * Alt+F5 / Shift+Alt+F5: the next or previous change, from the cursor. Where it lands becomes
+   * the cursor, so Open and `o` go there next.
+   */
+  export function goToChange(dir: 1 | -1) {
+    if (!editor || pane !== "editor") return;
+    const mod = editor.getModifiedEditor();
+    // Step from where the user is: a cursor in the original side, carried across the changes.
+    if (cursor) {
+      const t = openTarget();
+      mod.setPosition({ lineNumber: t.line, column: t.col });
+    }
+    editor.goToDiff(dir === 1 ? "next" : "previous");
+    const p = mod.getPosition();
+    if (p) cursor = { side: "modified", line: p.lineNumber, col: p.column };
+  }
+
+  /** Alt+Z: wrap long lines in both sides, remembered across restarts. */
+  let wrap = $state(loadWrap(readStore(WRAP_KEY)));
+  export function toggleWrap() {
+    wrap = !wrap;
+    editor?.updateOptions({ wordWrap: wrap ? "on" : "off", diffWordWrap: wrap ? "on" : "off" });
+    writeStore(WRAP_KEY, wrap ? "on" : "off");
+    onnotice(wrap ? "Word wrap on" : "Word wrap off");
   }
 
   /** The decisions the header offers for the shown row's tab. */
@@ -320,8 +366,8 @@
       fontSize: 13,
       lineHeight: 20,
       fontLigatures: false,
-      wordWrap: "off",
-      diffWordWrap: "off",
+      wordWrap: wrap ? "on" : "off",
+      diffWordWrap: wrap ? "on" : "off",
       fixedOverflowWidgets: true,
       ariaLabel: "Diff",
     });
@@ -370,8 +416,14 @@
       const after = sideText(p.after);
       const cur = ed.getModel();
       if (cur && ident === shownIdent) {
+        const changed = cur.original.getValue() !== before || cur.modified.getValue() !== after;
+        if (!changed) return;
+        // Claude wrote the shown file again: new text, same place. setValue alone sends the
+        // cursor and the scroll back to line 1.
+        const kept = ed.saveViewState();
         if (cur.original.getValue() !== before) cur.original.setValue(before);
         if (cur.modified.getValue() !== after) cur.modified.setValue(after);
+        if (kept) ed.restoreViewState(kept);
         return;
       }
       const lang = languageFor(p.path);
@@ -429,6 +481,7 @@
         {#if row.rel.includes("/")}<span class="diff-dir"><bdi>{row.rel.slice(0, row.rel.lastIndexOf("/") + 1)}</bdi></span>{/if}<span class="diff-file">{fileName(row.rel)}</span>
       </span>
       {#if row.newFile}<span class="tag new">New file</span>{/if}
+      {#if deletedOnDisk(shown)}<span class="tag deleted" title="The file is no longer on disk">Deleted</span>{/if}
       {#if row.waiting}
         <!-- No change on disk yet: "+0 −0" would read as an empty edit, so say what it is. -->
         <span class="tag waiting" title="Captured before Claude wrote it; the write hasn't landed yet. It can be decided once it does.">Not written yet</span>
@@ -534,7 +587,7 @@
     {:else if pane === "error"}
       <div class="placeholder">
         <p class="ph-title">Couldn't load this diff</p>
-        <p class="ph-body path">{loadError}</p>
+        <p class="ph-body path">{diffErrorText(loadError ?? "")}</p>
       </div>
     {:else if pane === "binary"}
       <div class="placeholder">
@@ -592,6 +645,15 @@
     font-size: var(--fs-meta);
     line-height: 18px;
     color: var(--untracked);
+    background: var(--raised);
+  }
+  .tag.deleted {
+    flex: none;
+    padding: 0 6px;
+    border-radius: var(--radius-chip);
+    font-size: var(--fs-meta);
+    line-height: 18px;
+    color: var(--negative);
     background: var(--raised);
   }
   .tag.waiting {
@@ -869,7 +931,8 @@
   @container diff (max-width: 680px) {
     .diff-stats,
     .view,
-    .tag.new {
+    .tag.new,
+    .tag.deleted {
       display: none;
     }
     .diff-path {

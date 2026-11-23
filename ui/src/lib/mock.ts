@@ -410,6 +410,10 @@ function mockSettings(root: string | null): SettingsView {
 const delay = <T>(v: T) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), 120));
 
 const handlers = new Set<(p: ChangedPayload) => void>();
+/** Dev preview only: how many times `__mock.rewrite` has written each path again. */
+const rewrites: Record<string, number> = {};
+/** Dev preview only: pending files `__mock.deleteOnDisk` removed. */
+const deleted = new Set<string>();
 
 /**
  * Dev preview only: `__mock.drop("client.ts")` removes a pending row and fires the change event,
@@ -436,6 +440,24 @@ const handlers = new Set<(p: ChangedPayload) => void>();
     if (!root) return;
     takenOver[root] = globs;
     for (const h of handlers) h({ roots: [] });
+  },
+  /** The pending file ending in `suffix` is deleted on disk (Claude ran `rm`). */
+  deleteOnDisk(suffix: string) {
+    for (const v of Object.values(views)) {
+      const hit = v.pending.find((p) => p.path.endsWith(suffix));
+      if (!hit) continue;
+      deleted.add(hit.path);
+      for (const h of handlers) h({ roots: [v.root] });
+    }
+  },
+  /** Claude writes the pending file ending in `suffix` again: one more line at its end. */
+  rewrite(suffix: string) {
+    for (const v of Object.values(views)) {
+      const hit = v.pending.find((p) => p.path.endsWith(suffix));
+      if (!hit) continue;
+      rewrites[hit.path] = (rewrites[hit.path] ?? 0) + 1;
+      for (const h of handlers) h({ roots: [v.root] });
+    }
   },
   drop(suffix: string) {
     for (const v of Object.values(views)) {
@@ -468,10 +490,13 @@ export const mockApi: Api = {
     if (path.endsWith(".png")) return delay<DiffPayload>({ path, before: { kind: "binary" }, after: { kind: "binary" } });
     const isNew = kind === "pending" && Object.values(views).some((v) => v.pending.some((p) => p.path === key && p.newFile));
     const { before, after } = sample(path, isNew);
+    if (kind === "pending" && deleted.has(path)) {
+      return delay<DiffPayload>({ path, before: before === null ? { kind: "missing" } : { kind: "text", text: before }, after: { kind: "missing" } });
+    }
     return delay<DiffPayload>({
       path,
       before: before === null ? { kind: "missing" } : { kind: "text", text: before },
-      after: { kind: "text", text: after },
+      after: { kind: "text", text: after + "\n// rewritten\n".repeat(rewrites[path] ?? 0) },
     });
   },
   onChanged: async (handler) => {
