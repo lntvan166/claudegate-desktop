@@ -140,3 +140,14 @@ export function diffKeyFor(e: DiffKeyLike): DiffKey | null {
   if (e.code === "KeyZ" && !e.shiftKey) return { type: "wrap" };
   return null;
 }
+
+type UndoKeyLike = { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean };
+
+/**
+ * Ctrl+Z (Cmd+Z on macOS): the result bar's Undo. `key`, not `code`, so it follows the layout's Z
+ * like every other app's undo. Shift (redo) and Alt (word wrap) are not it.
+ */
+export function isUndoKey(e: UndoKeyLike, isMac: boolean): boolean {
+  if (e.key.toLowerCase() !== "z" || e.altKey || e.shiftKey) return false;
+  return isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+}

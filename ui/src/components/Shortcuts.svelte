@@ -29,6 +29,7 @@
         [["⇧A"], "Accept all (asks first above 5 files); with a filter, accept the matching files (asks first)"],
         [["⇧R"], "Reject all (asks first); with a filter, reject the matching files"],
         [["H"], "Hide the focused project"],
+        [[isMac ? "⌘Z" : "Ctrl+Z"], "Undo, while the result bar offers it"],
       ],
     },
     {

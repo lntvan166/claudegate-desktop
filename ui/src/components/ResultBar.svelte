@@ -28,6 +28,7 @@
     return () => clearTimeout(t);
   });
 
+  const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
   const short = (p: string) => p.replace(/\\/g, "/").split("/").slice(-2).join("/");
 </script>
 
@@ -54,7 +55,7 @@
       {/if}
       <p class="text">{result.text}</p>
       {#if result.undo}
-        <button class="act" disabled={busy} onclick={result.undo}>Undo</button>
+        <button class="act" disabled={busy} title={isMac ? "Undo (⌘Z)" : "Undo (Ctrl+Z)"} aria-keyshortcuts={isMac ? "Meta+Z" : "Control+Z"} onclick={result.undo}>Undo</button>
       {/if}
       {#if result.details?.length}
         <button class="act" aria-expanded={showDetails} onclick={() => (showDetails = !showDetails)}>Details</button>

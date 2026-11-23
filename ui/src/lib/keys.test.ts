@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { diffKeyFor, refKeyFor, actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL, DIFF_HIDDEN_REFUSAL, READ_ONLY_REFUSAL } from "./keys";
+import { diffKeyFor, isUndoKey, refKeyFor, actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL, DIFF_HIDDEN_REFUSAL, READ_ONLY_REFUSAL } from "./keys";
 
 describe("nextIndex", () => {
   it("clamps without wrapping", () => {
@@ -211,5 +211,29 @@ describe("diffKeyFor", () => {
     expect(diffKeyFor(k("F5", { altKey: true, ctrlKey: true }))).toBeNull();
     expect(diffKeyFor(k("KeyZ", { altKey: true, metaKey: true }))).toBeNull();
     expect(diffKeyFor(k("KeyZ", { altKey: true, shiftKey: true }))).toBeNull();
+  });
+});
+
+describe("isUndoKey", () => {
+  const k = (key: string, mods: Partial<{ ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }> = {}) => ({
+    key,
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    shiftKey: false,
+    ...mods,
+  });
+  it("is Ctrl+Z off macOS and Cmd+Z on it", () => {
+    expect(isUndoKey(k("z", { ctrlKey: true }), false)).toBe(true);
+    expect(isUndoKey(k("Z", { ctrlKey: true }), false)).toBe(true);
+    expect(isUndoKey(k("z", { metaKey: true }), true)).toBe(true);
+    expect(isUndoKey(k("z", { metaKey: true }), false)).toBe(false);
+    expect(isUndoKey(k("z", { ctrlKey: true }), true)).toBe(false);
+  });
+  it("is not plain z, redo, or Alt+Z", () => {
+    expect(isUndoKey(k("z"), false)).toBe(false);
+    expect(isUndoKey(k("z", { ctrlKey: true, shiftKey: true }), false)).toBe(false);
+    expect(isUndoKey(k("z", { ctrlKey: true, altKey: true }), false)).toBe(false);
+    expect(isUndoKey(k("y", { ctrlKey: true }), false)).toBe(false);
   });
 });

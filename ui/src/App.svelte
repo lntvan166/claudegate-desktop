@@ -63,7 +63,7 @@
   } from "./lib/decide";
   import { editorLabel, openedText, ZED } from "./lib/editors";
   import type { IconTheme } from "./lib/icons";
-  import { actionFor, decisionFor, diffKeyFor, DIFF_HIDDEN_REFUSAL, isTypingTarget, nextIndex, READ_ONLY_REFUSAL, refKeyFor, WAITING_REFUSAL } from "./lib/keys";
+  import { actionFor, decisionFor, diffKeyFor, DIFF_HIDDEN_REFUSAL, isUndoKey, isTypingTarget, nextIndex, READ_ONLY_REFUSAL, refKeyFor, WAITING_REFUSAL } from "./lib/keys";
   import { writeClipboard } from "./lib/clipboard";
   import { clipboardText, formatRef, pasteHint, refRange, type LineRange } from "./lib/ref";
   import { basename, groupsFor, scopeLabel, selectionAfterList, sortProjects, splitHidden, type Row } from "./lib/rows";
@@ -959,6 +959,14 @@
       return;
     }
     if (isTypingTarget(e.target as HTMLElement | null)) return;
+    // Ctrl/Cmd+Z: the result bar's Undo, only while it offers one and nothing else is asking.
+    if (isUndoKey(e, isMac)) {
+      const undo = shownResult?.undo;
+      if (!undo || busy || e.repeat || document.querySelector('[role="menu"], [data-confirm]')) return;
+      e.preventDefault();
+      undo();
+      return;
+    }
     // Alt+F5 / Alt+Z from the list: the diff's own keys (Monaco answers them itself when focused).
     const dk = diffKeyFor(e);
     if (dk) {
