@@ -6,7 +6,7 @@ Icon={{icon}}
 Name={{name}}
 Terminal=false
 Type=Application
-StartupWMClass=dev.claudegate.desktop
+StartupWMClass=claudegate-desktop
 # GNOME on Wayland matches the window to the entry named after the app id, which the package
 # installs as dev.claudegate.desktop.desktop. This bundler-named copy stays out of the menu.
 NoDisplay=true

@@ -7,6 +7,7 @@ pub mod tray;
 pub mod update;
 pub mod upkeep;
 pub mod watch;
+pub mod window_state;
 
 use tauri::Manager;
 
@@ -14,13 +15,8 @@ pub fn run() {
     tauri::Builder::default()
         // First: a second launch must hand over its argv and exit before anything else starts.
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| launch::second_instance(app, &args, &cwd)))
-        // The window's size and maximised state, kept across restarts. Not its position: Wayland
-        // can't set one, and a remembered spot on a monitor that is gone puts the window off-screen.
-        .plugin(
-            tauri_plugin_window_state::Builder::new()
-                .with_state_flags(tauri_plugin_window_state::StateFlags::SIZE | tauri_plugin_window_state::StateFlags::MAXIMIZED)
-                .build(),
-        )
+        // The window's size, position and maximised state, kept across restarts (see window_state).
+        .plugin(tauri_plugin_window_state::Builder::new().with_state_flags(window_state::flags()).build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(launch::LaunchState::default())
@@ -36,6 +32,7 @@ pub fn run() {
             commands::sync_excludes_with(&claudegate_core::paths::claudegate_home(), &config::config_path());
             watch::start(app.handle().clone(), claudegate_core::paths::claudegate_home(), known);
             tray::setup(app.handle());
+            window_state::save_as_it_changes(app.handle());
             // Bring the app's own ~/.claudegate/hook.py up to the bundled version (never the
             // extension's; never settings.json). Off the main thread: it runs python3 --version.
             std::thread::spawn(capture::update_hook_at_startup);
