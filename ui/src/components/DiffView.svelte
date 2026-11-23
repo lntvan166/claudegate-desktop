@@ -379,6 +379,16 @@
     });
     wireNavigation(m, "original", ed.getOriginalEditor());
     wireNavigation(m, "modified", ed.getModifiedEditor());
+    // Monaco pins the original side's wrap off (`wordWrapOverride2`) while the diff is inline, and
+    // never unpins it when the diff goes back to side by side (the inline button, or the window
+    // widening past the inline breakpoint). Unpin it whenever the original side is laid out, so
+    // Alt+Z wraps both sides.
+    const original = ed.getOriginalEditor();
+    const unpinWrap = () => {
+      if (original.getLayoutInfo().width > 0) original.updateOptions({ wordWrapOverride2: "inherit" });
+    };
+    original.onDidLayoutChange(unpinWrap);
+    original.onDidChangeConfiguration(unpinWrap);
     ed.onDidUpdateDiff(() => {
       const changes = ed.getLineChanges() ?? [];
       const c = changes[0];
