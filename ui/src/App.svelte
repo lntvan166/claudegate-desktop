@@ -450,8 +450,15 @@
     }
   }
 
+  /** Open the shown file where the user is looking: the diff's cursor, else its first change. */
+  function openSelected(template: string | null = null) {
+    if (!selectedRow) return;
+    const t = diffView?.openTarget() ?? { line: firstLine, col: 1 };
+    void open(selectedRow, t.line, template, t.col);
+  }
+
   async function pickEditor(template: string) {
-    if (selectedRow) void open(selectedRow, firstLine, template);
+    openSelected(template);
     try {
       config = await setEditor(template);
     } catch (e) {
@@ -991,7 +998,7 @@
         break;
       }
       case "open":
-        if (selectedRow) void open(selectedRow, firstLine);
+        openSelected();
         break;
       case "tab":
         setTab(a.tab);

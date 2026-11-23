@@ -83,10 +83,20 @@
     onopenat(p.line, p.col);
   }
 
+  /**
+   * Where "Open in editor" lands: the cursor the user last placed in either side (the original
+   * side carried across the changes), else the first change.
+   */
+  export function openTarget(): { line: number; col: number } {
+    if (!cursor) return { line: firstLine, col: 1 };
+    if (cursor.side === "modified") return { line: cursor.line, col: cursor.col };
+    return modifiedPositionFor(cursor.line, cursor.col, editor?.getLineChanges() ?? []);
+  }
+
   /** "Open at cursor (F12)" from the menu: the last cursor, else the first change. */
   function openAtCursor() {
-    if (cursor) openAt(cursor.side, cursor.line, cursor.col);
-    else onopenat(firstLine, 1);
+    const t = openTarget();
+    onopenat(t.line, t.col);
   }
 
   /**
@@ -139,6 +149,9 @@
       openAt(side, pos.lineNumber, pos.column);
     });
     e.onDidChangeCursorPosition((ev) => {
+      // Only a cursor the user placed; Monaco's own moves (a new model, revealing the first change)
+      // must not replace "the first change" with line 1.
+      if (ev.source !== "mouse" && ev.source !== "keyboard") return;
       cursor = { side, line: ev.position.lineNumber, col: ev.position.column };
     });
     // Monaco's right-click menu: the diff's entry for "Copy reference for Claude".
@@ -460,7 +473,7 @@
         </svg>
         <span class="crlabel">Copy @ref</span>
       </button>
-      <OpenWith {config} {onopen} {onpick} onopencursor={pane === "editor" ? openAtCursor : null} />
+      <OpenWith {config} onopen={pane === "editor" ? openAtCursor : onopen} {onpick} onopencursor={pane === "editor" ? openAtCursor : null} />
     </div>
   {/if}
 
@@ -491,7 +504,7 @@
           <div><dt><kbd>J</kbd> <kbd>K</kbd></dt><dd>Next and previous file</dd></div>
           <div><dt><kbd>N</kbd> <kbd>P</kbd></dt><dd>Next and previous pending, across worktrees</dd></div>
           <div><dt><kbd>A</kbd> <kbd>R</kbd></dt><dd>Accept or reject the selected file or focused folder</dd></div>
-          <div><dt><kbd>O</kbd></dt><dd>Open in {label} at the first change</dd></div>
+          <div><dt><kbd>O</kbd></dt><dd>Open in {label} at the cursor, or the first change</dd></div>
           <div><dt><kbd>{copyRefHint}</kbd></dt><dd>Copy a reference for Claude: selection or file</dd></div>
           <div><dt><kbd>{copyRefHint.replace(/C$/, "Shift+C")}</kbd></dt><dd>Copy a reference to the whole file</dd></div>
           <div><dt><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></dt><dd>Pending, accepted, rejected</dd></div>

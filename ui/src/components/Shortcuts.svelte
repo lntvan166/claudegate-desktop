@@ -32,7 +32,7 @@
     {
       title: "Open",
       keys: [
-        [["O"], `Open in ${editorName} at the first change`],
+        [["O"], `Open in ${editorName} at the cursor, or the first change`],
         [["F12"], `Open in ${editorName} at the cursor`],
         [[isMac ? "⌘ click" : "Ctrl click"], `Open in ${editorName} at that token`],
         [[isMac ? "⌘⌥C" : "Ctrl+Alt+C"], "Copy a reference for Claude: the selection, or the file"],
