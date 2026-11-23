@@ -41,3 +41,12 @@ export function menuOptions(config: EditorConfig): EditorOption[] {
   if (custom) opts.push({ label: "Custom…", template: custom });
   return opts.map((o) => ({ ...o, current: norm(o.template) === cur }));
 }
+
+/**
+ * The acknowledgement after a file was handed to the editor: it opens in another window, often
+ * behind this one, so a click on Open would otherwise look like nothing happened.
+ */
+export function openedText(path: string, line: number, template: string): string {
+  const name = path.replace(/\\/g, "/").split("/").pop() || path;
+  return `Opened ${name}${line > 1 ? `:${line}` : ""} in ${editorLabel(template)}`;
+}

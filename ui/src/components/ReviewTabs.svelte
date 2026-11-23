@@ -12,6 +12,7 @@
     total = 0,
     ontab,
     onmode,
+    onleave = () => {},
   }: {
     tab: DiffKind;
     counts: Record<DiffKind, number>;
@@ -23,6 +24,8 @@
     total?: number;
     ontab: (t: DiffKind) => void;
     onmode: (m: "tree" | "list") => void;
+    /** The filter box handed the keyboard back: focus the list. */
+    onleave?: () => void;
   } = $props();
 
   const TABS: { id: DiffKind; label: string }[] = [
@@ -59,11 +62,11 @@
       e.preventDefault();
       e.stopPropagation();
       if (filter !== "") filter = "";
-      else input?.blur();
+      else onleave();
     } else if (e.key === "Enter" || e.key === "ArrowDown") {
       e.preventDefault();
       e.stopPropagation();
-      input?.blur();
+      onleave();
     }
   }
 

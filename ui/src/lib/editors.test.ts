@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { editorLabel, menuOptions, VSCODE, ZED } from "./editors";
+import { editorLabel, menuOptions, openedText, VSCODE, ZED } from "./editors";
 
 describe("editors", () => {
   it("uses the brief's preset templates", () => {
@@ -25,5 +25,15 @@ describe("editors", () => {
     expect(opts.map((o) => o.label)).toEqual(["Zed", "VS Code", "Custom…"]);
     expect(opts.map((o) => o.current)).toEqual([false, false, true]);
     expect(menuOptions({ editor: VSCODE }).find((o) => o.current)?.label).toBe("VS Code");
+  });
+});
+
+describe("openedText", () => {
+  it("names the file, the line and the editor", () => {
+    expect(openedText("/r/src/api/orders.ts", 11, ZED)).toBe("Opened orders.ts:11 in Zed");
+    expect(openedText("C:\\r\\main.go", 4, VSCODE)).toBe("Opened main.go:4 in VS Code");
+  });
+  it("leaves out line 1", () => {
+    expect(openedText("/r/a.md", 1, "nvim +{line} {path}")).toBe("Opened a.md in nvim");
   });
 });

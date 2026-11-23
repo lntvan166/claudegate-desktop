@@ -50,6 +50,7 @@
     editorName: string;
     /** `pointer` for a click or Enter on the row, `key` when arrow keys move the selection. */
     onselect: (row: Row, via?: "pointer" | "key") => void;
+    /** The row's ↗, or a double-click on it: open the file in the editor. */
     onopen: (row: Row) => void;
     /** Right-click (or the menu key) on a file row, at window coordinates. */
     oncontextmenu?: (row: Row, x: number, y: number) => void;
@@ -265,12 +266,32 @@
     if (target.row && target.row.key !== selectedKey) onselect(target.row, "key");
   }
 
+  /**
+   * The keyboard was last in the tree. A decided row leaves the DOM with focus on it, and focus
+   * falls to the body; this says it was ours, so it comes back to the next row.
+   */
+  let ownsFocus = false;
   function onfocusin(e: FocusEvent) {
+    ownsFocus = true;
     const id = (e.target as HTMLElement).closest<HTMLElement>("[data-id]")?.dataset.id;
     if (id) focusId = id;
   }
+  function onfocusout(e: FocusEvent) {
+    // Null: the row was removed, or the window lost focus (it comes back to the same row).
+    const to = e.relatedTarget as Node | null;
+    if (to && !treeEl?.contains(to)) ownsFocus = false;
+  }
+  /** Focus fell out of the window's content (to the body) while it belonged to the tree. */
+  const focusDropped = () => ownsFocus && (!document.activeElement || document.activeElement === document.body);
 
-  // Keep the selected row in view, and carry focus with it when the tree has focus.
+  /** Focus the tree's current row (its tab stop): the filter box's Enter, ↓ and Esc land here. */
+  export async function focusCurrent() {
+    await tick();
+    const id = tabId;
+    if (id) await focusItem(id);
+  }
+
+  // Keep the selected row in view, and carry focus with it when the tree has (or just lost) focus.
   $effect(() => {
     const key = selectedKey;
     if (!key) return;
@@ -278,10 +299,18 @@
       const el = rowEl(`f:${key}`);
       if (!el) return;
       el.scrollIntoView({ block: "nearest" });
-      if (treeEl?.contains(document.activeElement) && document.activeElement !== el) {
+      if ((treeEl?.contains(document.activeElement) || focusDropped()) && document.activeElement !== el) {
         focusId = `f:${key}`;
         el.focus();
       }
+    });
+  });
+  // The rows changed under a focused row (decided with no next row to select): keep the keyboard here.
+  $effect(() => {
+    void items;
+    void tick().then(() => {
+      if (!focusDropped() || !tabId) return;
+      rowEl(tabId)?.focus({ preventScroll: true });
     });
   });
 </script>
@@ -415,6 +444,7 @@
         style:padding-left="{pad(depth) + 16}px"
         title={row.path}
         onclick={() => onselect(row, "pointer")}
+        ondblclick={() => onopen(row)}
         oncontextmenu={(e) => {
           e.preventDefault();
           const at = e.currentTarget.getBoundingClientRect();
@@ -522,7 +552,7 @@
   {/if}
 {/snippet}
 
-<div class="tree" role="tree" aria-label="{tab} files" tabindex="-1" bind:this={treeEl} {onkeydown} {onfocusin}>
+<div class="tree" role="tree" aria-label="{tab} files" tabindex="-1" bind:this={treeEl} {onkeydown} {onfocusin} {onfocusout}>
   {#each trees as { group, nodes } (groupKey(group))}
     {@const gid = groupKey(group)}
     {#if showGroups}

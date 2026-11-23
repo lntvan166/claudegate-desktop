@@ -93,6 +93,21 @@
     return modifiedPositionFor(cursor.line, cursor.col, editor?.getLineChanges() ?? []);
   }
 
+  /**
+   * `openTarget` once this row's diff is computed: a double-click selects the row and opens it in
+   * one gesture, before the first change is known. Gives up after a moment (line 1 then).
+   */
+  export async function openTargetWhenReady(): Promise<{ line: number; col: number }> {
+    const want = rowIdent;
+    const deadline = Date.now() + 1500;
+    while (Date.now() < deadline && rowIdent === want) {
+      if (pane !== "editor" && pane !== "loading") break;
+      if (pane === "editor" && shownIdent === want && editor?.getLineChanges()) break;
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    return openTarget();
+  }
+
   /** "Open at cursor (F12)" from the menu: the last cursor, else the first change. */
   function openAtCursor() {
     const t = openTarget();

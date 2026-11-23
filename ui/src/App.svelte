@@ -61,7 +61,7 @@
     type ResultMessage,
     type Undo,
   } from "./lib/decide";
-  import { editorLabel, ZED } from "./lib/editors";
+  import { editorLabel, openedText, ZED } from "./lib/editors";
   import type { IconTheme } from "./lib/icons";
   import { actionFor, decisionFor, DIFF_HIDDEN_REFUSAL, isTypingTarget, nextIndex, READ_ONLY_REFUSAL, refKeyFor, WAITING_REFUSAL } from "./lib/keys";
   import { writeClipboard } from "./lib/clipboard";
@@ -84,6 +84,16 @@
     type Widths,
   } from "./lib/panes";
   import { headerTotal, projectLine } from "./lib/counts";
+  import {
+    COLLAPSED_KEY,
+    MODE_KEY,
+    loadCollapsedKeys,
+    loadMode,
+    readStore,
+    saveCollapsedKeys,
+    writeStore,
+    type ListMode,
+  } from "./lib/uiState";
   import { collapseKeysToReveal, fileOrder, visibleItems } from "./lib/visible";
   import { filterBulk, filterGroups, normalizeFilter, stillShown } from "./lib/filter";
   import { addFolderFor, addLabel, findPendingRow, launchNotice, ownerOf, type LaunchTarget } from "./lib/launch";
@@ -138,15 +148,24 @@
   let filterText = $state("");
   const filter = $derived(normalizeFilter(filterText));
   let reviewTabs: ReviewTabs | undefined = $state();
+  let fileTree: FileTree | undefined = $state();
   // A row the filter hides must not stay selected: a/r would still decide a file nobody can see.
   $effect(() => {
     if (tab === "pending" && filter !== null && selectedRow && !stillShown(selectedRow.key, groups)) selectedRow = null;
   });
-  let mode = $state<"tree" | "list">("tree");
+  let mode = $state<ListMode>(loadMode(readStore(MODE_KEY)));
+  function setMode(m: ListMode) {
+    mode = m;
+    writeStore(MODE_KEY, m);
+  }
   let selectedRow = $state<Row | null>(null);
   let theme = $state<IconTheme>("dark");
   /** Collapsed folders and groups, keyed per tab; shared with FileTree so j/k see the same rows. */
-  const collapsed = new SvelteSet<string>();
+  const collapsed = new SvelteSet<string>(loadCollapsedKeys(readStore(COLLAPSED_KEY)));
+  // Collapsed folders and groups survive a restart; their keys carry the scope's root.
+  $effect(() => {
+    writeStore(COLLAPSED_KEY, saveCollapsedKeys(collapsed));
+  });
   let config = $state<EditorConfig>({ editor: ZED });
   let firstLine = $state(1);
   let openError = $state<string | null>(null);
@@ -435,6 +454,12 @@
     if (row) selectedRow = row;
   }
 
+  /** The filter box hands the keyboard to the list; with no rows to focus, it just lets go. */
+  function leaveFilter() {
+    if (fileTree) void fileTree.focusCurrent();
+    else (document.activeElement as HTMLElement | null)?.blur();
+  }
+
   function setTab(t: DiffKind) {
     if (t === tab) return;
     tab = t;
@@ -445,6 +470,7 @@
     openError = null;
     try {
       await openInEditor(row.path, line, col, template);
+      announce(openedText(row.path, line, template ?? config.editor));
     } catch (e) {
       openError = String(e);
     }
@@ -455,6 +481,13 @@
     if (!selectedRow) return;
     const t = diffView?.openTarget() ?? { line: firstLine, col: 1 };
     void open(selectedRow, t.line, template, t.col);
+  }
+
+  /** A row's ↗ or a double-click: the shown row opens where the diff points, any other at the top. */
+  async function openRow(row: Row) {
+    if (row.key !== selectedRow?.key || !diffView) return open(row, 1);
+    const t = await diffView.openTargetWhenReady();
+    if (row.key === selectedRow?.key) await open(row, t.line, null, t.col);
   }
 
   async function pickEditor(template: string) {
@@ -884,10 +917,14 @@
     settingsButton?.focus();
   }
 
-  const lineFor = (row: Row) => (row.key === selectedRow?.key ? firstLine : 1);
-
   function onKey(e: KeyboardEvent) {
     if (e.defaultPrevented || e.repeat && e.key === "o") return;
+    // The "not a ClaudeGate project" prompt answers Esc like every other popover.
+    if (e.key === "Escape" && launchAsk && !document.querySelector('[role="menu"], [data-confirm]')) {
+      e.preventDefault();
+      launchAsk = null;
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key === ",") {
       e.preventDefault();
       if (settingsOpen) void closeSettings();
@@ -1245,7 +1282,7 @@
           <h1>{current.name}</h1>
           <p class="finding" title={finding?.detail ?? finding?.text}>{finding?.text ?? "\u00a0"}</p>
         </div>
-        <ReviewTabs bind:this={reviewTabs} bind:filter={filterText} shown={shownPendingRows} total={counts.pending} {tab} {counts} {mode} ontab={setTab} onmode={(m) => (mode = m)} />
+        <ReviewTabs bind:this={reviewTabs} bind:filter={filterText} shown={shownPendingRows} total={counts.pending} {tab} {counts} {mode} ontab={setTab} onmode={setMode} onleave={leaveFilter} />
         {#each troubled as s (s.root)}
           <div class="notice error">
             Couldn't read the session for <b>{scopeLabel(view!, s)}</b>: {s.error}
@@ -1300,6 +1337,7 @@
             </div>
           {:else}
             <FileTree
+              bind:this={fileTree}
               {groups}
               {showGroups}
               isProtected={(p) => isProtected(p)}
@@ -1314,7 +1352,7 @@
                 selectedRow = r;
                 if (via === "pointer") openNarrowDiff();
               }}
-              onopen={(r) => void open(r, lineFor(r))}
+              onopen={(r) => void openRow(r)}
               oncontextmenu={(row, x, y) => (rowMenu = { x, y, row })}
               canDecide={canDecide && !narrow}
               {busy}
