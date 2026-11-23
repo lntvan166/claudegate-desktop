@@ -14,6 +14,13 @@ pub fn run() {
     tauri::Builder::default()
         // First: a second launch must hand over its argv and exit before anything else starts.
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| launch::second_instance(app, &args, &cwd)))
+        // The window's size and maximised state, kept across restarts. Not its position: Wayland
+        // can't set one, and a remembered spot on a monitor that is gone puts the window off-screen.
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(tauri_plugin_window_state::StateFlags::SIZE | tauri_plugin_window_state::StateFlags::MAXIMIZED)
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(launch::LaunchState::default())
