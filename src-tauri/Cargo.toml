@@ -25,3 +25,7 @@ tauri-plugin-window-state = "=2.5.0"
 
 [dev-dependencies]
 tempfile = "=3.20.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Probing the XWayland backend before the app starts (main.rs); the same version tao uses.
+gtk = "=0.18.2"

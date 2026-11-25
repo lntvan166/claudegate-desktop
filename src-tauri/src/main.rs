@@ -13,6 +13,12 @@ fn main() {
             var("CLAUDEGATE_WAYLAND").as_deref(),
         ) {
             std::env::set_var("GDK_BACKEND", "x11");
+            // XWayland can refuse us (a stale XAUTHORITY after the session restarted, no Xwayland
+            // at all); GTK would then fail to start and the app would panic. Probe it here and
+            // fall back to native Wayland, which only loses the remembered position.
+            if gtk::init().is_err() {
+                std::env::set_var("GDK_BACKEND", "wayland");
+            }
         }
     }
     claudegate_desktop_lib::run()

@@ -513,6 +513,7 @@ version = "0.3.0"
 dependencies = [
  "claudegate-core",
  "dirs 5.0.1",
+ "gtk",
  "notify",
  "serde",
  "serde_json",
