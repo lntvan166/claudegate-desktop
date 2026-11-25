@@ -22,20 +22,23 @@ export function bulkLabel(count: number, tabCount: number, tab: "pending" | "acc
 
 /**
  * The project's title line, short enough for two lines: "13 pending · 1 not written yet · oldest
- * 30m ago", with "in 3 worktrees" when the files span several. `detail` is the per-worktree
- * breakdown ("2 in shop, 1 in .wt/a"), for a tooltip; null for a single scope.
+ * 30m ago", with "in 3 worktrees" when the files span several ("repos" when the others are nested
+ * repos, "places" for a mix). `detail` is the per-scope breakdown ("2 in shop, 1 in .wt/a"), for
+ * a tooltip; null for a single scope.
  */
 export function projectLine(
   pending: { scope: string; waiting: boolean; capturedAt: string | null }[],
-  scopes: { root: string; label: string }[],
+  scopes: { root: string; label: string; kind?: "primary" | "worktree" | "repo" }[],
   now: number = Date.now(),
 ): { text: string; detail: string | null } {
   const n = pending.length;
   if (n === 0) return { text: "Nothing pending", detail: null };
   const per = scopes
-    .map((s) => ({ label: s.label, n: pending.filter((p) => norm(p.scope) === norm(s.root)).length }))
+    .map((s) => ({ label: s.label, kind: s.kind, n: pending.filter((p) => norm(p.scope) === norm(s.root)).length }))
     .filter((s) => s.n > 0);
-  const where = per.length > 1 ? ` in ${per.length} worktrees` : "";
+  const kinds = new Set(per.map((s) => s.kind ?? "worktree").filter((k) => k !== "primary"));
+  const noun = kinds.size > 1 ? "places" : kinds.has("repo") ? "repos" : "worktrees";
+  const where = per.length > 1 ? ` in ${per.length} ${noun}` : "";
   const parts = [`${n} pending${where}`];
   const w = pending.filter((p) => p.waiting).length;
   if (w > 0) parts.push(`${w} not written yet`);

@@ -3,7 +3,7 @@ use crate::model::{has_real_change, parse_session, FileEntry, ReviewRecord, Sess
 use crate::paths::{resolve_root, session_file_for};
 use crate::roots::read_roots;
 use crate::time::{now_ms, parse_iso_ms};
-use crate::worktrees::{nested_worktrees_under_max, MAX_WORKTREES};
+use crate::worktrees::{nested_worktrees_under_max, nested_worktrees_under_skip, MAX_WORKTREES};
 use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
 use std::path::{Path, PathBuf};
@@ -17,6 +17,8 @@ pub struct ProjectSummary {
     pub pending: usize,
     /// See `ProjectView::next_recheck_at`.
     pub next_recheck_at: Option<i64>,
+    /// The registered roots folded into this project as scopes (`ScopeKind::Nested`).
+    pub nested: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -74,6 +76,9 @@ pub struct RecordItem {
 pub struct ScopeView {
     pub root: String,
     pub is_worktree: bool,
+    /// A registered root nested inside the project's root (its own repo, own session, own
+    /// exclude), shown here instead of as a project of its own.
+    pub nested: bool,
     pub shape_unknown: Vec<String>,
     pub error: Option<String>,
 }
@@ -139,17 +144,18 @@ pub(crate) fn read_disk(path: &str) -> Option<String> {
 
 fn load_scope(
     home: &Path,
-    scope_root: &Path,
+    scope: &ReviewScope,
     primary: &str,
     matcher: &ExcludeMatcher,
-    is_worktree: bool,
     now_ms: i64,
     view: &mut ProjectView,
 ) {
+    let scope_root = scope.root.as_path();
     let scope_str = scope_root.to_string_lossy().into_owned();
     let mut sv = ScopeView {
         root: scope_str.clone(),
-        is_worktree,
+        is_worktree: scope.kind == ScopeKind::Worktree,
+        nested: scope.kind == ScopeKind::Nested,
         shape_unknown: vec![],
         error: None,
     };
@@ -263,20 +269,89 @@ pub fn should_prune_no_op(entry: &FileEntry, disk: Option<&str>, now_ms: i64) ->
     pending_state(entry.original_content.as_deref(), disk, entry.captured_at.as_deref(), now_ms) == PendingState::Hidden
 }
 
-/// The project's scopes: the primary root first, then every nested worktree (sorted).
+/// The project's scopes: the primary root first, then every nested worktree (sorted). Upkeep
+/// uses this one: it never reaches a nested registered root, which is kept up as its own root.
 /// `primary` must already be resolved (`resolve_root`).
-pub(crate) fn project_scopes(primary: &Path) -> Vec<PathBuf> {
-    project_scopes_max(primary, MAX_WORKTREES)
-}
-
 pub(crate) fn project_scopes_max(primary: &Path, max_attached: usize) -> Vec<PathBuf> {
     let mut scopes = vec![primary.to_path_buf()];
     scopes.extend(nested_worktrees_under_max(primary, max_attached));
     scopes
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeKind {
+    Primary,
+    Worktree,
+    /// A registered root strictly inside the primary root.
+    Nested,
+}
+
+/// One scope a project shows and decides on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewScope {
+    pub root: PathBuf,
+    pub kind: ScopeKind,
+    /// The registered root whose exclude filters this scope: the primary for itself and its
+    /// worktrees, a nested root for itself and its worktrees (the hook captures by that list).
+    pub owner: PathBuf,
+}
+
+/// `inner` lies strictly inside `outer`, by whole path segments of the resolved forms.
+fn strictly_inside(inner: &Path, outer: &Path) -> bool {
+    inner != outer && inner.starts_with(outer)
+}
+
+/// The registered roots strictly inside `primary` (resolved, sorted, without repeats).
+pub fn nested_roots_in(roots: &[PathBuf], primary: &Path) -> Vec<PathBuf> {
+    let primary = resolve_root(primary);
+    let mut out: Vec<PathBuf> =
+        roots.iter().map(|r| resolve_root(r)).filter(|r| strictly_inside(r, &primary)).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The project a registered root is shown in when it is not its own: the outermost registered
+/// root strictly containing it that is a folder on disk. `None`: it is listed on its own.
+pub fn fold_parent(roots: &[PathBuf], root: &Path, is_dir: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
+    let root = resolve_root(root);
+    roots
+        .iter()
+        .map(|r| resolve_root(r))
+        .filter(|r| strictly_inside(&root, r) && is_dir(r))
+        .min_by_key(|r| r.components().count())
+}
+
+/// The scopes a project shows and decides on, given the registered roots: the primary and its
+/// worktrees, then each registered root nested inside it with its own worktrees. Worktrees are
+/// found under the root that owns them (a scan never enters a nested root), at most
+/// `max_attached` per root; nested roots do not count against that limit.
+pub fn review_scopes_in(roots: &[PathBuf], primary: &Path, max_attached: usize) -> Vec<ReviewScope> {
+    let primary = resolve_root(primary);
+    // A nested root gone from disk stays a (missing) project of its own: see `listed_roots`.
+    let nested: Vec<PathBuf> = nested_roots_in(roots, &primary).into_iter().filter(|n| n.is_dir()).collect();
+    let mut out = vec![ReviewScope { root: primary.clone(), kind: ScopeKind::Primary, owner: primary.clone() }];
+    for wt in nested_worktrees_under_skip(&primary, max_attached, &nested) {
+        out.push(ReviewScope { root: wt, kind: ScopeKind::Worktree, owner: primary.clone() });
+    }
+    for n in &nested {
+        out.push(ReviewScope { root: n.clone(), kind: ScopeKind::Nested, owner: n.clone() });
+        let inner: Vec<PathBuf> = nested.iter().filter(|m| strictly_inside(m, n)).cloned().collect();
+        for wt in nested_worktrees_under_skip(n, max_attached, &inner) {
+            out.push(ReviewScope { root: wt, kind: ScopeKind::Worktree, owner: n.clone() });
+        }
+    }
+    out
+}
+
+/// `review_scopes_in` with the roots from `workspace-roots.json`.
+pub fn review_scopes(home: &Path, primary: &Path, max_attached: usize) -> Vec<ReviewScope> {
+    review_scopes_in(&read_roots(home), primary, max_attached)
+}
+
 /// The exclude matcher for a project: the primary root's globs, anchored at the primary root
-/// for every scope (worktrees included), as the extension does.
+/// for every scope (worktrees included), as the extension does. A nested root is a project of
+/// its own here: call it with that root.
 pub(crate) fn project_matcher(home: &Path, primary: &Path) -> ExcludeMatcher {
     let key = primary.to_string_lossy();
     let globs = read_excludes(home).get(key.as_ref()).cloned().unwrap_or_default();
@@ -294,8 +369,23 @@ pub fn load_project_max(home: &Path, root: &Path, max_attached: usize) -> Projec
 
 /// `load_project_max`, filtering with `exclude` instead of `excludes.json[root]` when given: the
 /// effective exclude of a root the app owns, which can be ahead of the file until the next sync.
+/// Nested scopes are filtered by their own root's `excludes.json` key.
 pub fn load_project_with(home: &Path, root: &Path, max_attached: usize, exclude: Option<&[String]>) -> ProjectView {
-    load_project_full(home, root, now_ms(), max_attached, exclude)
+    let primary = resolve_root(root);
+    let own = exclude.map(<[String]>::to_vec);
+    load_project_full(home, root, now_ms(), max_attached, &|r| if r == primary { own.clone() } else { None })
+}
+
+/// `load_project_max` with `exclude_for(root)` giving the exclude of every registered root it
+/// shows (the primary and each nested one): `Some` for a root the app owns, `None` to read
+/// `excludes.json[root]`.
+pub fn load_project_for(
+    home: &Path,
+    root: &Path,
+    max_attached: usize,
+    exclude_for: &dyn Fn(&Path) -> Option<Vec<String>>,
+) -> ProjectView {
+    load_project_full(home, root, now_ms(), max_attached, exclude_for)
 }
 
 /// `load_project` with the clock injected.
@@ -304,10 +394,16 @@ pub fn load_project_at(home: &Path, root: &Path, now_ms: i64) -> ProjectView {
 }
 
 fn load_project_at_max(home: &Path, root: &Path, now_ms: i64, max_attached: usize) -> ProjectView {
-    load_project_full(home, root, now_ms, max_attached, None)
+    load_project_full(home, root, now_ms, max_attached, &|_| None)
 }
 
-fn load_project_full(home: &Path, root: &Path, now_ms: i64, max_attached: usize, exclude: Option<&[String]>) -> ProjectView {
+fn load_project_full(
+    home: &Path,
+    root: &Path,
+    now_ms: i64,
+    max_attached: usize,
+    exclude_for: &dyn Fn(&Path) -> Option<Vec<String>>,
+) -> ProjectView {
     let primary_path = resolve_root(root);
     let primary = primary_path.to_string_lossy().into_owned();
     let mut view = ProjectView {
@@ -322,12 +418,17 @@ fn load_project_full(home: &Path, root: &Path, now_ms: i64, max_attached: usize,
     if view.missing {
         return view;
     }
-    let matcher = match exclude {
-        Some(globs) => ExcludeMatcher::new(&primary_path, globs),
-        None => project_matcher(home, &primary_path),
-    };
-    for (i, scope) in project_scopes_max(&primary_path, max_attached).iter().enumerate() {
-        load_scope(home, scope, &primary, &matcher, i > 0, now_ms, &mut view);
+    let mut matchers: Vec<(PathBuf, ExcludeMatcher)> = Vec::new();
+    for scope in review_scopes(home, &primary_path, max_attached) {
+        if !matchers.iter().any(|(o, _)| *o == scope.owner) {
+            let m = match exclude_for(&scope.owner) {
+                Some(globs) => ExcludeMatcher::new(&scope.owner, &globs),
+                None => project_matcher(home, &scope.owner),
+            };
+            matchers.push((scope.owner.clone(), m));
+        }
+        let matcher = &matchers.iter().find(|(o, _)| *o == scope.owner).expect("just added").1;
+        load_scope(home, &scope, &primary, matcher, now_ms, &mut view);
     }
     view.pending.sort_by(|a, b| a.path.cmp(&b.path));
     view.accepted.sort_by(|a, b| b.decided_at.cmp(&a.decided_at));
@@ -335,22 +436,33 @@ fn load_project_full(home: &Path, root: &Path, now_ms: i64, max_attached: usize,
     view
 }
 
+/// The registered roots listed as projects: every root, except one folded into a parent
+/// (`fold_parent`), which shows as a scope of that parent instead. A nested root missing from
+/// disk is not folded: it stays listed as missing, where it can be seen and removed.
+pub fn listed_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let is_dir = |p: &Path| p.is_dir();
+    roots.iter().filter(|r| !(is_dir(r) && fold_parent(roots, r, &is_dir).is_some())).cloned().collect()
+}
+
+/// The summary of a loaded project. `name` is the folder's name as `root` spells it.
+pub fn summary_of(root: &Path, v: &ProjectView, pending: usize) -> ProjectSummary {
+    let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| v.root.clone());
+    ProjectSummary {
+        root: v.root.clone(),
+        name,
+        missing: v.missing,
+        pending,
+        next_recheck_at: v.next_recheck_at,
+        nested: v.scopes.iter().filter(|s| s.nested).map(|s| s.root.clone()).collect(),
+    }
+}
+
 pub fn list_projects(home: &Path) -> Vec<ProjectSummary> {
-    read_roots(home)
+    listed_roots(&read_roots(home))
         .into_iter()
         .map(|r: PathBuf| {
             let v = load_project(home, &r);
-            let name = r
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| v.root.clone());
-            ProjectSummary {
-                root: v.root.clone(),
-                name,
-                missing: v.missing,
-                pending: v.pending.len(),
-                next_recheck_at: v.next_recheck_at,
-            }
+            summary_of(&r, &v, v.pending.len())
         })
         .collect()
 }

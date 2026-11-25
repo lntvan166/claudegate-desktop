@@ -66,7 +66,7 @@
   import { actionFor, decisionFor, diffKeyFor, DIFF_HIDDEN_REFUSAL, isUndoKey, isTypingTarget, nextIndex, READ_ONLY_REFUSAL, refKeyFor, WAITING_REFUSAL } from "./lib/keys";
   import { writeClipboard } from "./lib/clipboard";
   import { clipboardText, formatRef, pasteHint, refRange, type LineRange } from "./lib/ref";
-  import { basename, groupsFor, scopeLabel, selectionAfterList, sortProjects, splitHidden, type Row } from "./lib/rows";
+  import { basename, groupsFor, scopeKind, scopeLabel, selectionAfterList, sortProjects, splitHidden, type Row } from "./lib/rows";
   import { Rechecks } from "./lib/recheck";
   import {
     MIN,
@@ -298,7 +298,7 @@
       ? null
       : projectLine(
           view.pending,
-          view.scopes.map((s) => ({ root: s.root, label: scopeLabel(view!, s) })),
+          view.scopes.map((s) => ({ root: s.root, label: scopeLabel(view!, s), kind: scopeKind(s) })),
         ),
   );
   const troubled = $derived(view ? view.scopes.filter((s) => s.error) : []);

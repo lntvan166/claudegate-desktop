@@ -1,7 +1,7 @@
 // Free-text filter for the Pending tab. Port of the extension's panelFilter.ts: the tab is a
 // worklist, and a filter that cleared itself on every refresh would be useless exactly when used.
 import type { ProjectView } from "./api";
-import { relTo, scopeLabel, type Group, type Row } from "./rows";
+import { isSubScope, relTo, scopeLabel, type Group, type Row } from "./rows";
 
 /** Raw input to a filter. Empty or whitespace means "no filter" (null) everywhere downstream. */
 export function normalizeFilter(raw: string | undefined | null): string | null {
@@ -35,7 +35,7 @@ export function filterLabel(filter: string | null, shown: number, total: number)
  */
 export function pendingFilterPath(row: Row, view: Pick<ProjectView, "root" | "scopes">): string {
   const scope = view.scopes.find((s) => s.root.replace(/\/+$/, "") === row.scope.replace(/\/+$/, ""));
-  if (scope?.isWorktree) return `${scopeLabel(view as ProjectView, scope)}/${row.rel}`;
+  if (scope && isSubScope(scope)) return `${scopeLabel(view as ProjectView, scope)}/${row.rel}`;
   return scope ? row.rel : relTo(view.root, row.path);
 }
 

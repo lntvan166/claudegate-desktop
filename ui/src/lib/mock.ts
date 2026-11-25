@@ -24,6 +24,9 @@ const WT = `${SHOP}/.worktrees/checkout-v2`;
 const HERDR = "/home/dev/src/herdr-pokemon";
 const BILLING = "/home/dev/src/legacy-billing";
 const NOTES = "/home/dev/src/field-notes";
+/** An umbrella repo with a registered repo nested inside it, shown as one of its scopes. */
+const UMBRELLA = "/home/dev/src/umbrella";
+const UMB_NESTED = `${UMBRELLA}/umbrella-orders`;
 /** Added in the app (a Zed-only project), so it is marked and removable. */
 const TIDE = "/home/dev/src/tide-sim";
 
@@ -106,6 +109,23 @@ const views: Record<string, ProjectView> = {
     rejected: [],
     nextRecheckAt: null,
   },
+  [UMBRELLA]: {
+    root: UMBRELLA,
+    missing: false,
+    scopes: [
+      { root: UMBRELLA, isWorktree: false, shapeUnknown: [], error: null },
+      { root: UMB_NESTED, isWorktree: false, nested: true, shapeUnknown: [], error: null },
+    ],
+    pending: [
+      pendingIn(UMBRELLA, "docs/architecture.md", 8, 2),
+      pendingIn(UMB_NESTED, "internal/order/sync.go", 37, 12),
+      pendingIn(UMB_NESTED, "internal/order/sync_test.go", 52, 0),
+      pendingIn(UMB_NESTED, "go.mod", 1, 1),
+    ],
+    accepted: [],
+    rejected: [],
+    nextRecheckAt: null,
+  },
   [BILLING]: { root: BILLING, missing: true, scopes: [], pending: [], accepted: [], rejected: [], nextRecheckAt: null },
   [TIDE]: {
     root: TIDE,
@@ -120,7 +140,7 @@ const views: Record<string, ProjectView> = {
 };
 
 /** workspace-roots.json, in order. */
-const rootsList = [SHOP, NOTES, BILLING, HERDR, TIDE];
+const rootsList = [SHOP, UMBRELLA, NOTES, BILLING, HERDR, TIDE];
 
 const emptyView = (root: string): ProjectView => ({
   root,
@@ -480,6 +500,7 @@ export const mockApi: Api = {
           missing: views[root].missing,
           pending: filtered(views[root]).pending.filter((p) => !hidden(p.path)).length,
           nextRecheckAt: null,
+          nested: views[root].scopes.filter((s) => s.nested).map((s) => s.root),
         };
       }),
     ),

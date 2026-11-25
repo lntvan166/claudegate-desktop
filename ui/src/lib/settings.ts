@@ -4,7 +4,7 @@
 // core/src/settings.rs `Effective`.
 import type { DiffKind, ProjectView } from "./api";
 import type { RefPathStyle } from "./ref";
-import { basename, rowsOf, scopeLabel, type Group, type Row } from "./rows";
+import { basename, isSubScope, rowsOf, scopeLabel, type Group, type Row } from "./rows";
 
 export type Source = "app" | "vsCode" | "cursor" | "workspace" | "default";
 export type Resolved<T> = { value: T; source: Source };
@@ -179,7 +179,7 @@ export function groupsBySession(view: ProjectView, kind: DiffKind, time: (iso: s
         buckets.set(id, { rows: [r], earliest: stamp });
       }
     }
-    const prefix = scope.isWorktree ? `${scopeLabel(view, scope)} · ` : "";
+    const prefix = isSubScope(scope) ? `${scopeLabel(view, scope)} · ` : "";
     const known = [...buckets.entries()]
       .filter(([id]) => id !== null)
       .sort((a, b) => (a[1].earliest || "~").localeCompare(b[1].earliest || "~"));

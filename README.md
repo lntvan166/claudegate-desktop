@@ -46,7 +46,7 @@ claudegate src/a.ts   # the same, with that file's row selected
 claudegate            # the current directory
 ```
 
-The app opens on the project that owns the path (a worktree counts as its project). If no project owns it, it says so and offers an Add project button; it never adds one by itself. A second launch hands its path to the running window and focuses it, so there is only ever one window. The command detaches from the terminal and prints nothing.
+The app opens on the project that owns the path (a worktree or a nested repo counts as its project). If no project owns it, it says so and offers an Add project button; it never adds one by itself. A second launch hands its path to the running window and focuses it, so there is only ever one window. The command detaches from the terminal and prints nothing.
 
 To run it from Zed, add a task to `~/.config/zed/tasks.json`:
 
@@ -57,6 +57,12 @@ To run it from Zed, add a task to `~/.config/zed/tasks.json`:
 Bind it to a key in `keymap.json` with `task::Spawn`, for example `{ "context": "Workspace", "bindings": { "ctrl-alt-g": ["task::Spawn", { "task_name": "ClaudeGate: review" }] } }`.
 
 On macOS there is no CLI install yet; `open -a ClaudeGate --args <path>` works.
+
+## Projects
+
+The rail lists every folder in `~/.claudegate/workspace-roots.json` (VS Code's and the app's), with the git worktrees inside each project shown as scopes of it.
+
+**Nested repos.** A registered folder strictly inside another registered folder (say `umbrella/umbrella-orders`, a repo the umbrella `umbrella` gitignores) is not listed on its own. It shows inside the outermost containing project as a scope labelled by its path there and tagged `repo`, even when it is in the hidden list. Its rows still live in its own session file (the hook records each edit in the session of the longest matching root), so its decisions write that file and no other, its rows are filtered by its own exclude list (`excludes.json[<nested root>]`, or the app's list when the app added that folder), and its own worktrees are found under it. It does not count against "Worktrees to include". When the containing folder is gone from disk, the nested one is listed on its own again. Folders are compared by whole path segments, so `/a/foobar` is not inside `/a/foo`.
 
 ## Decisions
 

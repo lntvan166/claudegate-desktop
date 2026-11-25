@@ -44,8 +44,18 @@ export function basename(path: string): string {
   return norm(path).split("/").pop() || path;
 }
 
+/** What a scope is: the project's own root, a git worktree in it, or a registered repo nested in it. */
+export type ScopeKind = "primary" | "worktree" | "repo";
+
+export function scopeKind(scope: Pick<ScopeView, "isWorktree" | "nested">): ScopeKind {
+  return scope.nested ? "repo" : scope.isWorktree ? "worktree" : "primary";
+}
+
+/** A scope other than the project's own root, labelled by its path inside the project. */
+export const isSubScope = (scope: Pick<ScopeView, "isWorktree" | "nested">) => scopeKind(scope) !== "primary";
+
 export function scopeLabel(view: ProjectView, scope: ScopeView): string {
-  return scope.isWorktree ? relTo(view.root, scope.root) : basename(view.root);
+  return isSubScope(scope) ? relTo(view.root, scope.root) : basename(view.root);
 }
 
 export function rowsOf(view: ProjectView, kind: DiffKind): Row[] {
@@ -80,7 +90,7 @@ export function rowsOf(view: ProjectView, kind: DiffKind): Row[] {
   }));
 }
 
-/** The tab's rows grouped by scope (primary first, then worktrees), empty scopes dropped. */
+/** The tab's rows grouped by scope (primary first, then worktrees and nested repos), empty scopes dropped. */
 export function groupsFor(view: ProjectView, kind: DiffKind): Group[] {
   const rows = rowsOf(view, kind);
   return view.scopes

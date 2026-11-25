@@ -48,6 +48,12 @@ pub fn nested_worktrees_under(root: &Path) -> Vec<PathBuf> {
 
 /// `nested_worktrees_under` with the cap (`worktrees.maxAttached`) given.
 pub fn nested_worktrees_under_max(root: &Path, max: usize) -> Vec<PathBuf> {
+    nested_worktrees_under_skip(root, max, &[])
+}
+
+/// `nested_worktrees_under_max` that never enters a directory in `skip` (compared in resolved
+/// form): the registered roots nested inside `root`, which own the worktrees under them.
+pub fn nested_worktrees_under_skip(root: &Path, max: usize, skip: &[PathBuf]) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();
     let mut frontier = vec![crate::paths::resolve_root(root)];
     let mut depth = 1;
@@ -66,6 +72,9 @@ pub fn nested_worktrees_under_max(root: &Path, max: usize) -> Vec<PathBuf> {
                     continue;
                 }
                 let child = entry.path();
+                if skip.iter().any(|s| *s == child) {
+                    continue;
+                }
                 if is_worktree_root(&child) {
                     found.push(child);
                 } else {

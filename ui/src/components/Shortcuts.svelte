@@ -13,7 +13,7 @@
       title: "Move",
       keys: [
         [["J", "K"], "Next and previous file"],
-        [["N", "P"], "Next and previous pending, across worktrees"],
+        [["N", "P"], "Next and previous pending, across worktrees and repos"],
         [["1", "2", "3"], "Pending, accepted, rejected"],
         [["/"], "Filter the pending list; Esc clears it"],
         [["["], "Collapse or expand projects"],

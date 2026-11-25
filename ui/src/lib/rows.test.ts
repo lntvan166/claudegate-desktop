@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProjectSummary, ProjectView } from "./api";
-import { groupsFor, initials, nodeKey, selectionAfterList, sortProjects, splitHidden } from "./rows";
+import { groupsFor, initials, nodeKey, scopeKind, scopeLabel, selectionAfterList, sortProjects, splitHidden } from "./rows";
 import { buildTree } from "./tree";
 
 const view: ProjectView = {
@@ -32,6 +32,32 @@ const view: ProjectView = {
   ],
   nextRecheckAt: null,
 };
+
+describe("nested repo scopes", () => {
+  const nested: ProjectView = {
+    ...view,
+    root: "/ws/umbrella",
+    scopes: [
+      { root: "/ws/umbrella", isWorktree: false, shapeUnknown: [], error: null },
+      { root: "/ws/umbrella/umbrella-orders", isWorktree: false, nested: true, shapeUnknown: [], error: null },
+    ],
+    pending: [
+      { ...view.pending[0], path: "/ws/umbrella/README.md", rel: "README.md", scope: "/ws/umbrella" },
+      { ...view.pending[0], path: "/ws/umbrella/umbrella-orders/a.go", rel: "umbrella-orders/a.go", scope: "/ws/umbrella/umbrella-orders" },
+    ],
+  };
+  it("labels the scope by its path in the parent and calls it a repo, not a worktree", () => {
+    expect(scopeLabel(nested, nested.scopes[1])).toBe("umbrella-orders");
+    expect(scopeKind(nested.scopes[1])).toBe("repo");
+    expect(scopeKind(nested.scopes[0])).toBe("primary");
+    expect(scopeKind(view.scopes[1])).toBe("worktree");
+  });
+  it("groups its rows apart, relative to the nested root", () => {
+    const g = groupsFor(nested, "pending");
+    expect(g.map((x) => x.label)).toEqual(["umbrella", "umbrella-orders"]);
+    expect(g[1].rows[0].rel).toBe("a.go");
+  });
+});
 
 describe("groupsFor", () => {
   it("groups by scope, with rels relative to the scope root", () => {

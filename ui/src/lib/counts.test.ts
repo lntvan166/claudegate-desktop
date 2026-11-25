@@ -49,6 +49,17 @@ describe("projectLine (UX wave 5)", () => {
     expect(l.detail).toBe("2 in shop, 1 in .wt/a, 1 in .wt/b");
   });
 
+  it("calls nested repos repos, and a mix of scopes places", () => {
+    const pending = [item("/w"), item("/w/orders"), item("/w/.wt/a")];
+    const repo = [
+      { root: "/w", label: "umbrella", kind: "primary" as const },
+      { root: "/w/orders", label: "orders", kind: "repo" as const },
+    ];
+    expect(projectLine(pending.slice(0, 2), repo, now).text).toBe("2 pending in 2 repos · oldest 30m ago");
+    const mixed = [...repo, { root: "/w/.wt/a", label: ".wt/a", kind: "worktree" as const }];
+    expect(projectLine(pending, mixed, now).text).toBe("3 pending in 3 places · oldest 30m ago");
+  });
+
   it("says when nothing is pending", () => {
     expect(projectLine([], [{ root: "/w", label: "w" }], now)).toEqual({ text: "Nothing pending", detail: null });
   });

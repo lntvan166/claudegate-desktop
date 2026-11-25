@@ -23,6 +23,8 @@ export type ProjectSummary = {
   pending: number;
   /** See `ProjectView.nextRecheckAt`. */
   nextRecheckAt: number | null;
+  /** Registered roots nested inside this one, shown as its scopes instead of as projects. */
+  nested?: string[];
 };
 
 export type PendingItem = {
@@ -55,6 +57,8 @@ export type RecordItem = {
 export type ScopeView = {
   root: string;
   isWorktree: boolean;
+  /** A registered root nested inside the project's root: its own repo, session and exclude. */
+  nested?: boolean;
   shapeUnknown: string[];
   error: string | null;
 };

@@ -586,7 +586,7 @@
         <p class="ph-title">Select a file to see its changes</p>
         <dl class="keys">
           <div><dt><kbd>J</kbd> <kbd>K</kbd></dt><dd>Next and previous file</dd></div>
-          <div><dt><kbd>N</kbd> <kbd>P</kbd></dt><dd>Next and previous pending, across worktrees</dd></div>
+          <div><dt><kbd>N</kbd> <kbd>P</kbd></dt><dd>Next and previous pending, across worktrees and repos</dd></div>
           <div><dt><kbd>A</kbd> <kbd>R</kbd></dt><dd>Accept or reject the selected file or focused folder</dd></div>
           <div><dt><kbd>O</kbd></dt><dd>Open in {label} at the cursor, or the first change</dd></div>
           <div><dt><kbd>{copyRefHint}</kbd></dt><dd>Copy a reference for Claude: selection, cursor line or file</dd></div>

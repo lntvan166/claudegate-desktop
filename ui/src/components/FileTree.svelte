@@ -575,7 +575,7 @@
             <circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.3" />
             <path d="M8 5v3.2l2 1.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
-        {:else if group.scope.isWorktree}
+        {:else if group.scope.isWorktree && !group.scope.nested}
           <svg class="glyph" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
             <circle cx="4.5" cy="3.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" />
             <circle cx="4.5" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" />
@@ -588,7 +588,7 @@
           </svg>
         {/if}
         <span class="name">{group.label}</span>
-        {#if group.scope.isWorktree}<span class="tag">worktree</span>{/if}
+        {#if group.scope.nested}<span class="tag">repo</span>{:else if group.scope.isWorktree}<span class="tag">worktree</span>{/if}
         <span class="spacer"></span>
         <span class="meta num">{group.rows.length}</span>
       </button>

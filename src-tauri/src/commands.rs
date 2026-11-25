@@ -5,7 +5,7 @@ use crate::watch::KnownMap;
 use claudegate_core::decide::{decide_confirmed, Action, DecideError, DecidePaths, DecideReport, Target};
 use claudegate_core::model::{parse_session, ReviewRecord, Session};
 use claudegate_core::paths::{claudegate_home, resolve_root, session_file_for};
-use claudegate_core::project::{load_project_max, load_project_with, ProjectSummary, ProjectView};
+use claudegate_core::project::{listed_roots, load_project_for, load_project_max, summary_of, ProjectSummary, ProjectView};
 use claudegate_core::settings::{default_ext_sources, effective, Effective, ExtSources, Resolved, Resolver, Source};
 use claudegate_core::roots::read_roots;
 use claudegate_core::textfile::{read_text, TextFile};
@@ -118,32 +118,37 @@ pub struct LoadOpts {
     pub extra_hide: Vec<String>,
 }
 
-/// Every project's summary, loaded with `opts_for(root)`.
+/// Every project's summary, loaded with `opts_for(root)`. A registered root nested inside another
+/// listed one is not a project of its own: it is loaded as a scope of its parent, filtered by its
+/// own exclude (`opts_for(nested).exclude`).
 pub fn list_projects_opts(home: &Path, known: &KnownMap, opts_for: &dyn Fn(&Path) -> LoadOpts) -> Vec<ProjectSummary> {
     let roots: Vec<PathBuf> = read_roots(home);
     if let Ok(mut k) = known.lock() {
         k.clear();
     }
-    roots
+    listed_roots(&roots)
         .into_iter()
         .map(|r| {
             let o = opts_for(&r);
-            let v = load_project_with(home, &r, o.max_attached, o.exclude.as_deref());
+            let v = load_with_opts(home, &r, &o, opts_for);
             remember(known, home, &v);
             let hidden = claudegate_core::excludes::ExcludeMatcher::new(Path::new(&v.root), &o.extra_hide);
-            let name = r
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| v.root.clone());
-            ProjectSummary {
-                root: v.root.clone(),
-                name,
-                missing: v.missing,
-                pending: v.pending.iter().filter(|p| !hidden.is_excluded(&p.path)).count(),
-                next_recheck_at: v.next_recheck_at,
-            }
+            let pending = v.pending.iter().filter(|p| !hidden.is_excluded(&p.path)).count();
+            summary_of(&r, &v, pending)
         })
         .collect()
+}
+
+/// Loads `root` with its options `o`, each nested root's scopes with that root's own exclude.
+fn load_with_opts(home: &Path, root: &Path, o: &LoadOpts, opts_for: &dyn Fn(&Path) -> LoadOpts) -> ProjectView {
+    let primary = resolve_root(root);
+    load_project_for(home, &primary, o.max_attached, &|r: &Path| {
+        if r == primary {
+            o.exclude.clone()
+        } else {
+            opts_for(r).exclude
+        }
+    })
 }
 
 pub fn get_project_with(home: &Path, known: &KnownMap, root: &str) -> ProjectView {
@@ -280,8 +285,9 @@ pub fn list_projects_for(home: &Path, known: &KnownMap, config_path: &Path, sour
 pub fn get_project_for(home: &Path, known: &KnownMap, config_path: &Path, root: &str, sources: &ExtSources) -> ProjectView {
     let (app, extra) = crate::config::read_app_settings(config_path);
     let resolver = Resolver::new(&app, sources);
-    let o = load_opts_for(config_path, Path::new(root), &resolver, &extra);
-    let v = load_project_with(home, &resolve_root(Path::new(root)), o.max_attached, o.exclude.as_deref());
+    let opts_for = |r: &Path| load_opts_for(config_path, r, &resolver, &extra);
+    let o = opts_for(Path::new(root));
+    let v = load_with_opts(home, Path::new(root), &o, &opts_for);
     remember(known, home, &v);
     v
 }
@@ -301,9 +307,13 @@ pub async fn list_projects(known: State<'_, KnownMap>, app: tauri::AppHandle) ->
     let known = known.inner().clone();
     blocking(move || {
         let list = list_projects_for(&claudegate_home(), &known, &crate::config::config_path(), &ext_sources());
-        // Keep up the sessions of the projects the app owns (a no-op for the rest).
+        // Keep up the sessions of the projects the app owns (a no-op for the rest). A nested root
+        // folded into its parent is still a root of its own here.
         for p in &list {
             crate::upkeep::trigger(&app, &p.root);
+            for n in &p.nested {
+                crate::upkeep::trigger(&app, n);
+            }
         }
         list
     })
@@ -316,6 +326,9 @@ pub async fn get_project(root: String, known: State<'_, KnownMap>, app: tauri::A
     blocking(move || {
         let view = get_project_for(&claudegate_home(), &known, &crate::config::config_path(), &root, &ext_sources());
         crate::upkeep::trigger(&app, &view.root);
+        for s in view.scopes.iter().filter(|s| s.nested) {
+            crate::upkeep::trigger(&app, &s.root);
+        }
         view
     })
     .await

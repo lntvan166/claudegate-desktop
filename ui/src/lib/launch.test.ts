@@ -31,6 +31,14 @@ describe("ownerOf", () => {
   });
 });
 
+describe("ownerOf, a nested registered root folded into its parent", () => {
+  it("a path in the nested repo opens the parent project", () => {
+    const o = [{ root: "/w/umbrella", scopes: ["/w/umbrella", "/w/umbrella/umbrella-orders"] }, { root: "/w/umbrellax", scopes: ["/w/umbrellax"] }];
+    expect(ownerOf("/w/umbrella/umbrella-orders/a.go", o)).toBe("/w/umbrella");
+    expect(ownerOf("/w/umbrellax/a.go", o)).toBe("/w/umbrellax");
+  });
+});
+
 describe("ownerOf, nested and symlinked", () => {
   it("a worktree of B inside A's root belongs to B", () => {
     const o = [

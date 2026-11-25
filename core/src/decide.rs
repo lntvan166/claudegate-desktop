@@ -18,7 +18,7 @@ use crate::excludes::ExcludeMatcher;
 use crate::merge::{accept_entry, reject_entry, MergeGuards};
 use crate::model::{has_real_change, parse_session, FileEntry, Session, Shape};
 use crate::paths::{resolve_root, session_file_for};
-use crate::project::{project_matcher, project_scopes, read_disk};
+use crate::project::{project_matcher, read_disk, review_scopes};
 use crate::store::{persist, preflight, FileSnapshots, StoreError, StorePaths};
 use crate::workspace_write;
 use serde::Serialize;
@@ -269,30 +269,34 @@ fn run(
     if !primary.is_dir() {
         return Err(DecideError::NotFound);
     }
-    let scopes = project_scopes(&primary);
-    let targets: Vec<PathBuf> = match &target {
-        Target::All => scopes,
+    // The primary, its worktrees, and the registered roots nested inside it (each with its own
+    // session file and exclude), as the project view lists them.
+    let scopes = review_scopes(&paths.home, &primary, crate::worktrees::MAX_WORKTREES);
+    let targets: Vec<(PathBuf, PathBuf)> = match &target {
+        Target::All => scopes.into_iter().map(|s| (s.root, s.owner)).collect(),
         Target::File { scope, .. } | Target::Folder { scope, .. } => {
-            vec![scopes.into_iter().find(|s| s.to_string_lossy() == scope.as_str()).ok_or(DecideError::NotFound)?]
+            let s = scopes.into_iter().find(|s| s.root.to_string_lossy() == scope.as_str()).ok_or(DecideError::NotFound)?;
+            vec![(s.root, s.owner)]
         }
     };
     if let Target::Folder { prefix, .. } = &target {
-        check_prefix(prefix, &targets[0])?;
+        check_prefix(prefix, &targets[0].0)?;
     }
 
     // Load and check every target scope before anything is written.
-    let mut loaded: Vec<(PathBuf, PathBuf, Session)> = Vec::new();
-    for scope in targets {
+    let mut loaded: Vec<(PathBuf, PathBuf, PathBuf, Session)> = Vec::new();
+    for (scope, owner) in targets {
         let file = session_file_for(&paths.home, &scope);
         if let Some(session) = load_checked(&scope, &file)? {
-            loaded.push((scope, file, session));
+            loaded.push((scope, owner, file, session));
         }
     }
     if matches!(target, Target::File { .. }) && loaded.is_empty() {
         return Err(DecideError::NotFound);
     }
 
-    let matcher = project_matcher(&paths.home, &primary);
+    // Each scope is filtered by the exclude of the root that owns it.
+    let mut matchers: Vec<(PathBuf, ExcludeMatcher)> = Vec::new();
     // A file target names its key; confirmed keys only narrow folder and all targets.
     let confirmed: Option<HashSet<String>> =
         keys.filter(|_| !matches!(target, Target::File { .. })).map(|k| k.iter().cloned().collect());
@@ -300,11 +304,15 @@ fn run(
     // `report` holds only completed scopes; each scope works on its own and is folded in once
     // it is persisted (or had nothing to persist).
     let mut report = DecideReport::default();
-    for (scope, file, mut session) in loaded {
+    for (scope, owner, file, mut session) in loaded {
+        if !matchers.iter().any(|(o, _)| *o == owner) {
+            matchers.push((owner.clone(), project_matcher(&paths.home, &owner)));
+        }
+        let matcher = &matchers.iter().find(|(o, _)| *o == owner).expect("just added").1;
         let mut guards = MergeGuards::default();
         let mut changed = Vec::new();
         let mut scope_report = DecideReport::default();
-        let ctx = Ctx { scope: &scope, matcher: &matcher, now_iso, confirmed: confirmed.as_ref(), seen: &seen };
+        let ctx = Ctx { scope: &scope, matcher, now_iso, confirmed: confirmed.as_ref(), seen: &seen };
         let store = StorePaths { home: paths.home.clone(), desktop_home: paths.desktop_home.clone(), session_file: file };
         let mut w = Writes { store, preflighted: false, snaps: None, hook: &mut *before_preflight };
         let r = &mut scope_report;
