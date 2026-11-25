@@ -559,3 +559,116 @@ fn only_a_nested_entry_that_is_shown_or_waiting_claims_the_path() {
         assert_eq!(fx.session(&fx.parent)["accepted"][0]["path"], f.as_str(), "{case}");
     }
 }
+
+#[test]
+fn revert_keeps_the_record_and_says_why_when_a_newer_change_shows_elsewhere() {
+    let fx = Fx::new();
+    let f = fx.file(&fx.nested.join("src/p.go"), "claude-then\n");
+    let rec = json!({ "id": "a1", "path": &f, "before": "old\n", "after": "claude-then\n", "decidedAt": "2026-11-01T00:00:00.000Z" });
+    let parent = json!({ "sessionId": "x", "status": "reviewed", "files": {}, "accepted": [rec], "rejected": {} });
+    fs::write(fx.session_file(&fx.parent), parent.to_string()).unwrap();
+    fx.write_session(&fx.nested, json!({ &f: pending(Some("older\n")) }));
+    let pb = fs::read(fx.session_file(&fx.parent)).unwrap();
+    let r = decide(&fx.paths, &fx.parent, Action::Revert, Target::File { scope: s(&fx.parent), key: "a1".into() }, false, NOW).unwrap();
+    assert_eq!(r.done, 0);
+    assert_eq!(r.errors.len(), 1);
+    assert!(r.errors[0].1.contains(&s(&fx.nested)), "{}", r.errors[0].1);
+    assert_eq!(fs::read(fx.session_file(&fx.parent)).unwrap(), pb, "the record is kept");
+}
+
+/// Case A: the parent accepted P; the nested scope holds an entry for P that has no row
+/// (excluded there, or a settled no-op). Reverting in the parent reopens P in the parent.
+#[test]
+fn revert_reopens_when_the_entry_elsewhere_has_no_row() {
+    for case in ["excluded", "noop"] {
+        let fx = Fx::new();
+        let f = fx.file(&fx.nested.join("gen/p.go"), "claude-then\n");
+        let rec = json!({ "id": "a1", "path": &f, "before": "old\n", "after": "claude-then\n", "decidedAt": "2026-11-01T00:00:00.000Z" });
+        let parent = json!({ "sessionId": "x", "status": "reviewed", "files": {}, "accepted": [rec], "rejected": {} });
+        fs::write(fx.session_file(&fx.parent), parent.to_string()).unwrap();
+        let orig = if case == "noop" { "claude-then\n" } else { "older\n" };
+        fx.write_session(&fx.nested, json!({ &f: pending(Some(orig)) }));
+        if case == "excluded" {
+            fx.excludes(json!({ s(&fx.nested): ["gen"] }));
+        }
+        let r = decide(&fx.paths, &fx.parent, Action::Revert, Target::File { scope: s(&fx.parent), key: "a1".into() }, false, NOW).unwrap();
+        assert_eq!(r.done, 1, "{case}");
+        let p = fx.session(&fx.parent);
+        assert!(p["accepted"].as_array().unwrap().is_empty(), "{case}");
+        assert_eq!(p["files"][&f]["originalContent"], "old\n", "{case}: reopened with the record's before");
+        let v = load_project(&fx.paths.home, &fx.parent);
+        assert_eq!(v.pending.iter().map(|x| x.scope.clone()).collect::<Vec<_>>(), vec![s(&fx.parent)], "{case}: visible");
+    }
+}
+
+/// Case B: the nested scope accepted P at t1; the parent has a stale pending P from t0, hidden by
+/// that record. Reverting in the nested scope reopens P there, which keeps the parent's hidden.
+#[test]
+fn revert_in_the_nested_scope_reopens_there_and_keeps_the_parents_stale_entry_hidden() {
+    let fx = Fx::new();
+    let f = fx.file(&fx.nested.join("src/p.go"), "claude\n");
+    fx.write_session(&fx.parent, json!({ &f: pending(Some("t0-baseline\n")) }));
+    let rec = json!({ "id": "a1", "path": &f, "before": "nested-before\n", "after": "claude\n", "decidedAt": NOW });
+    let nested = json!({ "sessionId": "x", "status": "reviewed", "files": {}, "accepted": [rec], "rejected": {} });
+    fs::write(fx.session_file(&fx.nested), nested.to_string()).unwrap();
+    assert!(load_project(&fx.paths.home, &fx.parent).pending.is_empty());
+    let pb = fs::read(fx.session_file(&fx.parent)).unwrap();
+    let r = decide(&fx.paths, &fx.parent, Action::Revert, Target::File { scope: s(&fx.nested), key: "a1".into() }, false, NOW).unwrap();
+    assert_eq!(r.done, 1);
+    assert_eq!(fx.session(&fx.nested)["files"][&f]["originalContent"], "nested-before\n");
+    let v = load_project(&fx.paths.home, &fx.parent);
+    assert_eq!(v.pending.iter().map(|x| x.scope.clone()).collect::<Vec<_>>(), vec![s(&fx.nested)]);
+    assert_eq!(fs::read(fx.session_file(&fx.parent)).unwrap(), pb);
+    // A reject now restores the nested baseline, never the parent's t0.
+    decide(&fx.paths, &fx.parent, Action::Reject, Target::File { scope: s(&fx.nested), key: f.clone() }, false, NOW).unwrap();
+    assert_eq!(fs::read_to_string(&f).unwrap(), "nested-before\n");
+}
+
+#[test]
+fn reapply_over_an_entry_with_no_row_names_where_it_is_pending() {
+    let fx = Fx::new();
+    let f = fx.file(&fx.nested.join("gen/p.go"), "now\n");
+    let rec = json!({ "id": "r", "path": &f, "before": "old\n", "after": "then\n", "decidedAt": "2026-11-01T00:00:00.000Z" });
+    let parent = json!({ "sessionId": "x", "status": "reviewed", "files": {}, "accepted": [], "rejected": { &f: rec } });
+    fs::write(fx.session_file(&fx.parent), parent.to_string()).unwrap();
+    fx.write_session(&fx.nested, json!({ &f: pending(Some("older\n")) }));
+    fx.excludes(json!({ s(&fx.nested): ["gen"] }));
+    let r = decide(&fx.paths, &fx.parent, Action::Reapply, Target::File { scope: s(&fx.parent), key: f.clone() }, false, NOW).unwrap();
+    assert_eq!(r.done, 0);
+    assert_eq!(r.errors, vec![(f.clone(), claudegate_core::decide::hidden_pending_message(&s(&fx.nested)))]);
+    assert_eq!(fs::read_to_string(&f).unwrap(), "now\n");
+}
+
+#[test]
+fn a_record_the_nested_root_excludes_claims_nothing() {
+    let fx = Fx::new();
+    let f = fx.file(&fx.nested.join("gen/p.go"), "new\n");
+    fx.write_session(&fx.parent, json!({ &f: pending(Some("old\n")) }));
+    let rec = json!({ "id": "r", "path": &f, "before": "a", "after": "b", "decidedAt": NOW });
+    let nested = json!({ "sessionId": "x", "status": "reviewed", "files": {}, "accepted": [rec], "rejected": {} });
+    fs::write(fx.session_file(&fx.nested), nested.to_string()).unwrap();
+    assert!(load_project(&fx.paths.home, &fx.parent).pending.is_empty(), "the record hides it");
+    fx.excludes(json!({ s(&fx.nested): ["gen"] }));
+    assert_eq!(load_project(&fx.paths.home, &fx.parent).pending.len(), 1, "an excluded record does not");
+}
+
+#[test]
+fn a_nested_scope_counts_the_parent_entries_its_records_alone_hide() {
+    let fx = Fx::new();
+    let a = fx.file(&fx.nested.join("a.go"), "new\n");
+    let b = fx.file(&fx.nested.join("b.go"), "new\n");
+    let c = fx.file(&fx.nested.join("c.go"), "new\n");
+    fx.write_session(&fx.parent, json!({ &a: pending(Some("old\n")), &b: pending(Some("old\n")), &c: pending(Some("old\n")) }));
+    let rec = |id: &str, p: &str| json!({ "id": id, "path": p, "before": "x", "after": "y", "decidedAt": NOW });
+    // a: accepted only; b: accepted and rejected (clearing one log alone shows nothing); c: pending.
+    let nested = json!({
+        "sessionId": "x", "status": "active",
+        "files": { &c: pending(Some("old\n")) },
+        "accepted": [rec("1", &a), rec("2", &b)],
+        "rejected": { &b: rec("3", &b) },
+    });
+    fs::write(fx.session_file(&fx.nested), nested.to_string()).unwrap();
+    let v = load_project(&fx.paths.home, &fx.parent);
+    let n = v.scopes.iter().find(|x| x.nested).unwrap();
+    assert_eq!((n.revealed_by_clear_accepted, n.revealed_by_clear_rejected), (1, 0));
+}

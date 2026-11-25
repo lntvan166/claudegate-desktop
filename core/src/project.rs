@@ -86,6 +86,11 @@ pub struct ScopeView {
     pub nested: bool,
     pub shape_unknown: Vec<String>,
     pub error: Option<String>,
+    /// Older pending entries of a less specific scope (the parent) hidden only by this scope's
+    /// accepted records: clearing Accepted shows them again.
+    pub revealed_by_clear_accepted: usize,
+    /// The same for this scope's rejected records and Clear Rejected.
+    pub revealed_by_clear_rejected: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -195,6 +200,7 @@ fn load_scope(
     shadow: &Shadow,
     now_ms: i64,
     view: &mut ProjectView,
+    reveals: &mut std::collections::HashMap<usize, (usize, usize)>,
 ) {
     let scope_root = scope.root.as_path();
     let scope_str = scope_root.to_string_lossy().into_owned();
@@ -204,12 +210,27 @@ fn load_scope(
         nested: scope.kind == ScopeKind::Nested,
         shape_unknown: read.shape_unknown.clone(),
         error: read.error.clone(),
+        revealed_by_clear_accepted: 0,
+        revealed_by_clear_rejected: 0,
     };
     let session = read.session.as_ref();
     if let Some(s) = session {
         for (path, e) in &s.files {
+            if matcher.is_excluded(path) {
+                continue;
+            }
             // Claimed by a more specific (nested) scope: that scope owns the row.
-            if matcher.is_excluded(path) || shadow.hides(path, e) {
+            if shadow.hides(path, e) {
+                let state = pending_state(e.original_content.as_deref(), read_disk(path).as_deref(), e.captured_at.as_deref(), now_ms);
+                if state != PendingState::Hidden {
+                    for (j, kind) in shadow.held_only_by_records(path, e) {
+                        let c = reveals.entry(j).or_default();
+                        match kind {
+                            RecordKind::Accepted => c.0 += 1,
+                            RecordKind::Rejected => c.1 += 1,
+                        }
+                    }
+                }
                 continue;
             }
             let disk = read_disk(path);
@@ -369,10 +390,26 @@ pub fn review_scopes_in(roots: &[PathBuf], primary: &Path, max_attached: usize) 
 #[derive(Debug, Default)]
 pub(crate) struct Claims {
     pending: std::collections::HashSet<String>,
-    decided: std::collections::HashMap<String, i64>,
+    accepted: std::collections::HashMap<String, i64>,
+    rejected: std::collections::HashMap<String, i64>,
 }
 
-/// The claims of one scope's session, filtered by that scope's own exclude.
+impl Claims {
+    /// The paths this scope shows as pending (or holds as waiting).
+    pub(crate) fn pending(&self) -> &std::collections::HashSet<String> {
+        &self.pending
+    }
+}
+
+/// Which log a decision record is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordKind {
+    Accepted,
+    Rejected,
+}
+
+/// The claims of one scope's session, filtered by that scope's own exclude (pending entries and
+/// records alike).
 pub(crate) fn claims_of(session: Option<&Session>, matcher: &ExcludeMatcher, now_ms: i64) -> Claims {
     let mut c = Claims::default();
     let Some(s) = session else { return c };
@@ -385,20 +422,28 @@ pub(crate) fn claims_of(session: Option<&Session>, matcher: &ExcludeMatcher, now
             c.pending.insert(path.clone());
         }
     }
-    let records = s.accepted.iter().chain(s.rejected.values());
-    for r in records {
+    let note = |m: &mut std::collections::HashMap<String, i64>, r: &ReviewRecord| {
+        if matcher.is_excluded(&r.path) {
+            return;
+        }
         if let Some(ms) = parse_iso_ms(&r.decided_at) {
-            let d = c.decided.entry(r.path.clone()).or_insert(ms);
+            let d = m.entry(r.path.clone()).or_insert(ms);
             *d = (*d).max(ms);
         }
+    };
+    for r in &s.accepted {
+        note(&mut c.accepted, r);
+    }
+    for r in s.rejected.values() {
+        note(&mut c.rejected, r);
     }
     c
 }
 
 /// The claims of the scopes more specific than scope `i`: those whose owning root lies strictly
-/// inside scope `i`'s owner (a nested root, or one of its worktrees).
+/// inside scope `i`'s owner (a nested root, or one of its worktrees), with their indexes.
 pub(crate) struct Shadow<'a> {
-    deeper: Vec<&'a Claims>,
+    deeper: Vec<(usize, &'a Claims)>,
 }
 
 impl Shadow<'_> {
@@ -406,10 +451,32 @@ impl Shadow<'_> {
     /// has it pending (shown or waiting), or that decided it at or after `e` was captured (an
     /// unreadable `capturedAt` counts as older). Display and decisions only; nothing is pruned.
     pub(crate) fn hides(&self, path: &str, e: &FileEntry) -> bool {
+        self.hides_except(path, e, None)
+    }
+
+    fn hides_except(&self, path: &str, e: &FileEntry, skip: Option<(usize, RecordKind)>) -> bool {
         let captured = e.captured_at.as_deref().and_then(parse_iso_ms);
-        self.deeper.iter().any(|c| {
-            c.pending.contains(path) || c.decided.get(path).is_some_and(|d| captured.is_none_or(|t| *d >= t))
+        let newer = |m: &std::collections::HashMap<String, i64>| {
+            m.get(path).is_some_and(|d| captured.is_none_or(|t| *d >= t))
+        };
+        self.deeper.iter().any(|(j, c)| {
+            c.pending.contains(path)
+                || (skip != Some((*j, RecordKind::Accepted)) && newer(&c.accepted))
+                || (skip != Some((*j, RecordKind::Rejected)) && newer(&c.rejected))
         })
+    }
+
+    /// The (deeper scope, log) pairs whose clearing alone would show `e` again.
+    pub(crate) fn held_only_by_records(&self, path: &str, e: &FileEntry) -> Vec<(usize, RecordKind)> {
+        let mut out = Vec::new();
+        for (j, _) in &self.deeper {
+            for kind in [RecordKind::Accepted, RecordKind::Rejected] {
+                if !self.hides_except(path, e, Some((*j, kind))) {
+                    out.push((*j, kind));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -418,7 +485,7 @@ pub(crate) fn shadow_for<'a>(scopes: &[ReviewScope], claims: &'a [Claims], i: us
         .iter()
         .enumerate()
         .filter(|(j, s)| *j != i && strictly_inside(&s.owner, &scopes[i].owner))
-        .map(|(j, _)| &claims[j])
+        .map(|(j, _)| (j, &claims[j]))
         .collect();
     Shadow { deeper }
 }
@@ -517,9 +584,16 @@ fn load_project_full(
         .zip(&reads)
         .map(|(s, r)| claims_of(r.session.as_ref(), matcher_of(&s.owner), now_ms))
         .collect();
+    let mut reveals = std::collections::HashMap::new();
     for (i, scope) in scopes.iter().enumerate() {
         let shadow = shadow_for(&scopes, &claims, i);
-        load_scope(scope, &reads[i], &primary, matcher_of(&scope.owner), &shadow, now_ms, &mut view);
+        load_scope(scope, &reads[i], &primary, matcher_of(&scope.owner), &shadow, now_ms, &mut view, &mut reveals);
+    }
+    for (j, (acc, rej)) in reveals {
+        if let Some(sv) = view.scopes.get_mut(j) {
+            sv.revealed_by_clear_accepted = acc;
+            sv.revealed_by_clear_rejected = rej;
+        }
     }
     view.pending.sort_by(|a, b| a.path.cmp(&b.path));
     view.newest_capture_ms = newest_capture_ms(view.pending.iter());
