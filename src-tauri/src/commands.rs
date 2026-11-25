@@ -286,7 +286,10 @@ pub fn get_project_for(home: &Path, known: &KnownMap, config_path: &Path, root: 
     let resolver = Resolver::new(&app, sources);
     let opts_for = |r: &Path| load_opts_for(config_path, r, &resolver, &extra);
     let o = opts_for(Path::new(root));
-    let v = load_with_opts(home, Path::new(root), &o, &opts_for);
+    let mut v = load_with_opts(home, Path::new(root), &o, &opts_for);
+    // Counted like the summary: without the rows the app-only hide patterns hide.
+    let hidden = claudegate_core::excludes::ExcludeMatcher::new(Path::new(&v.root), &o.extra_hide);
+    v.newest_capture_ms = claudegate_core::project::newest_capture_ms(v.pending.iter().filter(|p| !hidden.is_excluded(&p.path)));
     remember(known, home, &v);
     v
 }

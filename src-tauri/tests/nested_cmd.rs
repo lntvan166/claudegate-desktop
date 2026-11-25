@@ -112,3 +112,29 @@ fn the_decide_command_routes_scoped_keys_to_that_scope_only() {
     assert!(read(&f.nested)["rejected"].get(&p).is_none());
     assert!(read(&f.parent)["rejected"].get(&p).is_some());
 }
+
+fn ext_sources_in(base: &Path) -> claudegate_core::settings::ExtSources {
+    claudegate_core::settings::ExtSources {
+        vscode_user: Some(base.join("Code/User/settings.json")),
+        cursor_user: Some(base.join("Cursor/User/settings.json")),
+        excludes_json: base.join("cg/excludes.json"),
+        hooklog_sentinel: base.join("cg/hooklog.enabled"),
+    }
+}
+
+#[test]
+fn the_views_newest_capture_leaves_out_rows_the_hide_patterns_hide() {
+    use claudegate_desktop_lib::commands::get_project_for;
+    let f = fx();
+    let base = f.home.parent().unwrap().to_path_buf();
+    // The parent's a.txt is the newest capture; its hide pattern hides it.
+    let newer = json!({ "originalContent": "old", "reviewStatus": "pending", "capturedAt": "2026-06-01T00:00:00Z" });
+    let v = json!({ "sessionId": "x", "status": "active", "files": { s(&f.parent.join("a.txt")): newer }, "accepted": [], "rejected": {} });
+    fs::write(session_file_for(&f.home, &f.parent), v.to_string()).unwrap();
+    let cfg = base.join("cgd/config.json");
+    fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+    fs::write(&cfg, json!({ "editor": "zed {path}:{line}:{col}", "projects": { s(&f.parent): { "extraHide": ["a.txt"] } } }).to_string()).unwrap();
+    let known: KnownMap = Default::default();
+    let view = get_project_for(&f.home, &known, &cfg, &s(&f.parent), &ext_sources_in(&base));
+    assert_eq!(view.newest_capture_ms, claudegate_core::time::parse_iso_ms("2026-01-01T00:00:00Z"));
+}
