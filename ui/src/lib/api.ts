@@ -120,6 +120,8 @@ export interface Api {
   setReadOnly(on: boolean): Promise<EditorConfig>;
   /** The hidden project roots in ~/.claudegate-desktop/config.json (never workspace-roots.json). */
   setHiddenProjects(roots: string[]): Promise<EditorConfig>;
+  /** Shows one hidden project again, removing only it from the hidden list (never a full rewrite). */
+  showProject(root: string): Promise<EditorConfig>;
   /** Every setting as it resolves for `root` (app, then the extension, then the default). */
   getSettings(root: string | null): Promise<SettingsView>;
   /** One app override; `null` drops it. Resolves to the settings as they now stand for `root`. */
@@ -176,6 +178,7 @@ const tauriApi: Api = {
   decide: (root, action, target) => invoke<DecideReport>("decide", { root, action, target }),
   setReadOnly: (on) => invoke<EditorConfig>("set_read_only", { on }),
   setHiddenProjects: (roots) => invoke<EditorConfig>("set_hidden_projects", { roots }),
+  showProject: (root) => invoke<EditorConfig>("show_project", { root }),
   getSettings: (root) => invoke<SettingsView>("get_settings", { root }),
   setSetting: (key, value, root) => invoke<SettingsView>("set_setting", { key, value, root }),
   setHookLog: (on, root) => invoke<SettingsView>("set_hook_log", { on, root }),
@@ -225,6 +228,7 @@ export const decide = async (root: string, action: DecideAction, target: DecideT
   (await api()).decide(root, action, target);
 export const setReadOnly = async (on: boolean) => (await api()).setReadOnly(on);
 export const setHiddenProjects = async (roots: string[]) => (await api()).setHiddenProjects(roots);
+export const showProject = async (root: string) => (await api()).showProject(root);
 export const getSettings = async (root: string | null) => (await api()).getSettings(root);
 export const setSetting = async (key: SettingKey, value: unknown, root: string | null) =>
   (await api()).setSetting(key, value, root);

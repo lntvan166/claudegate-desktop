@@ -60,6 +60,7 @@ pub fn run() {
             config::set_editor,
             config::set_read_only,
             config::set_hidden_projects,
+            config::show_project,
             editor::open_in_editor,
             tray::set_pending_count,
             update::check_update,

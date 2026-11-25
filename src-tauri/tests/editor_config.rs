@@ -351,3 +351,14 @@ fn unhiding_a_project_drops_its_stamp() {
     assert!(!c.hidden_at.contains_key("/w/a"));
     assert!(c.hidden_at.contains_key("/w/b"));
 }
+
+#[test]
+fn showing_one_project_never_touches_the_rest_of_the_list() {
+    use claudegate_desktop_lib::config::{save_hidden_projects_at, unhide_project};
+    let home = tempfile::tempdir().unwrap();
+    let p = config_path_in(home.path());
+    // Another window hid /w/c after this one read the list.
+    save_hidden_projects_at(&p, &["/w/a".into(), "/w/b".into(), "/w/c".into()], None, "2026-11-20T10:00:00.000Z").unwrap();
+    unhide_project(&p, "/w/a", None).unwrap();
+    assert_eq!(load_or_create(&p).hidden_projects, vec!["/w/b".to_string(), "/w/c".to_string()]);
+}

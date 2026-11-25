@@ -36,6 +36,7 @@
     setEditor,
     setPendingCount,
     setHiddenProjects,
+    showProject,
     setReadOnly,
     usingMock,
     type DiffKind,
@@ -405,7 +406,8 @@
     const back = resurfacing(projects, config.hiddenProjects, config.hiddenAt);
     if (back.length === 0) return;
     try {
-      config = await setHiddenProjects((config.hiddenProjects ?? []).filter((r) => !back.includes(r)));
+      // One root at a time, remove-only: a stale `config` here must never rewrite the whole list.
+      for (const r of back) config = await showProject(r);
       fresh = [...new Set([...fresh, ...back])];
       const names = back.map((r) => projects.find((p) => p.root === r)?.name ?? basename(r));
       announce(`${names.join(", ")} ${names.length === 1 ? "is" : "are"} back: Claude edited ${names.length === 1 ? "it" : "them"} after you hid ${names.length === 1 ? "it" : "them"}`);

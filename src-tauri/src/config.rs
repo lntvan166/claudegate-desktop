@@ -647,6 +647,19 @@ pub async fn set_read_only(on: bool) -> Result<Config, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Shows one hidden project again: removes only `root` from `hiddenProjects` (and its stamp),
+/// under the config lock, so a stale list in the UI can never re-hide or show anything else.
+#[tauri::command]
+pub async fn show_project(root: String) -> Result<Config, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = config_path();
+        unhide_project(&p, &root, Some(&claudegate_core::paths::claudegate_home()))?;
+        Ok(load_or_create(&p))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn set_hidden_projects(roots: Vec<String>) -> Result<Config, String> {
     tauri::async_runtime::spawn_blocking(move || {

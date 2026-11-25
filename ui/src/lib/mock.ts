@@ -582,6 +582,12 @@ export const mockApi: Api = {
     config = { ...config, hiddenProjects: hidden, hiddenAt };
     return delay(config);
   },
+  showProject: (root) => {
+    const hiddenAt = { ...(config.hiddenAt ?? {}) };
+    delete hiddenAt[root];
+    config = { ...config, hiddenProjects: (config.hiddenProjects ?? []).filter((r) => r !== root), hiddenAt };
+    return delay(config);
+  },
   getSettings: (root) => delay(mockSettings(root)),
   setSetting: (key, value, root) => {
     if (value === null) delete appSettings[key];
