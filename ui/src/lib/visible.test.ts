@@ -33,11 +33,11 @@ describe("visibleItems", () => {
       `g:${A}`,
       `d:${A}|src`,
       `d:${A}|src/api`,
-      `f:${A}/src/api/b.ts`,
-      `f:${A}/src/a.ts`,
-      `f:${A}/README.md`,
+      `f:${A}|${A}/src/api/b.ts`,
+      `f:${A}|${A}/src/a.ts`,
+      `f:${A}|${A}/README.md`,
       `g:${W}`,
-      `f:${W}/z.ts`,
+      `f:${W}|${W}/z.ts`,
     ]);
     expect(items[3].parent).toBe(`d:${A}|src/api`);
     expect(items[0].parent).toBeNull();
@@ -46,7 +46,7 @@ describe("visibleItems", () => {
   it("skips the children of collapsed folders and groups", () => {
     const collapsed = new Set([`pending|${A}|src`, `pending|group|${W}`]);
     const items = visibleItems(groups, { mode: "tree", showGroups: true, tab: "pending", collapsed });
-    expect(items.map((i) => i.id)).toEqual([`g:${A}`, `d:${A}|src`, `f:${A}/README.md`, `g:${W}`]);
+    expect(items.map((i) => i.id)).toEqual([`g:${A}`, `d:${A}|src`, `f:${A}|${A}/README.md`, `g:${W}`]);
     expect(items.find((i) => i.id === `d:${A}|src`)?.open).toBe(false);
   });
 
@@ -87,5 +87,12 @@ describe("firstVisibleRow", () => {
     expect(firstVisibleRow([], { mode: "tree", showGroups: true, tab: "pending", collapsed: none })).toBeNull();
     const all = new Set([groupCollapseKey("pending", A), groupCollapseKey("pending", W)]);
     expect(firstVisibleRow(groups, { mode: "tree", showGroups: true, tab: "pending", collapsed: all })).toBeNull();
+  });
+});
+
+describe("file row ids carry the scope", () => {
+  it("gives the same key in two scopes two ids", async () => {
+    const { fileId } = await import("./visible");
+    expect(fileId({ scope: "/w/umbrella", key: "/w/umbrella/orders/a.go" })).not.toBe(fileId({ scope: "/w/umbrella/orders", key: "/w/umbrella/orders/a.go" }));
   });
 });

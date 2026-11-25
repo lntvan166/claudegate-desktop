@@ -1405,7 +1405,7 @@
               {theme}
               {collapsed}
               editorName={editorLabel(config.editor)}
-              selectedKey={selectedRow?.key ?? null}
+              selected={selectedRow}
               onselect={(r, via) => {
                 selectedRow = r;
                 if (via === "pointer") openNarrowDiff();

@@ -107,7 +107,7 @@ describe("duplicate accepted records", () => {
     expect(leaves).toHaveLength(2);
     const keys = leaves.map(nodeKey);
     expect(new Set(keys).size).toBe(2);
-    expect(keys).toEqual(expect.arrayContaining(["f:t3::/ws/shop/x.md", "f:t1::/ws/shop/x.md"]));
+    expect(keys).toEqual(expect.arrayContaining(["f:/ws/shop|t3::/ws/shop/x.md", "f:/ws/shop|t1::/ws/shop/x.md"]));
   });
 
   it("keys folders apart from files of the same rel", () => {

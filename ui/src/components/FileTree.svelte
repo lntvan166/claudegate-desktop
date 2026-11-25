@@ -5,7 +5,7 @@
   import { folderPrefix, rejectPrompt, type DecideAction, type DecideTarget, type Prompt } from "../lib/decide";
   import { iconFor, type IconTheme } from "../lib/icons";
   import { WAITING_REFUSAL } from "../lib/keys";
-  import { groupKey, nodeKey, type Group, type Row } from "../lib/rows";
+  import { groupKey, nodeKey, sameRow, type Group, type Row, type RowRef } from "../lib/rows";
   import { ageLabel } from "../lib/settings";
   import { relTime } from "../lib/time";
   import type { TreeNode } from "../lib/tree";
@@ -24,7 +24,7 @@
     showGroups,
     tab,
     mode,
-    selectedKey,
+    selected,
     theme,
     collapsed,
     editorName,
@@ -43,7 +43,8 @@
     showGroups: boolean;
     tab: DiffKind;
     mode: "tree" | "list";
-    selectedKey: string | null;
+    /** The selected row (scope and key): the same key can be a row in two scopes. */
+    selected: RowRef | null;
     theme: IconTheme;
     /** Collapsed folders and groups, keyed per tab. Owned by App so keyboard order can see it. */
     collapsed: SvelteSet<string>;
@@ -134,7 +135,7 @@
   let focusId = $state<string | null>(null);
   const tabId = $derived.by(() => {
     if (focusId && items.some((i) => i.id === focusId)) return focusId;
-    const sel = selectedKey ? items.find((i) => i.row?.key === selectedKey) : undefined;
+    const sel = selected ? items.find((i) => sameRow(i.row, selected)) : undefined;
     return sel?.id ?? items[0]?.id ?? null;
   });
 
@@ -263,7 +264,7 @@
     if (to === null || to < 0) return;
     const target = items[to];
     void focusItem(target.id);
-    if (target.row && target.row.key !== selectedKey) onselect(target.row, "key");
+    if (target.row && !sameRow(target.row, selected)) onselect(target.row, "key");
   }
 
   /**
@@ -293,14 +294,15 @@
 
   // Keep the selected row in view, and carry focus with it when the tree has (or just lost) focus.
   $effect(() => {
-    const key = selectedKey;
-    if (!key) return;
+    const sel = selected;
+    if (!sel) return;
+    const id = fileId(sel);
     void tick().then(() => {
-      const el = rowEl(`f:${key}`);
+      const el = rowEl(id);
       if (!el) return;
       el.scrollIntoView({ block: "nearest" });
       if ((treeEl?.contains(document.activeElement) || focusDropped()) && document.activeElement !== el) {
-        focusId = `f:${key}`;
+        focusId = id;
         el.focus();
       }
     });
@@ -431,14 +433,14 @@
   {:else if n.item}
     {@const row = n.item}
     {@const id = fileId(row)}
-    <div class="item" class:selected={row.key === selectedKey} role="none">
+    <div class="item" class:selected={sameRow(row, selected)} role="none">
       <button
         class="row file"
-        class:selected={row.key === selectedKey}
+        class:selected={sameRow(row, selected)}
         class:modified={tab === "pending" && !row.newFile}
         class:untracked={tab === "pending" && row.newFile}
         role="treeitem"
-        aria-selected={row.key === selectedKey}
+        aria-selected={sameRow(row, selected)}
         data-id={id}
         tabindex={tabId === id ? 0 : -1}
         style:padding-left="{pad(depth) + 16}px"
@@ -532,7 +534,7 @@
             onclick={() => ondecide("reapply", { kind: "file", scope: row.scope, key: row.path }, row)}
           >{@render back()}</button>
         {/if}
-      {#if row.key !== selectedKey}
+      {#if !sameRow(row, selected)}
       <!-- The selected row's file is open in the diff, whose header has Open in…; no second ↗. -->
       <button class="act open" tabindex="-1" aria-label="Open {n.name} in {editorName}" title="Open in {editorName}" onclick={() => onopen(row)}>
         <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">

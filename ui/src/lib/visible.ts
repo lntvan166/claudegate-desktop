@@ -7,7 +7,7 @@ import { buildTree, type TreeNode } from "./tree";
 export type Mode = "tree" | "list";
 
 export type Item = {
-  /** Stable DOM/focus id: `g:<scope>`, `d:<scope>|<rel>`, `f:<row key>`. */
+  /** Stable DOM/focus id: `g:<scope>`, `d:<scope>|<rel>`, `f:<scope>|<row key>`. */
   id: string;
   kind: "group" | "folder" | "file";
   depth: number;
@@ -20,7 +20,8 @@ export type Item = {
 
 export const groupId = (scope: string) => `g:${scope}`;
 export const folderId = (scope: string, rel: string) => `d:${scope}|${rel}`;
-export const fileId = (row: Row) => `f:${row.key}`;
+/** A file row's id: its scope and key, as the same key can be a row in two scopes. */
+export const fileId = (row: { scope: string; key: string }) => `f:${row.scope}|${row.key}`;
 export const groupCollapseKey = (tab: DiffKind, scope: string) => `${tab}|group|${scope}`;
 export const folderCollapseKey = (tab: DiffKind, scope: string, rel: string) => `${tab}|${scope}|${rel}`;
 

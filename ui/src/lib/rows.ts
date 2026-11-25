@@ -129,7 +129,7 @@ export function sortProjects(list: ProjectSummary[]): ProjectSummary[] {
  * so one path can appear twice with different record ids); folders by their rel.
  */
 export function nodeKey(n: TreeNode<Row>): string {
-  return n.kind === "file" && n.item ? `f:${n.item.key}` : `d:${n.rel}`;
+  return n.kind === "file" && n.item ? `f:${n.item.scope}|${n.item.key}` : `d:${n.rel}`;
 }
 
 export type ListSelection = { kind: "keep"; root: string } | { kind: "select"; root: string } | { kind: "clear" };
