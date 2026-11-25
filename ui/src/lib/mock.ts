@@ -444,6 +444,7 @@ function mockSettings(root: string | null): SettingsView {
     maxAttached: r<number>("maxAttached"),
     hookLog: { value: hookLog, source: hookLog ? "app" : "default" },
     extraHide: (root && extraHide[root]) || [],
+    nestedExtraHide: root && views[root] ? views[root].scopes.filter((s) => s.nested).map((s) => ({ root: s.root, patterns: extraHide[s.root] ?? [] })) : [],
     excludeOwner: excludeOwner(root),
     copyRefPathStyle: appSettings.copyRefPathStyle === "absolute" ? "absolute" : "relative",
     protectedWorkspace: [],
@@ -592,9 +593,9 @@ export const mockApi: Api = {
     hookLog = on;
     return delay(mockSettings(root));
   },
-  setExtraHide: (root, patterns) => {
+  setExtraHide: (root, patterns, viewRoot) => {
     extraHide[root] = patterns;
-    return delay(mockSettings(root));
+    return delay(mockSettings(viewRoot ?? root));
   },
   setProjectExclude: async (root, globs) => {
     await delay(null);

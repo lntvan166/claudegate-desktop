@@ -142,6 +142,25 @@ describe("hideExtra", () => {
     expect(v.accepted).toEqual([]);
     expect(hideExtra(view, [])).toBe(view);
   });
+  it("matches a nested repo's rows by its own patterns, never the project's", () => {
+    const base = { added: 1, removed: 0, newFile: false, capturedAt: null, waiting: false, rejectOutcome: "restore" as const };
+    const v = {
+      root: "/w/umbrella",
+      missing: false,
+      scopes: [],
+      pending: [
+        { ...base, path: "/w/umbrella/gen/a.go", rel: "gen/a.go", scope: "/w/umbrella" },
+        { ...base, path: "/w/umbrella/orders/gen/b.go", rel: "gen/b.go", scope: "/w/umbrella/orders" },
+        { ...base, path: "/w/umbrella/orders/c.go", rel: "c.go", scope: "/w/umbrella/orders" },
+      ],
+      accepted: [],
+      rejected: [],
+      nextRecheckAt: null,
+    };
+    // The project hides gen/** under its own root; the nested repo hides c.go.
+    const out = hideExtra(v, ["gen/**"], [{ root: "/w/umbrella/orders", patterns: ["c.go"] }]);
+    expect(out.pending.map((p) => p.path)).toEqual(["/w/umbrella/orders/gen/b.go"]);
+  });
 });
 
 describe("session groups in the visible tree", () => {

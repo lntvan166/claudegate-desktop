@@ -127,7 +127,9 @@
   let settingsButton: HTMLButtonElement | undefined = $state();
   /** The selected project's app-only hide patterns, once its settings have loaded. */
   const extraHide = $derived(settingsFor === selected ? settings.extraHide : []);
-  const view = $derived(rawView ? hideExtra(rawView, extraHide) : null);
+  /** The hide patterns of the repos nested in it, each for its own rows. */
+  const nestedHide = $derived(settingsFor === selected ? (settings.nestedExtraHide ?? []) : []);
+  const view = $derived(rawView ? hideExtra(rawView, extraHide, nestedHide) : null);
   const bySession = $derived(settings.groupBySession.value);
   /** The tab's groups: by scope, or by Claude session when that setting is on. */
   function groupsOf(v: ProjectView, kind: DiffKind) {
@@ -367,7 +369,7 @@
       patchSummary(v);
       if (selectedRow) {
         // Keep the selection on the fresh row object so its counts update; drop it if it is gone.
-        selectedRow = restoreSelection(shownGroups(hideExtra(v, extraHide), tab), selectedRow);
+        selectedRow = restoreSelection(shownGroups(hideExtra(v, extraHide, nestedHide), tab), selectedRow);
       }
       return v;
     } catch (e) {
@@ -383,7 +385,7 @@
    */
   function shownPending(v: ProjectView, current: number): number {
     if (v.root !== settingsFor) return current;
-    return hideExtra(v, settings.extraHide).pending.length;
+    return hideExtra(v, settings.extraHide, settings.nestedExtraHide ?? []).pending.length;
   }
 
   function patchSummary(v: ProjectView) {
@@ -525,7 +527,7 @@
   /** Selects the pending row `ref` (scope and key) in `v` (a fresh fetch), unfolding whatever hides it. */
   function selectPending(v: ProjectView | null, ref: RowRef) {
     if (!v || tab !== "pending") return;
-    const row = restoreSelection(shownGroups(hideExtra(v, extraHide), "pending"), ref);
+    const row = restoreSelection(shownGroups(hideExtra(v, extraHide, nestedHide), "pending"), ref);
     if (!row) return;
     for (const k of collapseKeysToReveal(row, "pending", collapsed)) collapsed.delete(k);
     selectedRow = row;
@@ -755,7 +757,7 @@
     if (t.isDir) return;
     const v = await loadView(owner);
     if (!v || owner !== selected) return;
-    const rows = groupsOf(hideExtra(v, extraHide), "pending").flatMap((g) => g.rows);
+    const rows = groupsOf(hideExtra(v, extraHide, nestedHide), "pending").flatMap((g) => g.rows);
     const row = findPendingRow(t.path, rows) ?? (t.canonical ? findPendingRow(t.canonical, rows) : null);
     if (row) selectedRow = row;
   }
@@ -890,6 +892,9 @@
   // Both change which rows show, so the project and every count reload.
   const changeExtraHide = (patterns: string[]) =>
     selected ? applySettings(() => setExtraHide(selected!, patterns), "the hidden patterns", true) : Promise.resolve(false);
+  /** A nested repo's own hide patterns, edited from its parent's Settings. */
+  const changeNestedHide = (root: string, patterns: string[]) =>
+    selected ? applySettings(() => setExtraHide(root, patterns, selected!), "the hidden patterns", true) : Promise.resolve(false);
   const takeBack = () =>
     selected ? applySettings(() => takeBackExclude(selected!), "the exclude list", true) : Promise.resolve(false);
   const changeExclude = (globs: string[] | null) =>
@@ -1443,6 +1448,7 @@
       onset={changeSetting}
       onhooklog={changeHookLog}
       onextrahide={changeExtraHide}
+      onnestedhide={changeNestedHide}
       onexclude={changeExclude}
       ontakeback={takeBack}
       oneditor={(t) =>

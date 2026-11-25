@@ -138,3 +138,42 @@ fn the_views_newest_capture_leaves_out_rows_the_hide_patterns_hide() {
     let view = get_project_for(&f.home, &known, &cfg, &s(&f.parent), &ext_sources_in(&base));
     assert_eq!(view.newest_capture_ms, claudegate_core::time::parse_iso_ms("2026-01-01T00:00:00Z"));
 }
+
+#[test]
+fn each_root_hides_its_own_rows_with_its_own_patterns() {
+    let f = fx();
+    let known: KnownMap = Default::default();
+    let (parent, nested) = (f.parent.clone(), f.nested.clone());
+    let count = |parent_hide: &[&str], nested_hide: &[&str]| {
+        let opts = |r: &Path| LoadOpts {
+            max_attached: 256,
+            exclude: None,
+            extra_hide: if r == parent.as_path() {
+                parent_hide.iter().map(|x| x.to_string()).collect()
+            } else if r == nested.as_path() {
+                nested_hide.iter().map(|x| x.to_string()).collect()
+            } else {
+                vec![]
+            },
+        };
+        list_projects_opts(&f.home, &known, &opts)[0].pending
+    };
+    // The parent's pattern never reaches the nested root's rows (a.txt, gen/b.txt, c.txt)...
+    assert_eq!(count(&["c.txt"], &[]), 3);
+    // ...and the nested root's own pattern hides its rows.
+    assert_eq!(count(&[], &["gen"]), 2);
+}
+
+#[test]
+fn the_parents_settings_list_the_nested_roots_hide_patterns() {
+    use claudegate_desktop_lib::commands::settings_view;
+    let f = fx();
+    let base = f.home.parent().unwrap().to_path_buf();
+    let cfg = base.join("cgd/config.json");
+    fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+    fs::write(&cfg, json!({ "editor": "zed {path}:{line}:{col}", "projects": { s(&f.nested): { "extraHide": ["gen"] } } }).to_string()).unwrap();
+    let v = settings_view(&cfg, Some(&s(&f.parent)), &ext_sources_in(&base));
+    let got: Vec<(String, Vec<String>)> = v.nested_extra_hide.iter().map(|n| (n.root.clone(), n.patterns.clone())).collect();
+    assert_eq!(got, vec![(s(&f.nested), vec!["gen".to_string()])]);
+    assert!(v.extra_hide.is_empty());
+}

@@ -20,6 +20,11 @@ export type SettingsView = {
   /** The selected project's app-only hide patterns (`projects[root].extraHide`). */
   extraHide: string[];
   /**
+   * The app-only hide patterns of each repo nested in the project (shown and edited with it, as
+   * those roots are not listed on their own). Each hides only its own root's rows.
+   */
+  nestedExtraHide?: NestedHide[];
+  /**
    * Who writes the selected project's exclude for the hook: the app (it added the project and
    * still owns it, so the list is editable here), VS Code after taking an app project over, or
    * VS Code because the project is its own.
@@ -35,6 +40,8 @@ export type SettingsView = {
   /** The change was saved, but a step after it failed (e.g. the exclude sync). */
   warning?: string | null;
 };
+
+export type NestedHide = { root: string; patterns: string[] };
 
 export type ExcludeOwner = "owned" | "managedByVsCode" | "vsCode";
 
@@ -198,15 +205,26 @@ export function groupsBySession(view: ProjectView, kind: DiffKind, time: (iso: s
   return out;
 }
 
-/** The view without the rows the app-only hide patterns match (every tab). */
-export function hideExtra(view: ProjectView, patterns: string[]): ProjectView {
-  if (patterns.length === 0) return view;
-  const hidden = globMatcher(view.root, patterns);
+/**
+ * The view without the rows the app-only hide patterns match (every tab). Each row is matched by
+ * the patterns of the root that owns its scope: a nested repo's own (`nested`) for its rows and
+ * its worktrees', the project's (`patterns`) for the rest.
+ */
+export function hideExtra(view: ProjectView, patterns: string[], nested: NestedHide[] = []): ProjectView {
+  if (patterns.length === 0 && nested.every((n) => n.patterns.length === 0)) return view;
+  const all = [{ root: view.root, patterns }, ...nested].map((o) => ({ root: norm(o.root), hidden: globMatcher(o.root, o.patterns) }));
+  const ownerOf = (scope: string) => {
+    const s = norm(scope);
+    return all
+      .filter((o) => s === o.root || s.startsWith(`${o.root}/`))
+      .reduce<(typeof all)[number] | null>((best, o) => (!best || o.root.length > best.root.length ? o : best), null);
+  };
+  const hidden = (r: { scope: string; path: string }) => ownerOf(r.scope)?.hidden(r.path) ?? false;
   return {
     ...view,
-    pending: view.pending.filter((p) => !hidden(p.path)),
-    accepted: view.accepted.filter((r) => !hidden(r.path)),
-    rejected: view.rejected.filter((r) => !hidden(r.path)),
+    pending: view.pending.filter((p) => !hidden(p)),
+    accepted: view.accepted.filter((r) => !hidden(r)),
+    rejected: view.rejected.filter((r) => !hidden(r)),
   };
 }
 

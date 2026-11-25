@@ -132,10 +132,42 @@ pub fn list_projects_opts(home: &Path, known: &KnownMap, opts_for: &dyn Fn(&Path
             let o = opts_for(&r);
             let v = load_with_opts(home, &r, &o, opts_for);
             remember(known, home, &v);
-            let hidden = claudegate_core::excludes::ExcludeMatcher::new(Path::new(&v.root), &o.extra_hide);
-            summary_of(&r, &v, &|p| !hidden.is_excluded(&p.path))
+            let hidden = ExtraHide::new(&v, &o.extra_hide, opts_for);
+            summary_of(&r, &v, &|p| !hidden.hides(p))
         })
         .collect()
+}
+
+/// The app-only hide patterns of a loaded project, each anchored at the registered root that
+/// owns them: the project's own for its rows, a nested root's own for that root's rows (its
+/// worktrees included).
+pub struct ExtraHide {
+    /// `(owning root, its matcher)`, the project's root first.
+    owners: Vec<(PathBuf, claudegate_core::excludes::ExcludeMatcher)>,
+}
+
+impl ExtraHide {
+    pub fn new(v: &ProjectView, own: &[String], opts_for: &dyn Fn(&Path) -> LoadOpts) -> Self {
+        let root = PathBuf::from(&v.root);
+        let mut owners = vec![(root.clone(), claudegate_core::excludes::ExcludeMatcher::new(&root, own))];
+        for s in v.scopes.iter().filter(|s| s.nested) {
+            let n = PathBuf::from(&s.root);
+            let m = claudegate_core::excludes::ExcludeMatcher::new(&n, &opts_for(&n).extra_hide);
+            owners.push((n, m));
+        }
+        Self { owners }
+    }
+
+    /// Whether the patterns of the root owning `p`'s scope hide it.
+    pub fn hides(&self, p: &claudegate_core::project::PendingItem) -> bool {
+        let scope = Path::new(&p.scope);
+        let owner = self
+            .owners
+            .iter()
+            .filter(|(o, _)| scope.starts_with(o))
+            .max_by_key(|(o, _)| o.components().count());
+        owner.is_some_and(|(_, m)| m.is_excluded(&p.path))
+    }
 }
 
 /// Loads `root` with its options `o`, each nested root's scopes with that root's own exclude.
@@ -192,6 +224,9 @@ pub struct SettingsView {
     #[serde(flatten)]
     pub effective: Effective,
     pub extra_hide: Vec<String>,
+    /// The app-only hide patterns of each registered root nested in the project, shown and edited
+    /// here: those roots are not listed on their own. Each hides only its own root's rows.
+    pub nested_extra_hide: Vec<NestedHide>,
     pub exclude_owner: ExcludeOwner,
     /// App-only: how "Copy reference for Claude" writes the path, `relative` (default) or `absolute`.
     pub copy_ref_path_style: String,
@@ -201,6 +236,13 @@ pub struct SettingsView {
     /// The change was saved, but something after it failed (the exclude sync): what to tell the user.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+}
+
+/// One nested root's app-only hide patterns.
+#[derive(Debug, Clone, Serialize)]
+pub struct NestedHide {
+    pub root: String,
+    pub patterns: Vec<String>,
 }
 
 /// The app's `copyRefPathStyle`, `relative` unless it is exactly `absolute`.
@@ -226,6 +268,18 @@ pub fn settings_view(config_path: &Path, root: Option<&str>, sources: &ExtSource
         .and_then(|r| extra.get(r.to_string_lossy().as_ref()))
         .cloned()
         .unwrap_or_default();
+    // The registered roots nested in it; the roots file sits beside `excludes.json`.
+    let nested_extra_hide = match (&root, sources.excludes_json.parent()) {
+        (Some(r), Some(cg)) => claudegate_core::project::nested_roots_in(&read_roots(cg), r)
+            .into_iter()
+            .filter(|n| n.is_dir())
+            .map(|n| {
+                let key = n.to_string_lossy().into_owned();
+                NestedHide { patterns: extra.get(&key).cloned().unwrap_or_default(), root: key }
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     let mut effective = effective(&app, root.as_deref(), sources);
     let mut exclude_owner = ExcludeOwner::VsCode;
     if let Some(r) = &root {
@@ -255,6 +309,7 @@ pub fn settings_view(config_path: &Path, root: Option<&str>, sources: &ExtSource
     SettingsView {
         effective,
         extra_hide,
+        nested_extra_hide,
         exclude_owner,
         copy_ref_path_style: copy_ref_path_style(&app),
         protected_workspace,
@@ -288,8 +343,8 @@ pub fn get_project_for(home: &Path, known: &KnownMap, config_path: &Path, root: 
     let o = opts_for(Path::new(root));
     let mut v = load_with_opts(home, Path::new(root), &o, &opts_for);
     // Counted like the summary: without the rows the app-only hide patterns hide.
-    let hidden = claudegate_core::excludes::ExcludeMatcher::new(Path::new(&v.root), &o.extra_hide);
-    v.newest_capture_ms = claudegate_core::project::newest_capture_ms(v.pending.iter().filter(|p| !hidden.is_excluded(&p.path)));
+    let hidden = ExtraHide::new(&v, &o.extra_hide, &opts_for);
+    v.newest_capture_ms = claudegate_core::project::newest_capture_ms(v.pending.iter().filter(|p| !hidden.hides(p)));
     remember(known, home, &v);
     v
 }
@@ -371,14 +426,16 @@ pub async fn set_hook_log(on: bool, root: Option<String>) -> Result<SettingsView
     .await?
 }
 
-/// The app-only hide patterns for one project (`projects[root].extraHide` in config.json).
+/// The app-only hide patterns for one project (`projects[root].extraHide` in config.json), or for
+/// a root nested in it. Returns the settings of `view_root` (the project on screen) when given.
 #[tauri::command]
-pub async fn set_extra_hide(root: String, patterns: Vec<String>) -> Result<SettingsView, String> {
+pub async fn set_extra_hide(root: String, patterns: Vec<String>, view_root: Option<String>) -> Result<SettingsView, String> {
     blocking(move || {
         let cfg = crate::config::config_path();
         let key = resolve_root(Path::new(&root)).to_string_lossy().into_owned();
         crate::config::save_extra_hide(&cfg, &key, &patterns, Some(&claudegate_home()))?;
-        Ok(settings_view(&cfg, Some(&key), &ext_sources()))
+        let shown = view_root.map(|r| resolve_root(Path::new(&r)).to_string_lossy().into_owned()).unwrap_or(key);
+        Ok(settings_view(&cfg, Some(&shown), &ext_sources()))
     })
     .await?
 }

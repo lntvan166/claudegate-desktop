@@ -12,6 +12,7 @@
     onset,
     onhooklog,
     onextrahide,
+    onnestedhide = async () => false,
     onexclude,
     ontakeback,
     oneditor,
@@ -30,6 +31,8 @@
     onset: (key: SettingKey, value: unknown) => Promise<boolean>;
     onhooklog: (on: boolean) => Promise<boolean>;
     onextrahide: (patterns: string[]) => Promise<boolean>;
+    /** A repo nested in the project: its own app-only hide patterns. */
+    onnestedhide?: (root: string, patterns: string[]) => Promise<boolean>;
     /** The owned project's exclude list; `null` resets it to the defaults. */
     onexclude: (globs: string[] | null) => Promise<boolean>;
     /** For an app project VS Code took over: the app manages its exclude again. */
@@ -78,9 +81,21 @@
 
   /** The "add a pattern" boxes, keyed by list. */
   let adding = $state<Record<string, string>>({});
-  type PatternList = "protected" | "extraHide" | "exclude";
+  /** `nested:<root>` is a nested repo's own hide list. */
+  type PatternList = "protected" | "extraHide" | "exclude" | `nested:${string}`;
   const saveList = (list: PatternList, next: string[]) =>
-    list === "protected" ? onset("protected", next) : list === "exclude" ? onexclude(next) : onextrahide(next);
+    list === "protected"
+      ? onset("protected", next)
+      : list === "exclude"
+        ? onexclude(next)
+        : list === "extraHide"
+          ? onextrahide(next)
+          : onnestedhide(list.slice("nested:".length), next);
+  /** A nested repo's label: its path inside the project. */
+  const relIn = (root: string, inner: string) => {
+    const r = root.replace(/[\\/]+$/, "");
+    return inner.startsWith(`${r}/`) ? inner.slice(r.length + 1) : inner;
+  };
   async function addPattern(list: PatternList, current: string[]) {
     const p = (adding[list] ?? "").trim();
     if (!p || current.includes(p)) {
@@ -370,6 +385,20 @@
           {@render adder("extraHide", settings.extraHide, "Add a pattern to hide")}
         </div>
       </div>
+
+      {#each settings.nestedExtraHide ?? [] as n (n.root)}
+        <div class="row wide">
+          <div class="label">
+            <p class="title">Extra patterns in {relIn(project.root, n.root)} <span class="repo-tag">repo</span></p>
+            <p class="desc">Hidden from this app's lists for the repo nested here, matched from its own folder. Claude's changes to them are still captured.</p>
+            <div class="source"><span class="badge app">This app</span></div>
+          </div>
+          <div class="control">
+            {@render chips(n.patterns, true, (p) => void removePattern(`nested:${n.root}`, n.patterns, p), `Extra patterns in ${relIn(project.root, n.root)}`)}
+            {@render adder(`nested:${n.root}`, n.patterns, `Add a pattern to hide in ${relIn(project.root, n.root)}`)}
+          </div>
+        </div>
+      {/each}
     {:else}
       <p class="none pad">Select a project to see what it excludes.</p>
     {/if}
@@ -552,6 +581,15 @@
     align-items: center;
     gap: 8px;
     margin-top: 8px;
+  }
+  .repo-tag {
+    padding: 0 6px;
+    border-radius: var(--radius-chip);
+    font-size: var(--fs-meta);
+    font-weight: 400;
+    line-height: 18px;
+    color: var(--muted);
+    background: var(--raised);
   }
   .badge {
     padding: 0 7px;

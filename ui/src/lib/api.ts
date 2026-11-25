@@ -127,7 +127,8 @@ export interface Api {
   /** Creates or deletes ~/.claudegate/hooklog.enabled, the switch the extension shares. */
   setHookLog(on: boolean, root: string | null): Promise<SettingsView>;
   /** The project's app-only hide patterns. */
-  setExtraHide(root: string, patterns: string[]): Promise<SettingsView>;
+  /** `viewRoot`: the project whose settings to return, when `root` is a repo nested in it. */
+  setExtraHide(root: string, patterns: string[], viewRoot?: string): Promise<SettingsView>;
   /**
    * The exclude list of a project the app added and still owns, written to
    * ~/.claudegate/excludes.json for the hook; `null` resets it to the defaults. Rejects for a VS
@@ -178,7 +179,7 @@ const tauriApi: Api = {
   getSettings: (root) => invoke<SettingsView>("get_settings", { root }),
   setSetting: (key, value, root) => invoke<SettingsView>("set_setting", { key, value, root }),
   setHookLog: (on, root) => invoke<SettingsView>("set_hook_log", { on, root }),
-  setExtraHide: (root, patterns) => invoke<SettingsView>("set_extra_hide", { root, patterns }),
+  setExtraHide: (root, patterns, viewRoot) => invoke<SettingsView>("set_extra_hide", { root, patterns, viewRoot: viewRoot ?? null }),
   setProjectExclude: (root, globs) => invoke<SettingsView>("set_project_exclude", { root, globs }),
   takeBackExclude: (root) => invoke<SettingsView>("take_back_exclude", { root }),
   addProject: (path) => invoke<AddedProject>("add_project", { path }),
@@ -228,7 +229,8 @@ export const getSettings = async (root: string | null) => (await api()).getSetti
 export const setSetting = async (key: SettingKey, value: unknown, root: string | null) =>
   (await api()).setSetting(key, value, root);
 export const setHookLog = async (on: boolean, root: string | null) => (await api()).setHookLog(on, root);
-export const setExtraHide = async (root: string, patterns: string[]) => (await api()).setExtraHide(root, patterns);
+export const setExtraHide = async (root: string, patterns: string[], viewRoot?: string) =>
+  (await api()).setExtraHide(root, patterns, viewRoot);
 export const takeBackExclude = async (root: string) => (await api()).takeBackExclude(root);
 export const setProjectExclude = async (root: string, globs: string[] | null) =>
   (await api()).setProjectExclude(root, globs);
