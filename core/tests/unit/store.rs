@@ -224,16 +224,27 @@ fn persist_keeps_capture_written_after_load() {
 }
 
 #[test]
-fn persist_writes_ours_when_disk_unparsable() {
+fn persist_refuses_an_unparsable_disk_copy_and_leaves_it() {
     let e = env();
     fs::write(&e.paths.session_file, "{ not json").unwrap();
     let mine = session(json!({
         "sessionId": "a", "status": "active",
         "files": { "/w/a.ts": entry("a0", "2026-11-16T00:00:00.000Z") }
     }));
+    assert!(matches!(persist(&e.paths, mine, &MergeGuards::default(), true), Err(StoreError::Unreadable(_))));
+    assert_eq!(fs::read_to_string(&e.paths.session_file).unwrap(), "{ not json");
+}
+
+#[test]
+fn persist_writes_ours_when_there_is_no_disk_copy() {
+    let e = env();
+    let _ = fs::remove_file(&e.paths.session_file);
+    let mine = session(json!({
+        "sessionId": "a", "status": "active",
+        "files": { "/w/a.ts": entry("a0", "2026-11-16T00:00:00.000Z") }
+    }));
     let out = persist(&e.paths, mine, &MergeGuards::default(), true).unwrap();
     assert!(out.files.contains_key("/w/a.ts"));
-    assert_eq!(fs::read_to_string(&e.paths.session_file).unwrap(), serde_json::to_string_pretty(&out).unwrap());
 }
 
 #[test]

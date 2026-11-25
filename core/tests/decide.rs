@@ -1043,3 +1043,24 @@ fn clear_with_keys_keeps_records_the_user_did_not_see() {
     assert_eq!(r.done, 1);
     assert_eq!(fx.session(&fx.ws)["accepted"][0]["path"], b.as_str());
 }
+
+/// Under the lock, a session file that turned unreadable since the load (garbage, a non-UTF-8
+/// write, a truncated copy) is refused, never replaced with our state.
+#[test]
+fn persist_refuses_a_session_corrupted_between_read_and_write() {
+    for bad in [b"{ not json".to_vec(), vec![0xff, 0xfe, b'{', b'}'], Vec::new()] {
+        let fx = Fx::new();
+        let a = fx.file("a.txt", "new");
+        fx.write_session(&fx.ws, session_json(json!({ &a: pending(Some("old")) }), json!([]), json!({})));
+        let file = fx.session_file(&fx.ws);
+        let bad2 = bad.clone();
+        let r = decide_with(&fx.paths, &fx.ws, Action::Accept, fx.file_target(&fx.ws, &a), false, NOW, &mut |f| {
+            fs::write(f, &bad2).unwrap();
+        });
+        match r {
+            Err(DecideError::Store { error: StoreError::Unreadable(_), .. }) => {}
+            other => panic!("{bad:?}: {other:?}"),
+        }
+        assert_eq!(fs::read(&file).unwrap(), bad, "left as the other writer left it");
+    }
+}

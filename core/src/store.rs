@@ -47,6 +47,9 @@ pub enum StoreError {
     UnknownShape,
     /// A shared file other than a session (`excludes.json`) could not be updated.
     Shared(String),
+    /// The session file on disk could not be read, decoded as UTF-8 or parsed under the lock:
+    /// writing ours over it could destroy what another writer put there.
+    Unreadable(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -59,6 +62,7 @@ impl std::fmt::Display for StoreError {
             }
             StoreError::UnknownShape => write!(f, "the session file was written by a newer ClaudeGate"),
             StoreError::Shared(e) => write!(f, "{e}"),
+            StoreError::Unreadable(e) => write!(f, "the session file on disk could not be read, so it was left as is: {e}"),
         }
     }
 }
@@ -330,8 +334,16 @@ pub(crate) fn persist(
     check_session_path(paths)?;
     let _lock = acquire_lock(&paths.session_file);
 
-    // No readable/parseable disk copy: write our own state (never lose it).
-    let disk = fs::read_to_string(&paths.session_file).ok().and_then(|t| parse_session(&t).ok());
+    // Only a missing file means there is no disk copy to merge. Anything we cannot read, decode
+    // or parse is refused, never overwritten with our state.
+    let disk = match fs::read(&paths.session_file) {
+        Ok(bytes) => {
+            let text = String::from_utf8(bytes).map_err(|e| StoreError::Unreadable(e.to_string()))?;
+            Some(parse_session(&text).map_err(|e| StoreError::Unreadable(e.to_string()))?)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(StoreError::Unreadable(e.to_string())),
+    };
     let mut session = match disk {
         Some((_, Shape::Unknown(_))) => return Err(StoreError::UnknownShape),
         Some((disk, Shape::Known)) => merge_fresh_captures(mine, disk, guards),
