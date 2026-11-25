@@ -176,7 +176,11 @@ describe("resurfacing", () => {
   const t = Date.parse(at);
   const p = (root: string, newestCaptureMs: number | null) => ({ root, newestCaptureMs });
   it("brings back a hidden project with a capture newer than its hiding", () => {
-    expect(resurfacing([p("/w/a", t + 1), p("/w/b", t - 1)], ["/w/a", "/w/b"], { "/w/a": at, "/w/b": at })).toEqual(["/w/a"]);
+    expect(resurfacing([p("/w/a", t + 2001), p("/w/b", t - 1)], ["/w/a", "/w/b"], { "/w/a": at, "/w/b": at })).toEqual(["/w/a"]);
+  });
+  it("needs the capture to be more than 2 s newer than the hide", () => {
+    expect(resurfacing([p("/w/a", t + 2000)], ["/w/a"], { "/w/a": at })).toEqual([]);
+    expect(resurfacing([p("/w/a", t + 1)], ["/w/a"], { "/w/a": at })).toEqual([]);
   });
   it("stays hidden when its only new capture is still waiting (the summary leaves it out: null)", () => {
     expect(resurfacing([p("/w/a", null)], ["/w/a"], { "/w/a": at })).toEqual([]);
@@ -185,13 +189,13 @@ describe("resurfacing", () => {
     expect(resurfacing([p("/w/a", t), p("/w/b", null)], ["/w/a", "/w/b"], { "/w/a": at, "/w/b": at })).toEqual([]);
   });
   it("never resurfaces a root without a stamp or with an unreadable one", () => {
-    expect(resurfacing([p("/w/a", t + 5)], ["/w/a"], {})).toEqual([]);
-    expect(resurfacing([p("/w/a", t + 5)], ["/w/a"], { "/w/a": "yesterday" })).toEqual([]);
-    expect(resurfacing([p("/w/a", t + 5)], ["/w/a"], undefined)).toEqual([]);
+    expect(resurfacing([p("/w/a", t + 5000)], ["/w/a"], {})).toEqual([]);
+    expect(resurfacing([p("/w/a", t + 5000)], ["/w/a"], { "/w/a": "yesterday" })).toEqual([]);
+    expect(resurfacing([p("/w/a", t + 5000)], ["/w/a"], undefined)).toEqual([]);
   });
   it("ignores shown projects and matches roots across trailing slashes", () => {
-    expect(resurfacing([p("/w/a", t + 5)], [], { "/w/a": at })).toEqual([]);
-    expect(resurfacing([p("/w/a", t + 5)], ["/w/a/"], { "/w/a/": at })).toEqual(["/w/a/"]);
+    expect(resurfacing([p("/w/a", t + 5000)], [], { "/w/a": at })).toEqual([]);
+    expect(resurfacing([p("/w/a", t + 5000)], ["/w/a/"], { "/w/a/": at })).toEqual(["/w/a/"]);
   });
 });
 

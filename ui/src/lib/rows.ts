@@ -163,8 +163,14 @@ export function initials(name: string): string {
 }
 
 /**
- * The hidden roots that come back on their own: a pending capture newer than the moment they were
- * hidden. A root with no stamp (or one that does not parse) stays hidden: the app stamps it when
+ * How much newer than `hiddenAt` a capture must be to bring a project back: a capture landing in
+ * the same moment as the hide (clocks, a write racing the click) does not count.
+ */
+export const RESURFACE_GRACE_MS = 2000;
+
+/**
+ * The hidden roots that come back on their own: a pending capture more than `RESURFACE_GRACE_MS`
+ * newer than the moment they were hidden. A root with no stamp (or one that does not parse) stays hidden: the app stamps it when
  * it first sees it, so only captures after that count.
  */
 export function resurfacing(
@@ -178,7 +184,7 @@ export function resurfacing(
     const at = stamp ? Date.parse(stamp) : NaN;
     if (Number.isNaN(at)) continue;
     const p = projects.find((x) => norm(x.root) === norm(root));
-    if (p?.newestCaptureMs != null && p.newestCaptureMs > at) out.push(root);
+    if (p?.newestCaptureMs != null && p.newestCaptureMs > at + RESURFACE_GRACE_MS) out.push(root);
   }
   return out;
 }
