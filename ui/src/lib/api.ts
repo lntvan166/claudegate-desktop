@@ -61,6 +61,9 @@ export type ScopeView = {
   isWorktree: boolean;
   /** A registered root nested inside the project's root: its own repo, session and exclude. */
   nested?: boolean;
+  /** Older parent entries only this scope's accepted (rejected) records hide; a Clear shows them. */
+  revealedByClearAccepted?: number;
+  revealedByClearRejected?: number;
   shapeUnknown: string[];
   error: string | null;
 };

@@ -13,6 +13,7 @@
     outcomes = {},
     tabCount = 0,
     filter = null,
+    reappear,
     onaction,
   }: {
     tab: DiffKind;
@@ -25,6 +26,8 @@
     tabCount?: number;
     /** Pending: the active filter; `keys` are then only the matching rows, and the buttons say so. */
     filter?: string | null;
+    /** Clear: older parent entries these records alone hide, which a Clear shows again. */
+    reappear?: { n: number; where: string };
     /** `keys` are exactly the rows counted in the question the user answered. */
     onaction: (a: BulkAction, keys: string[]) => void;
   } = $props();
@@ -55,7 +58,7 @@
         : confirming === "rejectAll"
       ? rejectPrompt(asked.map((path) => ({ path, rejectOutcome: outcomes[path] ?? "restore" })))
       : confirming
-        ? bulkPrompt(confirming, tab, asked.length)
+        ? bulkPrompt(confirming, tab, asked.length, reappear)
         : null,
   );
 

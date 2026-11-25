@@ -297,6 +297,10 @@ describe("bulkPrompt", () => {
   it("asks before Clear, naming the list", () => {
     expect(bulkPrompt("clear", "accepted", 1)?.text).toBe("Clear 1 record from Accepted? Files on disk stay as they are.");
     expect(bulkPrompt("clear", "rejected", 5)?.go).toBe("Clear 5");
+    expect(bulkPrompt("clear", "accepted", 2, { n: 3, where: "umbrella" })?.text).toBe(
+      "Clear 2 records from Accepted? Files on disk stay as they are. 3 older changes in umbrella will show again.",
+    );
+    expect(bulkPrompt("clear", "accepted", 2, { n: 0, where: "umbrella" })?.text).not.toContain("show again");
   });
 
   it("Accept all needs no question: it changes no file", () => {

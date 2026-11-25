@@ -282,7 +282,16 @@ export const ACCEPT_ALL_ASK_ABOVE = 5;
  * The question asked before a bulk action, or null for an Accept all of 5 files or fewer. Revert
  * and Reapply use the extension's wording (`revertAcceptedAll`, `reapplyAll` in extension.ts).
  */
-export function bulkPrompt(action: BulkAction, tab: "pending" | "accepted" | "rejected", count: number): Prompt | null {
+/**
+ * `reappear`, for Clear: older pending entries of the parent that only these records keep out of
+ * the list (a repo nested in it decided those files later), and the parent's name.
+ */
+export function bulkPrompt(
+  action: BulkAction,
+  tab: "pending" | "accepted" | "rejected",
+  count: number,
+  reappear?: { n: number; where: string },
+): Prompt | null {
   switch (action) {
     case "rejectAll":
       // The real question is `rejectPrompt`, built from the rows; this is only its fallback.
@@ -297,7 +306,11 @@ export function bulkPrompt(action: BulkAction, tab: "pending" | "accepted" | "re
       return { text: `Re-apply Claude's version to all ${plural(count, "rejected file", "rejected files")} on disk?`, go: `Reapply ${count}`, danger: true };
     case "clear":
       return {
-        text: `Clear ${plural(count, "record", "records")} from ${tab === "accepted" ? "Accepted" : "Rejected"}? Files on disk stay as they are.`,
+        text:
+          `Clear ${plural(count, "record", "records")} from ${tab === "accepted" ? "Accepted" : "Rejected"}? Files on disk stay as they are.` +
+          (reappear && reappear.n > 0
+            ? ` ${plural(reappear.n, "older change", "older changes")} in ${reappear.where} will show again.`
+            : ""),
         go: `Clear ${count}`,
         danger: true,
       };

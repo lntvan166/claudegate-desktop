@@ -342,6 +342,15 @@
     const shown = new Set(groups.flatMap((g) => g.rows.map((r) => r.path)));
     return filterBulk(keys, shown);
   });
+  /** Clear on this tab: the older parent entries only its records hide, which show again after. */
+  const clearReveals = $derived(
+    view && tab !== "pending"
+      ? {
+          n: view.scopes.reduce((s, sc) => s + ((tab === "accepted" ? sc.revealedByClearAccepted : sc.revealedByClearRejected) ?? 0), 0),
+          where: basename(view.root),
+        }
+      : undefined,
+  );
   const rejectOutcomes = $derived(Object.fromEntries((view?.pending ?? []).map((p) => [p.path, p.rejectOutcome])));
 
   // Responses can arrive out of order when events land in quick succession.
@@ -1364,7 +1373,7 @@
           </div>
         {:else if view && canDecide && bulk.length > 0}
           {#key tab}
-            <ActionBar bind:this={actionBar} {tab} keys={bulk} {busy} outcomes={rejectOutcomes} tabCount={filter !== null && tab === "pending" ? bulk.length : counts[tab]} filter={tab === "pending" ? filter : null} onaction={runBulk} />
+            <ActionBar bind:this={actionBar} {tab} keys={bulk} reappear={clearReveals} {busy} outcomes={rejectOutcomes} tabCount={filter !== null && tab === "pending" ? bulk.length : counts[tab]} filter={tab === "pending" ? filter : null} onaction={runBulk} />
           {/key}
         {/if}
         {#if !narrowDiffOpen}{@render protectBar()}{/if}
