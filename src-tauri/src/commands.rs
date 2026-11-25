@@ -2,7 +2,7 @@
 //! blocking pool; errors cross the boundary as `String`.
 
 use crate::watch::KnownMap;
-use claudegate_core::decide::{decide_confirmed, Action, DecideError, DecidePaths, DecideReport, Target};
+use claudegate_core::decide::{decide_confirmed, decide_confirmed_scoped, Action, DecideError, DecidePaths, DecideReport, Target};
 use claudegate_core::model::{parse_session, ReviewRecord, Session};
 use claudegate_core::paths::{claudegate_home, resolve_root, session_file_for};
 use claudegate_core::project::{listed_roots, load_project_for, load_project_max, summary_of, ProjectSummary, ProjectView};
@@ -408,6 +408,17 @@ pub struct TargetDto {
     pub prefix: Option<String>,
     #[serde(default)]
     pub keys: Option<Vec<String>>,
+    /// `keys` with the scope each row was listed in. When given it is used instead of `keys`:
+    /// the same path can be a row in two scopes (a parent and a repo nested in it).
+    #[serde(default)]
+    pub scoped_keys: Option<Vec<ScopedKey>>,
+}
+
+/// One confirmed row: its scope root and its key.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScopedKey {
+    pub scope: String,
+    pub key: String,
 }
 
 pub fn parse_action(s: &str) -> Result<Action, String> {
@@ -534,7 +545,15 @@ pub fn run_decide(
         }
     };
     let keys = target_dto.keys.as_deref();
-    match decide_confirmed(paths, &resolve_root(Path::new(root)), action, target, keys, read_only, now_iso) {
+    let root = resolve_root(Path::new(root));
+    let result = match &target_dto.scoped_keys {
+        Some(sk) => {
+            let pairs: Vec<(String, String)> = sk.iter().map(|k| (k.scope.clone(), k.key.clone())).collect();
+            decide_confirmed_scoped(paths, &root, action, target, &pairs, read_only, now_iso)
+        }
+        None => decide_confirmed(paths, &root, action, target, keys, read_only, now_iso),
+    };
+    match result {
         Ok(r) => DecideOutcome { result: Ok(r) },
         Err(e) => DecideOutcome { result: Err(error_json(&e)) },
     }

@@ -107,9 +107,11 @@ describe("matchPrompt", () => {
 describe("stillShown", () => {
   const g: Group[] = [{ scope: scope(ROOT), label: "a", rows: [row(ROOT, "src/auth.ts")] }];
   it("is true only for a row in the shown groups", () => {
-    expect(stillShown(`${ROOT}/src/auth.ts`, g)).toBe(true);
-    expect(stillShown(`${ROOT}/README.md`, g)).toBe(false);
-    expect(stillShown(`${ROOT}/src/auth.ts`, [])).toBe(false);
+    expect(stillShown({ scope: ROOT, key: `${ROOT}/src/auth.ts` }, g)).toBe(true);
+    expect(stillShown({ scope: ROOT, key: `${ROOT}/README.md` }, g)).toBe(false);
+    expect(stillShown({ scope: ROOT, key: `${ROOT}/src/auth.ts` }, [])).toBe(false);
+    // The same key in another scope is another row.
+    expect(stillShown({ scope: `${ROOT}/nested`, key: `${ROOT}/src/auth.ts` }, g)).toBe(false);
   });
 });
 

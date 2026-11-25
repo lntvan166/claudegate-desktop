@@ -71,6 +71,10 @@ describe("findPendingRow", () => {
     expect(findPendingRow("/w/app-wt/feat/b.ts", rows)).toBe(rows[1]);
     expect(findPendingRow("/w/app", rows)).toBeNull();
   });
+  it("picks the most specific scope when two list the path", () => {
+    const two = [{ path: "/w/umbrella/orders/a.go", scope: "/w/umbrella" }, { path: "/w/umbrella/orders/a.go", scope: "/w/umbrella/orders" }];
+    expect(findPendingRow("/w/umbrella/orders/a.go", two)).toBe(two[1]);
+  });
 });
 
 describe("addFolderFor", () => {

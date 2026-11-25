@@ -30,9 +30,11 @@ export function ownerOf(path: string, owners: Owner[], canonical?: string | null
 }
 
 /** The pending row for exactly this path (a file launch); null for a folder or an unknown file. */
-export function findPendingRow<R extends { path: string }>(path: string, rows: R[]): R | null {
+export function findPendingRow<R extends { path: string; scope?: string }>(path: string, rows: R[]): R | null {
   const p = norm(path);
-  return rows.find((r) => norm(r.path) === p) ?? null;
+  // The same path can be listed in two scopes: the most specific (longest) scope owns it.
+  const hits = rows.filter((r) => norm(r.path) === p);
+  return hits.reduce<R | null>((best, r) => (!best || norm(r.scope ?? "").length > norm(best.scope ?? "").length ? r : best), null);
 }
 
 /** The Add project button's label: names the folder when the path is a file. */

@@ -1,7 +1,7 @@
 // Free-text filter for the Pending tab. Port of the extension's panelFilter.ts: the tab is a
 // worklist, and a filter that cleared itself on every refresh would be useless exactly when used.
 import type { ProjectView } from "./api";
-import { isSubScope, relTo, scopeLabel, type Group, type Row } from "./rows";
+import { isSubScope, relTo, sameRow, scopeLabel, type Group, type Row, type RowRef } from "./rows";
 
 /** Raw input to a filter. Empty or whitespace means "no filter" (null) everywhere downstream. */
 export function normalizeFilter(raw: string | undefined | null): string | null {
@@ -68,8 +68,8 @@ export function matchPrompt(
 }
 
 /** Whether the row `key` is among the rows the filter shows (a hidden row must not stay selected). */
-export function stillShown(key: string, shown: Group[]): boolean {
-  return shown.some((g) => g.rows.some((r) => r.key === key));
+export function stillShown(row: RowRef, shown: Group[]): boolean {
+  return shown.some((g) => g.rows.some((r) => sameRow(r, row)));
 }
 
 /** The bulk keys a filtered Accept/Reject may act on: only those the filter shows, nothing else. */

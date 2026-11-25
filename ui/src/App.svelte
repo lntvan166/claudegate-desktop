@@ -66,7 +66,8 @@
   import { actionFor, decisionFor, diffKeyFor, DIFF_HIDDEN_REFUSAL, isUndoKey, isTypingTarget, nextIndex, READ_ONLY_REFUSAL, refKeyFor, WAITING_REFUSAL } from "./lib/keys";
   import { writeClipboard } from "./lib/clipboard";
   import { clipboardText, formatRef, pasteHint, refRange, type LineRange } from "./lib/ref";
-  import { basename, groupsFor, resurfacing, scopeKind, scopeLabel, selectionAfterList, sortProjects, splitHidden, type Row } from "./lib/rows";
+  import type { RowRef } from "./lib/rows";
+  import { basename, groupsFor, restoreSelection, resurfacing, rowsOf, sameRow, scopeKind, scopeLabel, selectionAfterList, sortProjects, splitHidden, type Row } from "./lib/rows";
   import { Rechecks } from "./lib/recheck";
   import {
     MIN,
@@ -151,7 +152,7 @@
   let fileTree: FileTree | undefined = $state();
   // A row the filter hides must not stay selected: a/r would still decide a file nobody can see.
   $effect(() => {
-    if (tab === "pending" && filter !== null && selectedRow && !stillShown(selectedRow.key, groups)) selectedRow = null;
+    if (tab === "pending" && filter !== null && selectedRow && !stillShown(selectedRow, groups)) selectedRow = null;
   });
   let mode = $state<ListMode>(loadMode(readStore(MODE_KEY)));
   function setMode(m: ListMode) {
@@ -366,8 +367,7 @@
       patchSummary(v);
       if (selectedRow) {
         // Keep the selection on the fresh row object so its counts update; drop it if it is gone.
-        const key = selectedRow.key;
-        selectedRow = shownGroups(hideExtra(v, extraHide), tab).flatMap((g) => g.rows).find((r) => r.key === key) ?? null;
+        selectedRow = restoreSelection(shownGroups(hideExtra(v, extraHide), tab), selectedRow);
       }
       return v;
     } catch (e) {
@@ -508,9 +508,9 @@
 
   /** A row's ↗ or a double-click: the shown row opens where the diff points, any other at the top. */
   async function openRow(row: Row) {
-    if (row.key !== selectedRow?.key || !diffView) return open(row, 1);
+    if (!sameRow(row, selectedRow) || !diffView) return open(row, 1);
     const t = await diffView.openTargetWhenReady();
-    if (row.key === selectedRow?.key) await open(row, t.line, null, t.col);
+    if (sameRow(row, selectedRow)) await open(row, t.line, null, t.col);
   }
 
   async function pickEditor(template: string) {
@@ -522,10 +522,10 @@
     }
   }
 
-  /** Selects the pending row with `key` in `v` (a fresh fetch), unfolding whatever hides it. */
-  function selectPending(v: ProjectView | null, key: string) {
+  /** Selects the pending row `ref` (scope and key) in `v` (a fresh fetch), unfolding whatever hides it. */
+  function selectPending(v: ProjectView | null, ref: RowRef) {
     if (!v || tab !== "pending") return;
-    const row = shownGroups(hideExtra(v, extraHide), "pending").flatMap((g) => g.rows).find((r) => r.key === key);
+    const row = restoreSelection(shownGroups(hideExtra(v, extraHide), "pending"), ref);
     if (!row) return;
     for (const k of collapseKeysToReveal(row, "pending", collapsed)) collapsed.delete(k);
     selectedRow = row;
@@ -588,7 +588,7 @@
   async function runDecide(
     action: DecideAction,
     target: DecideTarget,
-    opts: { row?: Row | null; reselect?: string; note?: string; protectedOk?: boolean } = {},
+    opts: { row?: Row | null; reselect?: RowRef; note?: string; protectedOk?: boolean } = {},
   ) {
     const root = selected;
     if (busy || !root || !view) return;
@@ -610,15 +610,20 @@
       }
     }
     const advanceFrom =
-      settings.autoAdvance.value && target.kind === "file" && tab === "pending" && opts.row && opts.row.key === selectedRow?.key ? opts.row.key : null;
+      settings.autoAdvance.value && target.kind === "file" && tab === "pending" && opts.row && sameRow(opts.row, selectedRow) ? opts.row : null;
     const nextKey = advanceFrom ? nextAfterDecision(fileOrder(shownGroups(view, "pending"), mode), advanceFrom) : null;
     // Undo of an accept looks for a record stamped at or after this moment, never an older one.
     const since = new Date().toISOString();
     // A bulk or folder accept/reject: the confirmed rows, with their scopes, for its Undo.
+    const scoped = target.kind === "all" ? target.scopedKeys : undefined;
     const confirmed = target.kind !== "file" ? target.keys : undefined;
     const decided =
-      confirmed && (action === "accept" || action === "reject")
-        ? view.pending.filter((p) => confirmed.includes(p.path)).map((p) => ({ scope: p.scope, path: p.path }))
+      (scoped || confirmed) && (action === "accept" || action === "reject")
+        ? view.pending
+            .filter((p) =>
+              scoped ? scoped.some((k) => sameRow(k, { scope: p.scope, key: p.path })) : confirmed!.includes(p.path),
+            )
+            .map((p) => ({ scope: p.scope, path: p.path }))
         : undefined;
     busy = true;
     try {
@@ -669,15 +674,21 @@
         ? `Couldn't find ${missing.length === 1 ? "1 accept" : `${missing.length} accepts`} to undo (${missing.map(basename).join(", ")}); use Revert in the Accepted tab.`
         : undefined;
     if (u.target.kind === "file") {
-      await runDecide(u.action, { ...u.target, key: keys[0] }, { reselect: u.rows[0].path, note });
+      await runDecide(u.action, { ...u.target, key: keys[0] }, { reselect: { scope: u.rows[0].scope, key: u.rows[0].path }, note });
+    } else if (u.target.kind === "all" && !u.byPath) {
+      // The decided rows, each in its own scope: the same path may be a row in two scopes.
+      await runDecide(u.action, { kind: "all", keys, scopedKeys: u.rows.map((r) => ({ scope: r.scope, key: r.path })) }, { note });
     } else {
-      await runDecide(u.action, { ...u.target, keys }, { note });
+      await runDecide(u.action, u.target.kind === "all" ? { kind: "all", keys } : { ...u.target, keys }, { note });
     }
   }
 
   /** `keys` are the rows the user counted and confirmed; the backend decides no other. */
   function runBulk(a: BulkAction, keys: string[]) {
-    const all: DecideTarget = { kind: "all", keys };
+    // Each confirmed key with the scope of the row the user saw it in.
+    const want = new Set(keys);
+    const scopedKeys = view ? rowsOf(view, tab).filter((r) => want.has(r.key)).map((r) => ({ scope: r.scope, key: r.key })) : undefined;
+    const all: DecideTarget = { kind: "all", keys, scopedKeys };
     const action: DecideAction =
       a === "acceptAll"
         ? "accept"
@@ -1056,7 +1067,7 @@
           (i) => i.kind === "file",
         );
         const i = nextIndex(
-          files.findIndex((f) => f.row!.key === selectedRow?.key),
+          files.findIndex((f) => sameRow(f.row, selectedRow)),
           files.length,
           a.dir,
         );
@@ -1065,7 +1076,7 @@
       }
       case "pending": {
         const order = fileOrder(shownGroups(view, "pending"), mode);
-        const cur = tab === "pending" ? order.findIndex((r) => r.key === selectedRow?.key) : -1;
+        const cur = tab === "pending" ? order.findIndex((r) => sameRow(r, selectedRow)) : -1;
         const i = nextIndex(cur, order.length, a.dir);
         if (i < 0) break;
         const row = order[i];

@@ -18,7 +18,7 @@ use crate::excludes::ExcludeMatcher;
 use crate::merge::{accept_entry, reject_entry, MergeGuards};
 use crate::model::{has_real_change, parse_session, FileEntry, Session, Shape};
 use crate::paths::{resolve_root, session_file_for};
-use crate::project::{project_matcher, read_disk, review_scopes};
+use crate::project::{pending_keys_of, project_matcher, read_disk, review_scopes, shadowed_keys};
 use crate::store::{persist, preflight, FileSnapshots, StoreError, StorePaths};
 use crate::workspace_write;
 use serde::Serialize;
@@ -146,7 +146,38 @@ pub fn decide_confirmed(
     now_iso: &str,
 ) -> Result<DecideReport, DecideError> {
     let hooks = Hooks { before_preflight: &mut || {}, before_persist: &mut |_| {} };
-    run(paths, root, action, target, keys, read_only, now_iso, hooks)
+    run(paths, root, action, target, keys.map(Confirm::Bare), read_only, now_iso, hooks)
+}
+
+/// `decide_confirmed` with each confirmed key paired with the scope root its row was listed in:
+/// the same path can be a row in two scopes (a rejected record in a parent and a nested root), and
+/// confirming one must never act on the other.
+pub fn decide_confirmed_scoped(
+    paths: &DecidePaths,
+    root: &Path,
+    action: Action,
+    target: Target,
+    keys: &[(String, String)],
+    read_only: bool,
+    now_iso: &str,
+) -> Result<DecideReport, DecideError> {
+    let hooks = Hooks { before_preflight: &mut || {}, before_persist: &mut |_| {} };
+    run(paths, root, action, target, Some(Confirm::Scoped(keys)), read_only, now_iso, hooks)
+}
+
+/// The keys the user confirmed: bare keys, or `(scope root, key)` pairs.
+#[derive(Clone, Copy)]
+enum Confirm<'a> {
+    Bare(&'a [String]),
+    Scoped(&'a [(String, String)]),
+}
+
+/// How a confirmed key is held: the key, or `scope \0 key`.
+fn confirm_id(scope: Option<&str>, key: &str) -> String {
+    match scope {
+        Some(s) => format!("{s}\0{key}"),
+        None => key.to_owned(),
+    }
 }
 
 /// `decide` with a hook run just before each scope's `persist`, given the session file. Tests use
@@ -256,7 +287,7 @@ fn run(
     root: &Path,
     action: Action,
     target: Target,
-    keys: Option<&[String]>,
+    keys: Option<Confirm>,
     read_only: bool,
     now_iso: &str,
     hooks: Hooks,
@@ -272,11 +303,14 @@ fn run(
     // The primary, its worktrees, and the registered roots nested inside it (each with its own
     // session file and exclude), as the project view lists them.
     let scopes = review_scopes(&paths.home, &primary, crate::worktrees::MAX_WORKTREES);
-    let targets: Vec<(PathBuf, PathBuf)> = match &target {
-        Target::All => scopes.into_iter().map(|s| (s.root, s.owner)).collect(),
+    // What each scope leaves to a more specific one, read before anything is written.
+    let pending_keys = pending_keys_of(&paths.home, &scopes);
+    let shadow_of = |i: usize| shadowed_keys(&scopes, &pending_keys, i);
+    let targets: Vec<(PathBuf, PathBuf, HashSet<String>)> = match &target {
+        Target::All => scopes.iter().enumerate().map(|(i, s)| (s.root.clone(), s.owner.clone(), shadow_of(i))).collect(),
         Target::File { scope, .. } | Target::Folder { scope, .. } => {
-            let s = scopes.into_iter().find(|s| s.root.to_string_lossy() == scope.as_str()).ok_or(DecideError::NotFound)?;
-            vec![(s.root, s.owner)]
+            let i = scopes.iter().position(|s| s.root.to_string_lossy() == scope.as_str()).ok_or(DecideError::NotFound)?;
+            vec![(scopes[i].root.clone(), scopes[i].owner.clone(), shadow_of(i))]
         }
     };
     if let Target::Folder { prefix, .. } = &target {
@@ -284,11 +318,11 @@ fn run(
     }
 
     // Load and check every target scope before anything is written.
-    let mut loaded: Vec<(PathBuf, PathBuf, PathBuf, Session)> = Vec::new();
-    for (scope, owner) in targets {
+    let mut loaded: Vec<(PathBuf, PathBuf, HashSet<String>, PathBuf, Session)> = Vec::new();
+    for (scope, owner, shadow) in targets {
         let file = session_file_for(&paths.home, &scope);
         if let Some(session) = load_checked(&scope, &file)? {
-            loaded.push((scope, owner, file, session));
+            loaded.push((scope, owner, shadow, file, session));
         }
     }
     if matches!(target, Target::File { .. }) && loaded.is_empty() {
@@ -298,13 +332,18 @@ fn run(
     // Each scope is filtered by the exclude of the root that owns it.
     let mut matchers: Vec<(PathBuf, ExcludeMatcher)> = Vec::new();
     // A file target names its key; confirmed keys only narrow folder and all targets.
+    let ids: Option<Vec<String>> = keys.map(|k| match k {
+        Confirm::Bare(k) => k.to_vec(),
+        Confirm::Scoped(k) => k.iter().map(|(s, key)| confirm_id(Some(s), key)).collect(),
+    });
+    let scoped = matches!(keys, Some(Confirm::Scoped(_)));
     let confirmed: Option<HashSet<String>> =
-        keys.filter(|_| !matches!(target, Target::File { .. })).map(|k| k.iter().cloned().collect());
+        ids.as_ref().filter(|_| !matches!(target, Target::File { .. })).map(|k| k.iter().cloned().collect());
     let seen = RefCell::new(HashSet::new());
     // `report` holds only completed scopes; each scope works on its own and is folded in once
     // it is persisted (or had nothing to persist).
     let mut report = DecideReport::default();
-    for (scope, owner, file, mut session) in loaded {
+    for (scope, owner, shadow, file, mut session) in loaded {
         if !matchers.iter().any(|(o, _)| *o == owner) {
             matchers.push((owner.clone(), project_matcher(&paths.home, &owner)));
         }
@@ -312,7 +351,7 @@ fn run(
         let mut guards = MergeGuards::default();
         let mut changed = Vec::new();
         let mut scope_report = DecideReport::default();
-        let ctx = Ctx { scope: &scope, matcher, now_iso, confirmed: confirmed.as_ref(), seen: &seen };
+        let ctx = Ctx { scope: &scope, matcher, shadow: &shadow, now_iso, confirmed: confirmed.as_ref(), scoped, seen: &seen };
         let store = StorePaths { home: paths.home.clone(), desktop_home: paths.desktop_home.clone(), session_file: file };
         let mut w = Writes { store, preflighted: false, snaps: None, hook: &mut *before_preflight };
         let r = &mut scope_report;
@@ -346,11 +385,12 @@ fn run(
         report.left.extend(scope_report.left);
         report.errors.extend(scope_report.errors);
     }
-    if let (Some(keys), Some(_)) = (keys, &confirmed) {
+    if let (Some(keys), Some(_)) = (&ids, &confirmed) {
         let seen = seen.borrow();
         for k in keys.iter().filter(|k| !seen.contains(*k)) {
+            let k = if scoped { k.split_once('\0').map_or(k.as_str(), |(_, key)| key) } else { k.as_str() };
             // A record id is `<decidedAt>::<path>`; report the path.
-            let path = k.split_once("::").map_or(k.as_str(), |(_, p)| p);
+            let path = k.split_once("::").map_or(k, |(_, p)| p);
             report.errors.push((path.to_owned(), CHANGED_SINCE_CONFIRM_MESSAGE.to_owned()));
         }
     }
@@ -391,9 +431,13 @@ fn load_checked(scope: &Path, file: &Path) -> Result<Option<Session>, DecideErro
 struct Ctx<'a> {
     scope: &'a Path,
     matcher: &'a ExcludeMatcher,
+    /// Paths pending in a more specific scope too: a folder or all target leaves them to it.
+    shadow: &'a HashSet<String>,
     now_iso: &'a str,
     /// The keys the user confirmed, for a folder or all target; `None` means no narrowing.
     confirmed: Option<&'a HashSet<String>>,
+    /// `confirmed` holds `scope \0 key` ids.
+    scoped: bool,
     /// Confirmed keys found eligible in some scope; the rest are reported at the end.
     seen: &'a RefCell<HashSet<String>>,
 }
@@ -402,9 +446,11 @@ impl Ctx<'_> {
     /// Whether an eligible `key` of a folder or all target may be acted on; marks it seen.
     fn take(&self, key: &str) -> bool {
         let Some(c) = self.confirmed else { return true };
-        let ok = c.contains(key);
+        let scope = self.scope.to_string_lossy();
+        let id = confirm_id(self.scoped.then_some(scope.as_ref()), key);
+        let ok = c.contains(&id);
         if ok {
-            self.seen.borrow_mut().insert(key.to_owned());
+            self.seen.borrow_mut().insert(id);
         }
         ok
     }
@@ -422,7 +468,7 @@ fn is_under(path: &str, dir: &str) -> bool {
 fn pending_targets(ctx: &Ctx, target: &Target, s: &Session) -> Result<Vec<String>, DecideError> {
     let scope = ctx.scope.to_string_lossy();
     let keep = |fp: &str, e: &FileEntry| {
-        !ctx.matcher.is_excluded(fp) && has_real_change(e.original_content.as_deref(), read_disk(fp).as_deref())
+        !ctx.matcher.is_excluded(fp) && !ctx.shadow.contains(fp) && has_real_change(e.original_content.as_deref(), read_disk(fp).as_deref())
     };
     Ok(match target {
         Target::File { key, .. } => {

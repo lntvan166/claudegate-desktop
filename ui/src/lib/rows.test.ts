@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProjectSummary, ProjectView } from "./api";
-import { groupsFor, initials, nodeKey, resurfacing, scopeKind, scopeLabel, selectionAfterList, sortProjects, splitHidden } from "./rows";
+import { groupsFor, initials, nodeKey, restoreSelection, resurfacing, scopeKind, scopeLabel, selectionAfterList, sortProjects, splitHidden } from "./rows";
 import { buildTree } from "./tree";
 
 const view: ProjectView = {
@@ -189,5 +189,31 @@ describe("resurfacing", () => {
   it("ignores shown projects and matches roots across trailing slashes", () => {
     expect(resurfacing([p("/w/a", t + 5)], [], { "/w/a": at })).toEqual([]);
     expect(resurfacing([p("/w/a", t + 5)], ["/w/a/"], { "/w/a/": at })).toEqual(["/w/a/"]);
+  });
+});
+
+describe("restoreSelection", () => {
+  it("finds the same row by scope and key, never the same key in another scope", () => {
+    const groups = groupsFor(
+      {
+        ...view,
+        root: "/ws/umbrella",
+        scopes: [
+          { root: "/ws/umbrella", isWorktree: false, shapeUnknown: [], error: null },
+          { root: "/ws/umbrella/orders", isWorktree: false, nested: true, shapeUnknown: [], error: null },
+        ],
+        accepted: [],
+        rejected: [
+          { id: "1", path: "/ws/umbrella/orders/a.go", rel: "", scope: "/ws/umbrella", decidedAt: "t1", added: 1, removed: 0 },
+          { id: "2", path: "/ws/umbrella/orders/a.go", rel: "", scope: "/ws/umbrella/orders", decidedAt: "t2", added: 1, removed: 0 },
+        ],
+      },
+      "rejected",
+    );
+    const got = restoreSelection(groups, { scope: "/ws/umbrella/orders", key: "/ws/umbrella/orders/a.go" });
+    expect(got?.scope).toBe("/ws/umbrella/orders");
+    expect(got?.decidedAt).toBe("t2");
+    expect(restoreSelection(groups, { scope: "/ws/umbrella/other", key: "/ws/umbrella/orders/a.go" })).toBeNull();
+    expect(restoreSelection(groups, null)).toBeNull();
   });
 });

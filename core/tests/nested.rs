@@ -339,3 +339,77 @@ fn settled_no_ops_in_the_nested_scope_are_not_shown_or_counted() {
     want.sort();
     assert_eq!(left, want);
 }
+
+/// The same path pending in the parent's session (a stale capture from before the nested root
+/// was registered) and in the nested root's: one row, owned by the most specific scope.
+fn same_path_in_both(fx: &Fx) -> String {
+    let f = fx.file(&fx.nested.join("src/dup.go"), "claude\n");
+    fx.write_session(&fx.parent, json!({ &f: pending(Some("parent-baseline\n")) }));
+    fx.write_session(&fx.nested, json!({ &f: pending(Some("nested-baseline\n")) }));
+    f
+}
+
+#[test]
+fn a_path_pending_in_both_sessions_shows_once_in_the_nested_scope() {
+    let fx = Fx::new();
+    let f = same_path_in_both(&fx);
+    let v = load_project(&fx.paths.home, &fx.parent);
+    let rows: Vec<(String, String)> = v.pending.iter().map(|p| (p.path.clone(), p.scope.clone())).collect();
+    assert_eq!(rows, vec![(f, s(&fx.nested))]);
+    assert_eq!(list_projects(&fx.paths.home)[0].pending, 1);
+}
+
+#[test]
+fn reject_all_with_a_path_in_both_sessions_touches_only_the_nested_entry() {
+    let fx = Fx::new();
+    let f = same_path_in_both(&fx);
+    let parent_before = fs::read(fx.session_file(&fx.parent)).unwrap();
+    let r = decide(&fx.paths, &fx.parent, Action::Reject, Target::All, false, NOW).unwrap();
+    assert_eq!(r.done, 1);
+    // Restored to the nested baseline, never the parent's stale one.
+    assert_eq!(fs::read_to_string(&f).unwrap(), "nested-baseline\n");
+    assert!(fx.session(&fx.nested)["rejected"].get(&f).is_some());
+    assert_eq!(fs::read(fx.session_file(&fx.parent)).unwrap(), parent_before);
+}
+
+#[test]
+fn a_folder_action_in_the_parent_skips_a_path_the_nested_scope_owns() {
+    let fx = Fx::new();
+    let _ = same_path_in_both(&fx);
+    let parent_before = fs::read(fx.session_file(&fx.parent)).unwrap();
+    let prefix = s(&fx.nested);
+    let r = decide(&fx.paths, &fx.parent, Action::Accept, Target::Folder { scope: s(&fx.parent), prefix }, false, NOW).unwrap();
+    assert_eq!(r.done, 0);
+    assert_eq!(fs::read(fx.session_file(&fx.parent)).unwrap(), parent_before);
+}
+
+#[test]
+fn a_parent_only_entry_under_the_nested_root_stays_the_parents() {
+    let fx = Fx::new();
+    let f = fx.file(&fx.nested.join("src/stale.go"), "new\n");
+    fx.write_session(&fx.parent, json!({ &f: pending(Some("old\n")) }));
+    fx.write_session(&fx.nested, json!({}));
+    let v = load_project(&fx.paths.home, &fx.parent);
+    assert_eq!(v.pending.iter().map(|p| p.scope.clone()).collect::<Vec<_>>(), vec![s(&fx.parent)]);
+    let r = decide(&fx.paths, &fx.parent, Action::Accept, Target::All, false, NOW).unwrap();
+    assert_eq!(r.done, 1);
+    assert_eq!(fx.session(&fx.parent)["accepted"][0]["path"], f.as_str());
+}
+
+#[test]
+fn a_scoped_confirmation_acts_on_that_scopes_row_only() {
+    use claudegate_core::decide::decide_confirmed_scoped;
+    let fx = Fx::new();
+    let f = s(&fx.nested.join("x.go"));
+    let rec = json!({ "id": "r", "path": &f, "before": "a", "after": "b", "decidedAt": CAP });
+    for root in [&fx.parent, &fx.nested] {
+        let v = json!({ "sessionId": "x", "status": "reviewed", "files": {}, "accepted": [], "rejected": { &f: rec } });
+        fs::write(fx.session_file(root), v.to_string()).unwrap();
+    }
+    let keys = vec![(s(&fx.nested), f.clone())];
+    let r = decide_confirmed_scoped(&fx.paths, &fx.parent, Action::ClearRejected, Target::All, &keys, false, NOW).unwrap();
+    assert_eq!(r.done, 1);
+    assert!(r.errors.is_empty());
+    assert!(fx.session(&fx.nested)["rejected"].get(&f).is_none());
+    assert!(fx.session(&fx.parent)["rejected"].get(&f).is_some());
+}

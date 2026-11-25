@@ -147,11 +147,13 @@ pub(crate) fn read_disk(path: &str) -> Option<String> {
     std::fs::read(path).ok().and_then(|b| String::from_utf8(b).ok())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn load_scope(
     home: &Path,
     scope: &ReviewScope,
     primary: &str,
     matcher: &ExcludeMatcher,
+    shadowed: &std::collections::HashSet<String>,
     now_ms: i64,
     view: &mut ProjectView,
 ) {
@@ -186,7 +188,8 @@ fn load_scope(
     };
     if let Some(s) = session {
         for (path, e) in &s.files {
-            if matcher.is_excluded(path) {
+            // Pending in a more specific (nested) scope too: that scope owns the row.
+            if matcher.is_excluded(path) || shadowed.contains(path) {
                 continue;
             }
             let disk = read_disk(path);
@@ -349,6 +352,38 @@ pub fn review_scopes_in(roots: &[PathBuf], primary: &Path, max_attached: usize) 
     out
 }
 
+/// The pending keys of each scope's session as it is on disk (empty when it has none or cannot be
+/// read), in `scopes` order.
+pub(crate) fn pending_keys_of(home: &Path, scopes: &[ReviewScope]) -> Vec<std::collections::HashSet<String>> {
+    scopes
+        .iter()
+        .map(|s| {
+            std::fs::read(session_file_for(home, &s.root))
+                .ok()
+                .and_then(|b| parse_session(&String::from_utf8_lossy(&b)).ok())
+                .map(|(sess, _)| sess.files.into_keys().collect())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// The paths scope `i` must leave to a more specific scope: those pending in a scope whose owning
+/// root lies strictly inside scope `i`'s owner (a nested root, or one of its worktrees). Each
+/// entry belongs to the most specific scope only; a path only the parent has stays the parent's.
+pub(crate) fn shadowed_keys(
+    scopes: &[ReviewScope],
+    keys: &[std::collections::HashSet<String>],
+    i: usize,
+) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for (j, s) in scopes.iter().enumerate() {
+        if j != i && strictly_inside(&s.owner, &scopes[i].owner) {
+            out.extend(keys[j].iter().cloned());
+        }
+    }
+    out
+}
+
 /// `review_scopes_in` with the roots from `workspace-roots.json`.
 pub fn review_scopes(home: &Path, primary: &Path, max_attached: usize) -> Vec<ReviewScope> {
     review_scopes_in(&read_roots(home), primary, max_attached)
@@ -425,7 +460,9 @@ fn load_project_full(
         return view;
     }
     let mut matchers: Vec<(PathBuf, ExcludeMatcher)> = Vec::new();
-    for scope in review_scopes(home, &primary_path, max_attached) {
+    let scopes = review_scopes(home, &primary_path, max_attached);
+    let keys = pending_keys_of(home, &scopes);
+    for (i, scope) in scopes.iter().enumerate() {
         if !matchers.iter().any(|(o, _)| *o == scope.owner) {
             let m = match exclude_for(&scope.owner) {
                 Some(globs) => ExcludeMatcher::new(&scope.owner, &globs),
@@ -434,7 +471,8 @@ fn load_project_full(
             matchers.push((scope.owner.clone(), m));
         }
         let matcher = &matchers.iter().find(|(o, _)| *o == scope.owner).expect("just added").1;
-        load_scope(home, &scope, &primary, matcher, now_ms, &mut view);
+        let shadowed = shadowed_keys(&scopes, &keys, i);
+        load_scope(home, scope, &primary, matcher, &shadowed, now_ms, &mut view);
     }
     view.pending.sort_by(|a, b| a.path.cmp(&b.path));
     view.newest_capture_ms = view.pending.iter().filter_map(|p| p.captured_at.as_deref().and_then(parse_iso_ms)).max();

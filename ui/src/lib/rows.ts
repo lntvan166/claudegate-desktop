@@ -26,6 +26,23 @@ export type Row = {
   group?: string;
 };
 
+/** What identifies a row: its scope and its key. The same path can be a row in two scopes. */
+export type RowRef = { scope: string; key: string };
+
+/** Whether `a` and `b` are the same row (scope and key). */
+export function sameRow(a: RowRef | null | undefined, b: RowRef | null | undefined): boolean {
+  return !!a && !!b && a.key === b.key && norm(a.scope) === norm(b.scope);
+}
+
+/**
+ * The row in `groups` that is the same row as `was` (scope and key), so a reload keeps the
+ * selection on its fresh object; null when it is gone. Never a same-key row of another scope.
+ */
+export function restoreSelection(groups: Group[], was: RowRef | null): Row | null {
+  if (!was) return null;
+  return groups.flatMap((g) => g.rows).find((r) => sameRow(r, was)) ?? null;
+}
+
 /** `key` identifies the group when it is not simply its scope (one scope can hold several). */
 export type Group = { scope: ScopeView; label: string; rows: Row[]; key?: string };
 

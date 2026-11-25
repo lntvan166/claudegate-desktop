@@ -152,19 +152,24 @@ describe("isSettingsUnreadable", () => {
 });
 
 describe("nextAfterDecision", () => {
-  const rows = [{ key: "a" }, { key: "b" }, { key: "c" }];
+  const r = (key: string, scope = "/w") => ({ scope, key });
+  const rows = [r("a"), r("b"), r("c")];
   it("picks the next row", () => {
-    expect(nextAfterDecision(rows, "a")).toBe("b");
-    expect(nextAfterDecision(rows, "b")).toBe("c");
+    expect(nextAfterDecision(rows, r("a"))).toEqual(r("b"));
+    expect(nextAfterDecision(rows, r("b"))).toEqual(r("c"));
   });
   it("falls back to the previous row at the end", () => {
-    expect(nextAfterDecision(rows, "c")).toBe("b");
+    expect(nextAfterDecision(rows, r("c"))).toEqual(r("b"));
   });
   it("is null for a single row", () => {
-    expect(nextAfterDecision([{ key: "a" }], "a")).toBeNull();
+    expect(nextAfterDecision([r("a")], r("a"))).toBeNull();
   });
   it("is null when the key is not listed", () => {
-    expect(nextAfterDecision(rows, "z")).toBeNull();
+    expect(nextAfterDecision(rows, r("z"))).toBeNull();
+  });
+  it("tells the same key in two scopes apart", () => {
+    const two = [r("k", "/w"), r("k", "/w/nested"), r("z", "/w/nested")];
+    expect(nextAfterDecision(two, r("k", "/w/nested"))).toEqual(r("z", "/w/nested"));
   });
 });
 

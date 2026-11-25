@@ -89,3 +89,26 @@ fn the_summary_carries_the_newest_capture() {
     let list = list_projects_with(&f.home, &known);
     assert_eq!(list[0].newest_capture_ms, claudegate_core::time::parse_iso_ms("2026-01-01T00:00:00Z"));
 }
+
+#[test]
+fn the_decide_command_routes_scoped_keys_to_that_scope_only() {
+    use claudegate_core::decide::DecidePaths;
+    use claudegate_desktop_lib::commands::{run_decide, TargetDto};
+    let f = fx();
+    let p = s(&f.nested.join("x.go"));
+    let rec = json!({ "id": "r", "path": &p, "before": "a", "after": "b", "decidedAt": "2026-01-01T00:00:00Z" });
+    for root in [&f.parent, &f.nested] {
+        let v = json!({ "sessionId": "x", "status": "reviewed", "files": {}, "accepted": [], "rejected": { &p: rec } });
+        fs::write(session_file_for(&f.home, root), v.to_string()).unwrap();
+    }
+    let target: TargetDto =
+        serde_json::from_value(json!({ "kind": "all", "keys": [&p], "scopedKeys": [{ "scope": s(&f.nested), "key": &p }] })).unwrap();
+    let desktop = f.home.parent().unwrap().join("cgd");
+    let paths = DecidePaths { home: f.home.clone(), desktop_home: desktop.clone() };
+    let lock = std::sync::Mutex::new(());
+    let out = run_decide(&lock, &paths, &desktop.join("config.json"), &s(&f.parent), "clearRejected", &target, "2026-11-25T00:00:00.000Z");
+    assert_eq!(out.result.unwrap().done, 1);
+    let read = |r: &Path| -> serde_json::Value { serde_json::from_str(&fs::read_to_string(session_file_for(&f.home, r)).unwrap()).unwrap() };
+    assert!(read(&f.nested)["rejected"].get(&p).is_none());
+    assert!(read(&f.parent)["rejected"].get(&p).is_some());
+}

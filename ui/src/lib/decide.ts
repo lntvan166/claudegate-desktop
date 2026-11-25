@@ -1,5 +1,6 @@
 // Pure helpers for decisions: what to undo, where to go next, what to say. The decide command
 // itself lives in api.ts; its shapes mirror src-tauri/src/commands.rs and core/src/decide.rs.
+import { sameRow, type RowRef } from "./rows";
 
 /** The ActionBar's buttons; App maps each to a `decide` call with an `all` target. */
 export type BulkAction = "acceptAll" | "rejectAll" | "revertAll" | "reapplyAll" | "clear";
@@ -14,7 +15,8 @@ export type DecideAction = "accept" | "reject" | "revert" | "reapply" | "clearAc
 export type DecideTarget =
   | { kind: "file"; scope: string; key: string }
   | { kind: "folder"; scope: string; prefix: string; keys?: string[] }
-  | { kind: "all"; keys?: string[] };
+  /** `scopedKeys`, when given, replaces `keys`: each confirmed row with its scope. */
+  | { kind: "all"; keys?: string[]; scopedKeys?: RowRef[] };
 
 export type DecideReport = {
   done: number;
@@ -180,10 +182,11 @@ export function isSettingsUnreadable(err: DecideError): boolean {
 }
 
 /** The row to select once `decidedKey` leaves the list: the next one, else the previous, else none. */
-export function nextAfterDecision(rows: { key: string }[], decidedKey: string): string | null {
-  const i = rows.findIndex((r) => r.key === decidedKey);
+export function nextAfterDecision<R extends RowRef>(rows: R[], decided: RowRef): RowRef | null {
+  const i = rows.findIndex((r) => sameRow(r, decided));
   if (i === -1) return null;
-  return rows[i + 1]?.key ?? rows[i - 1]?.key ?? null;
+  const n = rows[i + 1] ?? rows[i - 1];
+  return n ? { scope: n.scope, key: n.key } : null;
 }
 
 /** `path` lies strictly inside `dir`, either separator, as the backend's `is_under`. */
