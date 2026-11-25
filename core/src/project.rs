@@ -19,8 +19,10 @@ pub struct ProjectSummary {
     pub next_recheck_at: Option<i64>,
     /// The registered roots folded into this project as scopes (`ScopeKind::Nested`).
     pub nested: Vec<String>,
-    /// Epoch ms of the newest `capturedAt` among the counted pending rows; `None` when none has
-    /// one. A hidden project with a capture newer than when it was hidden comes back on its own.
+    /// Epoch ms of the newest `capturedAt` among the counted pending rows that are not waiting
+    /// (`newest_capture_ms`); `None` when none has one. A hidden project with a capture newer than
+    /// when it was hidden comes back on its own, so a capture whose write has not landed (and may
+    /// settle as a no-op) never counts.
     pub newest_capture_ms: Option<i64>,
 }
 
@@ -98,7 +100,8 @@ pub struct ProjectView {
     /// Epoch ms of the earliest moment a `waiting` row may settle and disappear; the UI re-fetches
     /// then. `None` when nothing is waiting.
     pub next_recheck_at: Option<i64>,
-    /// See `ProjectSummary::newest_capture_ms`, over every pending row.
+    /// See `ProjectSummary::newest_capture_ms`, over every pending row (the app narrows it by the
+    /// project's app-only hide patterns).
     pub newest_capture_ms: Option<i64>,
 }
 
@@ -466,10 +469,16 @@ fn load_project_full(
         load_scope(home, scope, &primary, matcher, &shadowed, now_ms, &mut view);
     }
     view.pending.sort_by(|a, b| a.path.cmp(&b.path));
-    view.newest_capture_ms = view.pending.iter().filter_map(|p| p.captured_at.as_deref().and_then(parse_iso_ms)).max();
+    view.newest_capture_ms = newest_capture_ms(view.pending.iter());
     view.accepted.sort_by(|a, b| b.decided_at.cmp(&a.decided_at));
     view.rejected.sort_by(|a, b| a.path.cmp(&b.path));
     view
+}
+
+/// Epoch ms of the newest `capturedAt` among `rows` that are not waiting; `None` when none has a
+/// readable one.
+pub fn newest_capture_ms<'a>(rows: impl Iterator<Item = &'a PendingItem>) -> Option<i64> {
+    rows.filter(|p| !p.waiting).filter_map(|p| p.captured_at.as_deref().and_then(parse_iso_ms)).max()
 }
 
 /// The registered roots listed as projects: every root, except one folded into a parent
@@ -490,7 +499,7 @@ pub fn summary_of(root: &Path, v: &ProjectView, counted: &dyn Fn(&PendingItem) -
         name,
         missing: v.missing,
         pending: rows.len(),
-        newest_capture_ms: rows.iter().filter_map(|p| p.captured_at.as_deref().and_then(parse_iso_ms)).max(),
+        newest_capture_ms: newest_capture_ms(rows.iter().copied()),
         next_recheck_at: v.next_recheck_at,
         nested: v.scopes.iter().filter(|s| s.nested).map(|s| s.root.clone()).collect(),
     }

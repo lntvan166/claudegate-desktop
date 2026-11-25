@@ -178,6 +178,9 @@ describe("resurfacing", () => {
   it("brings back a hidden project with a capture newer than its hiding", () => {
     expect(resurfacing([p("/w/a", t + 1), p("/w/b", t - 1)], ["/w/a", "/w/b"], { "/w/a": at, "/w/b": at })).toEqual(["/w/a"]);
   });
+  it("stays hidden when its only new capture is still waiting (the summary leaves it out: null)", () => {
+    expect(resurfacing([p("/w/a", null)], ["/w/a"], { "/w/a": at })).toEqual([]);
+  });
   it("keeps one hidden when the capture is not newer, or there is none", () => {
     expect(resurfacing([p("/w/a", t), p("/w/b", null)], ["/w/a", "/w/b"], { "/w/a": at, "/w/b": at })).toEqual([]);
   });

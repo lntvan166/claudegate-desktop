@@ -364,3 +364,24 @@ fn settled_no_ops_are_not_listed_or_counted_and_nothing_is_written() {
     assert_eq!(list_projects(h.path())[0].pending, 1);
     assert_eq!(fs::read(&file).unwrap(), before, "display only: the session is not written");
 }
+
+#[test]
+fn newest_capture_skips_waiting_rows() {
+    use claudegate_core::project::{newest_capture_ms, PendingItem, RejectOutcome};
+    let item = |at: &str, waiting: bool| PendingItem {
+        path: "/w/a".into(),
+        rel: "a".into(),
+        scope: "/w".into(),
+        new_file: false,
+        captured_at: Some(at.into()),
+        session_id: None,
+        added: 1,
+        removed: 0,
+        waiting,
+        reject_outcome: RejectOutcome::Restore,
+    };
+    let old = item("2026-11-20T10:00:00.000Z", false);
+    let young = item("2026-11-25T10:00:00.000Z", true);
+    assert_eq!(newest_capture_ms([&old, &young].into_iter()), parse_iso_ms("2026-11-20T10:00:00.000Z"));
+    assert_eq!(newest_capture_ms([&young].into_iter()), None);
+}
