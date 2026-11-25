@@ -322,14 +322,15 @@ fn run(
         .collect();
     // Every path pending in any scope, with the scope (a reapply never writes over one), and the
     // paths with a row the user can see, with its scope (a revert never opens a second row).
-    let mut pending_map: HashMap<String, String> = HashMap::new();
+    let mut pending_map: HashMap<String, Vec<EntryAt>> = HashMap::new();
     let mut visible_map: HashMap<String, String> = HashMap::new();
     for (k, (sc, r)) in scopes.iter().zip(&reads).enumerate() {
         let Some(sess) = r.session.as_ref() else { continue };
         let root = sc.root.to_string_lossy().into_owned();
         let shadow = shadow_for(&scopes, &claims, k);
         for (path, e) in &sess.files {
-            pending_map.entry(path.clone()).or_insert_with(|| root.clone());
+            let claimed = claims[k].pending().contains(path);
+            pending_map.entry(path.clone()).or_default().push(EntryAt { scope: root.clone(), owner: sc.owner.clone(), claimed });
             if claims[k].pending().contains(path) && !shadow.hides(path, e) {
                 visible_map.insert(path.clone(), root.clone());
             }
@@ -377,7 +378,7 @@ fn run(
         let mut guards = MergeGuards::default();
         let mut changed = Vec::new();
         let mut scope_report = DecideReport::default();
-        let ctx = Ctx { scope: &scope, matcher, shadow: &shadow, pending_at: &pending_at, now_iso, confirmed: confirmed.as_ref(), scoped, seen: &seen };
+        let ctx = Ctx { scope: &scope, owner: &scopes[i].owner, matcher, shadow: &shadow, pending_at: &pending_at, now_iso, confirmed: confirmed.as_ref(), scoped, seen: &seen };
         let store = StorePaths { home: paths.home.clone(), desktop_home: paths.desktop_home.clone(), session_file: file };
         let mut w = Writes { store, preflighted: false, snaps: None, hook: &mut *before_preflight };
         let r = &mut scope_report;
@@ -454,24 +455,50 @@ fn checked(scope: &Path, read: &ScopeRead) -> Result<Option<Session>, DecideErro
 }
 
 /// Where each path is pending across the project's scopes, kept current as a decision reopens one.
+/// One scope's pending entry for a path.
+#[derive(Debug, Clone)]
+struct EntryAt {
+    scope: String,
+    /// The registered root owning that scope.
+    owner: PathBuf,
+    /// Its own scope would show it (or hold it as waiting): not excluded there, not a settled
+    /// no-op. It may still be hidden by a deeper scope.
+    claimed: bool,
+}
+
+impl EntryAt {
+    /// Hidden only because a scope at or below `owner` claims the path: a pending entry or record
+    /// reopened in that scope keeps hiding it, so it never resurfaces.
+    fn held_down_by(&self, owner: &Path) -> bool {
+        self.claimed && owner != self.owner && owner.starts_with(&self.owner)
+    }
+}
+
 struct Pending {
-    /// Every pending key of every scope's session, with that scope's root.
-    all: RefCell<HashMap<String, String>>,
+    /// Every pending entry of every scope's session, per path.
+    all: RefCell<HashMap<String, Vec<EntryAt>>>,
     /// The paths with a row the user sees (not excluded, not a settled no-op, not left to a deeper
     /// scope), with its scope's root.
     visible: RefCell<HashMap<String, String>>,
 }
 
 impl Pending {
-    fn reopened(&self, path: &str, scope: &str) {
-        self.all.borrow_mut().insert(path.to_owned(), scope.to_owned());
+    fn reopened(&self, path: &str, scope: &str, owner: &Path) {
+        let e = EntryAt { scope: scope.to_owned(), owner: owner.to_path_buf(), claimed: true };
+        self.all.borrow_mut().entry(path.to_owned()).or_default().push(e);
         self.visible.borrow_mut().insert(path.to_owned(), scope.to_owned());
     }
 }
 
 /// Why a revert left a record alone: a newer change to its file has a row in another scope.
 pub fn pending_elsewhere_message(scope: &str) -> String {
-    format!("A newer change to this file is pending in {scope}; review it first, so this accept was kept")
+    format!("Another change to this file is pending in {scope}; review it first, so this accept was kept")
+}
+
+/// Why a revert left a record alone: without it, an older change a less specific scope still
+/// holds for the file would show again.
+pub fn would_reveal_message(scope: &str) -> String {
+    format!("Reverting would bring back an older change in {scope}; nothing was changed")
 }
 
 /// Why a reapply left a file alone: another scope's log has it pending, but shows no row for it
@@ -482,6 +509,8 @@ pub fn hidden_pending_message(scope: &str) -> String {
 
 struct Ctx<'a> {
     scope: &'a Path,
+    /// The registered root owning `scope`.
+    owner: &'a Path,
     matcher: &'a ExcludeMatcher,
     /// What more specific scopes claim: a folder or all target leaves those entries to them.
     shadow: &'a Shadow<'a>,
@@ -662,15 +691,27 @@ fn revert(
             report.errors.push((rec.path.clone(), pending_elsewhere_message(&sc)));
             continue;
         }
+        // Pending in this scope already: the TS keeps that entry and does not reopen. An entry
+        // elsewhere with no row (excluded, a no-op, left to this scope) does not block it.
+        let reopen = !s.files.contains_key(&rec.path) && read_disk(&rec.path) == rec.after;
+        if !reopen && !s.files.contains_key(&rec.path) {
+            // Nothing will claim the path here any more: a less specific scope's entry that this
+            // record hides would come back. Keep the record and say so.
+            let revealed = ctx.pending_at.all.borrow().get(&rec.path).and_then(|v| {
+                v.iter().find(|e| e.scope != here && e.held_down_by(ctx.owner)).map(|e| e.scope.clone())
+            });
+            if let Some(sc) = revealed {
+                report.errors.push((rec.path.clone(), would_reveal_message(&sc)));
+                continue;
+            }
+        }
         if let Some(i) = s.accepted.iter().position(|r| r.id == rec.id) {
             s.accepted.remove(i);
         }
-        // Pending in this scope already: the TS keeps that entry and does not reopen. An entry
-        // elsewhere with no row (excluded, a no-op, left to this scope) does not block it.
-        if !s.files.contains_key(&rec.path) && read_disk(&rec.path) == rec.after {
+        if reopen {
             let entry = reopened(rec.before.clone(), rec.new_file, rec.session_id.clone(), ctx.now_iso);
             s.files.insert(rec.path.clone(), entry);
-            ctx.pending_at.reopened(&rec.path, &here);
+            ctx.pending_at.reopened(&rec.path, &here, ctx.owner);
         }
         guards.dropped_accepted_ids.insert(rec.id.clone());
         report.done += 1;
@@ -713,14 +754,24 @@ fn reapply(
         // that edit and replace its frozen baseline. The new change is reviewed first.
         // So is a path pending in any other scope (the nested root's session, say): writing this
         // scope's old `after` would destroy Claude's current version there.
-        let here = ctx.scope.to_string_lossy();
-        if s.files.contains_key(&fp) || ctx.pending_at.visible.borrow().contains_key(&fp) {
+        let here = ctx.scope.to_string_lossy().into_owned();
+        let shown_in = ctx.pending_at.visible.borrow().get(&fp).cloned();
+        if s.files.contains_key(&fp) {
+            // Pending here: with a row, Claude edited it again; without one, say so.
+            let msg = if shown_in.as_deref() == Some(here.as_str()) { REEDITED_MESSAGE.to_owned() } else { hidden_pending_message(&here) };
+            report.errors.push((fp, msg));
+            continue;
+        }
+        if shown_in.is_some() {
             report.errors.push((fp, REEDITED_MESSAGE.to_owned()));
             continue;
         }
-        let hidden_in = ctx.pending_at.all.borrow().get(&fp).cloned();
-        if let Some(sc) = hidden_in {
-            let sc = if sc == here { here.to_string() } else { sc };
+        // An entry elsewhere with no row blocks too (excluded or unchanged there), unless only a
+        // scope at or below this one hides it: the entry reopened here keeps hiding it.
+        let blocker = ctx.pending_at.all.borrow().get(&fp).and_then(|v| {
+            v.iter().find(|e| e.scope != here && !e.held_down_by(ctx.owner)).map(|e| e.scope.clone())
+        });
+        if let Some(sc) = blocker {
             report.errors.push((fp, hidden_pending_message(&sc)));
             continue;
         }
@@ -740,7 +791,7 @@ fn reapply(
         }
         changed.push(fp.clone());
         s.rejected.remove(&fp);
-        ctx.pending_at.reopened(&fp, &ctx.scope.to_string_lossy());
+        ctx.pending_at.reopened(&fp, &ctx.scope.to_string_lossy(), ctx.owner);
         s.files.insert(fp.clone(), reopened(rec.before, rec.new_file, rec.session_id, ctx.now_iso));
         guards.dropped_rejected_paths.insert(fp);
         report.done += 1;
