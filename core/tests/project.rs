@@ -334,3 +334,33 @@ fn an_explicit_exclude_replaces_the_excludes_json_one() {
     let v = load_project_with(h.path(), &root, 8, None);
     assert_eq!(v.pending.iter().map(|p| p.rel.as_str()).collect::<Vec<_>>(), vec!["gen/a.txt"]);
 }
+
+/// Old entries whose file is byte-identical to the baseline (and a promised new file that never
+/// appeared) are no-ops: out of the rows and the summary count, and nothing is written for them.
+#[test]
+fn settled_no_ops_are_not_listed_or_counted_and_nothing_is_written() {
+    let h = tempfile::tempdir().unwrap();
+    let w = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(w.path()).unwrap();
+    let same = root.join("same.go");
+    fs::write(&same, "package x\n").unwrap();
+    let real = root.join("real.go");
+    fs::write(&real, "package y\n").unwrap();
+    let gone = root.join("never.go");
+    let old = |orig: Option<&str>| {
+        serde_json::json!({"originalContent": orig, "reviewStatus": "pending", "capturedAt": "2026-10-08T09:00:00.000000+00:00"})
+    };
+    let mut files = serde_json::Map::new();
+    files.insert(same.to_string_lossy().into(), old(Some("package x\n")));
+    files.insert(gone.to_string_lossy().into(), old(None));
+    files.insert(real.to_string_lossy().into(), old(Some("package x\n")));
+    write_session(h.path(), &root, &session(files.into(), serde_json::json!([]), serde_json::json!({})));
+    fs::write(h.path().join("workspace-roots.json"), serde_json::json!([root.to_string_lossy()]).to_string()).unwrap();
+    let file = session_file_for(h.path(), &root);
+    let before = fs::read(&file).unwrap();
+
+    let v = load_project(h.path(), &root);
+    assert_eq!(v.pending.iter().map(|p| p.path.clone()).collect::<Vec<_>>(), vec![real.to_string_lossy().into_owned()]);
+    assert_eq!(list_projects(h.path())[0].pending, 1);
+    assert_eq!(fs::read(&file).unwrap(), before, "display only: the session is not written");
+}
