@@ -582,6 +582,11 @@ export const mockApi: Api = {
     config = { ...config, hiddenProjects: hidden, hiddenAt };
     return delay(config);
   },
+  hideProject: (root) => {
+    const hidden = (config.hiddenProjects ?? []).includes(root) ? config.hiddenProjects! : [...(config.hiddenProjects ?? []), root];
+    config = { ...config, hiddenProjects: hidden, hiddenAt: { [root]: new Date().toISOString(), ...(config.hiddenAt ?? {}) } };
+    return delay(config);
+  },
   showProject: (root) => {
     const hiddenAt = { ...(config.hiddenAt ?? {}) };
     delete hiddenAt[root];

@@ -275,6 +275,29 @@ pub fn save_hidden_projects_at(path: &Path, roots: &[String], guard: Option<&Pat
     })
 }
 
+/// Hides one project: adds only `root` to `hiddenProjects` and stamps it `now_iso` (keeping an
+/// existing stamp), under the config lock, so a stale list in the UI can never show or hide
+/// anything else. Writes nothing when it is already hidden and stamped.
+pub fn hide_project(path: &Path, root: &str, guard: Option<&Path>, now_iso: &str) -> Result<Config, String> {
+    let root = root.trim().to_owned();
+    if root.is_empty() {
+        return Err("No project to hide.".into());
+    }
+    let c = load_or_create(path);
+    if c.hidden_projects.contains(&root) && c.hidden_at.contains_key(&root) {
+        return Ok(c);
+    }
+    update_config(path, guard, |obj, cfg| {
+        let mut roots = cfg.hidden_projects.clone();
+        if !roots.contains(&root) {
+            roots.push(root.clone());
+        }
+        obj.insert("hiddenProjects".into(), serde_json::json!(roots));
+        obj.insert("hiddenAt".into(), serde_json::json!(stamps_for(&roots, cfg, now_iso)));
+        Ok(())
+    })
+}
+
 /// `hiddenAt` for `roots`: the stamps `cfg` has, `now_iso` for the rest.
 fn stamps_for(roots: &[String], cfg: &Config, now_iso: &str) -> std::collections::BTreeMap<String, String> {
     roots
@@ -642,6 +665,16 @@ pub async fn set_editor(template: String) -> Result<Config, String> {
 pub async fn set_read_only(on: bool) -> Result<Config, String> {
     tauri::async_runtime::spawn_blocking(move || {
         save_read_only(&config_path(), on, Some(&claudegate_core::paths::claudegate_home()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Hides one project (`hide_project`), stamped now.
+#[tauri::command]
+pub async fn hide_project_cmd(root: String) -> Result<Config, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        hide_project(&config_path(), &root, Some(&claudegate_core::paths::claudegate_home()), &now_iso())
     })
     .await
     .map_err(|e| e.to_string())?

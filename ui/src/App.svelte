@@ -35,8 +35,8 @@
     openInEditor,
     setEditor,
     setPendingCount,
-    setHiddenProjects,
     showProject,
+    hideProject,
     setReadOnly,
     usingMock,
     type DiffKind,
@@ -709,10 +709,9 @@
   }
 
   async function setHidden(root: string, hide: boolean) {
-    const now = config.hiddenProjects ?? [];
-    const roots = hide ? [...now, root] : now.filter((r) => r !== root);
     try {
-      config = await setHiddenProjects(roots);
+      // One root, add-only or remove-only: the UI's copy of the list may be stale.
+      config = hide ? await hideProject(root) : await showProject(root);
       const name = projects.find((p) => p.root === root)?.name ?? basename(root);
       announce(hide ? `${name} hidden` : `${name} shown`);
     } catch (e) {

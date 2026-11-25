@@ -362,3 +362,20 @@ fn showing_one_project_never_touches_the_rest_of_the_list() {
     unhide_project(&p, "/w/a", None).unwrap();
     assert_eq!(load_or_create(&p).hidden_projects, vec!["/w/b".to_string(), "/w/c".to_string()]);
 }
+
+#[test]
+fn hiding_one_project_adds_only_it_and_stamps_it() {
+    use claudegate_desktop_lib::config::{hide_project, save_hidden_projects_at};
+    let home = tempfile::tempdir().unwrap();
+    let p = config_path_in(home.path());
+    let t1 = "2026-11-20T10:00:00.000Z";
+    save_hidden_projects_at(&p, &["/w/a".into()], None, t1).unwrap();
+    let c = hide_project(&p, "/w/b", None, "2026-11-21T10:00:00.000Z").unwrap();
+    assert_eq!(c.hidden_projects, vec!["/w/a".to_string(), "/w/b".to_string()]);
+    assert_eq!(c.hidden_at.get("/w/a").map(String::as_str), Some(t1));
+    assert_eq!(c.hidden_at.get("/w/b").map(String::as_str), Some("2026-11-21T10:00:00.000Z"));
+    // Hiding it again keeps its stamp and writes nothing.
+    let before = fs::read(&p).unwrap();
+    hide_project(&p, "/w/b", None, "2026-12-01T00:00:00.000Z").unwrap();
+    assert_eq!(fs::read(&p).unwrap(), before);
+}
