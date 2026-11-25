@@ -379,3 +379,14 @@ fn hiding_one_project_adds_only_it_and_stamps_it() {
     hide_project(&p, "/w/b", None, "2026-12-01T00:00:00.000Z").unwrap();
     assert_eq!(fs::read(&p).unwrap(), before);
 }
+
+#[test]
+fn hiding_matches_the_folder_not_its_spelling() {
+    use claudegate_desktop_lib::config::hide_project;
+    let home = tempfile::tempdir().unwrap();
+    let p = config_path_in(home.path());
+    hide_project(&p, "/w/a", None, "2026-11-20T10:00:00.000Z").unwrap();
+    let c = hide_project(&p, "/w/./a/", None, "2026-11-21T10:00:00.000Z").unwrap();
+    assert_eq!(c.hidden_projects, vec!["/w/a".to_string()]);
+    assert_eq!(c.hidden_at.get("/w/a").map(String::as_str), Some("2026-11-20T10:00:00.000Z"));
+}

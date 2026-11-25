@@ -284,12 +284,13 @@ pub fn hide_project(path: &Path, root: &str, guard: Option<&Path>, now_iso: &str
         return Err("No project to hide.".into());
     }
     let c = load_or_create(path);
-    if c.hidden_projects.contains(&root) && c.hidden_at.contains_key(&root) {
+    // Already hidden under another spelling of the same folder: that entry stands.
+    if c.hidden_projects.iter().any(|r| same_root(r, &root) && c.hidden_at.contains_key(r)) {
         return Ok(c);
     }
     update_config(path, guard, |obj, cfg| {
         let mut roots = cfg.hidden_projects.clone();
-        if !roots.contains(&root) {
+        if !roots.iter().any(|r| same_root(r, &root)) {
             roots.push(root.clone());
         }
         obj.insert("hiddenProjects".into(), serde_json::json!(roots));
