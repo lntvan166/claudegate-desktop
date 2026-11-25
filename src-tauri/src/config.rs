@@ -32,6 +32,10 @@ pub struct Config {
     /// records it; `~/.claudegate/workspace-roots.json` is never touched.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_projects: Vec<String>,
+    /// When each hidden root was hidden (`hiddenAt`, ISO time as JS `toISOString()` writes it).
+    /// A capture newer than this brings the root back into the rail. Only hidden roots have one.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub hidden_at: std::collections::BTreeMap<String, String>,
     /// The roots the app added (`projects[root].addedByApp`), for the rail's marker and Remove.
     /// Derived on read; config.json never stores this list itself.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -40,7 +44,14 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { editor: DEFAULT_EDITOR.into(), custom_editor: None, read_only: false, hidden_projects: vec![], app_roots: vec![] }
+        Self {
+            editor: DEFAULT_EDITOR.into(),
+            custom_editor: None,
+            read_only: false,
+            hidden_projects: vec![],
+            hidden_at: Default::default(),
+            app_roots: vec![],
+        }
     }
 }
 
@@ -64,15 +75,27 @@ fn non_empty(s: Option<&str>) -> Option<String> {
 }
 
 fn from_value(v: &serde_json::Value) -> Config {
+    let hidden_projects: Vec<String> = v
+        .get("hiddenProjects")
+        .and_then(|h| h.as_array())
+        .map(|a| clean_roots(a.iter().filter_map(|r| r.as_str())))
+        .unwrap_or_default();
+    let hidden_at = v
+        .get("hiddenAt")
+        .and_then(|h| h.as_object())
+        .map(|m| {
+            m.iter()
+                .filter(|(r, _)| hidden_projects.iter().any(|h| h == *r))
+                .filter_map(|(r, t)| Some((r.clone(), non_empty(t.as_str())?)))
+                .collect()
+        })
+        .unwrap_or_default();
     Config {
         editor: upgraded(non_empty(v.get("editor").and_then(|e| e.as_str())).unwrap_or_else(|| DEFAULT_EDITOR.into())),
         custom_editor: non_empty(v.get("customEditor").and_then(|e| e.as_str())),
         read_only: v.get("readOnly").and_then(|e| e.as_bool()).unwrap_or(false),
-        hidden_projects: v
-            .get("hiddenProjects")
-            .and_then(|h| h.as_array())
-            .map(|a| clean_roots(a.iter().filter_map(|r| r.as_str())))
-            .unwrap_or_default(),
+        hidden_projects,
+        hidden_at,
         app_roots: app_roots_in(v),
     }
 }
@@ -235,13 +258,54 @@ pub fn save_editor(path: &Path, template: &str, guard: Option<&Path>) -> Result<
     })
 }
 
-/// Persists the hidden project roots, keeping every other key in the file.
+/// Persists the hidden project roots, keeping every other key in the file, and `hiddenAt` with
+/// them: a root that stays hidden keeps its stamp, a newly hidden one (or one with no stamp yet)
+/// is stamped now, and a shown one loses its stamp.
 pub fn save_hidden_projects(path: &Path, roots: &[String], guard: Option<&Path>) -> Result<Config, String> {
+    save_hidden_projects_at(path, roots, guard, &now_iso())
+}
+
+/// `save_hidden_projects` with the time injected.
+pub fn save_hidden_projects_at(path: &Path, roots: &[String], guard: Option<&Path>, now_iso: &str) -> Result<Config, String> {
     let roots = clean_roots(roots.iter().map(String::as_str));
-    update_config(path, guard, |obj, _| {
+    update_config(path, guard, |obj, cfg| {
         obj.insert("hiddenProjects".into(), serde_json::json!(roots));
+        obj.insert("hiddenAt".into(), serde_json::json!(stamps_for(&roots, cfg, now_iso)));
         Ok(())
     })
+}
+
+/// `hiddenAt` for `roots`: the stamps `cfg` has, `now_iso` for the rest.
+fn stamps_for(roots: &[String], cfg: &Config, now_iso: &str) -> std::collections::BTreeMap<String, String> {
+    roots
+        .iter()
+        .map(|r| (r.clone(), cfg.hidden_at.get(r).cloned().unwrap_or_else(|| now_iso.to_owned())))
+        .collect()
+}
+
+/// Stamps every hidden root that has no `hiddenAt` yet (hidden before the stamp existed) with
+/// `now_iso`: it counts as hidden from the moment the app first sees it unstamped. Writes only
+/// when one is missing.
+pub fn stamp_hidden_projects(path: &Path, guard: Option<&Path>, now_iso: &str) -> Result<Config, String> {
+    let c = load_or_create(path);
+    if c.hidden_projects.iter().all(|r| c.hidden_at.contains_key(r)) {
+        return Ok(c);
+    }
+    update_config(path, guard, |obj, cfg| {
+        obj.insert("hiddenAt".into(), serde_json::json!(stamps_for(&cfg.hidden_projects, cfg, now_iso)));
+        Ok(())
+    })
+}
+
+fn now_iso() -> String {
+    crate::commands::iso_from_ms(claudegate_core::time::now_ms())
+}
+
+/// Drops `root`'s `hiddenAt` stamp (every key that resolves to it).
+fn drop_stamp(obj: &mut serde_json::Map<String, serde_json::Value>, root: &str) {
+    if let Some(h) = obj.get_mut("hiddenAt").and_then(|h| h.as_object_mut()) {
+        h.retain(|k, _| !same_root(k, root));
+    }
 }
 
 /// Persists the read-only switch, keeping every other key in the file.
@@ -376,6 +440,7 @@ pub fn forget_project(path: &Path, root: &str, guard: Option<&Path>) -> Result<(
         if let Some(h) = obj.get_mut("hiddenProjects").and_then(|h| h.as_array_mut()) {
             h.retain(|r| !r.as_str().is_some_and(|r| same_root(r, root)));
         }
+        drop_stamp(obj, root);
         Ok(())
     })
     .map(|_| ())
@@ -390,6 +455,7 @@ pub fn unhide_project(path: &Path, root: &str, guard: Option<&Path>) -> Result<(
         if let Some(h) = obj.get_mut("hiddenProjects").and_then(|h| h.as_array_mut()) {
             h.retain(|r| !r.as_str().is_some_and(|r| same_root(r, root)));
         }
+        drop_stamp(obj, root);
         Ok(())
     })
     .map(|_| ())
@@ -553,9 +619,14 @@ pub fn read_app_settings(path: &Path) -> (claudegate_core::settings::AppSettings
 
 #[tauri::command]
 pub async fn get_config() -> Result<Config, String> {
-    tauri::async_runtime::spawn_blocking(|| load_or_create(&config_path()))
-        .await
-        .map_err(|e| e.to_string())
+    // Stamps the roots hidden before `hiddenAt` existed; a failed stamp only delays that.
+    tauri::async_runtime::spawn_blocking(|| {
+        let p = config_path();
+        stamp_hidden_projects(&p, Some(&claudegate_core::paths::claudegate_home()), &now_iso())
+            .unwrap_or_else(|_| load_or_create(&p))
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

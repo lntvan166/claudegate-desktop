@@ -133,8 +133,7 @@ pub fn list_projects_opts(home: &Path, known: &KnownMap, opts_for: &dyn Fn(&Path
             let v = load_with_opts(home, &r, &o, opts_for);
             remember(known, home, &v);
             let hidden = claudegate_core::excludes::ExcludeMatcher::new(Path::new(&v.root), &o.extra_hide);
-            let pending = v.pending.iter().filter(|p| !hidden.is_excluded(&p.path)).count();
-            summary_of(&r, &v, pending)
+            summary_of(&r, &v, &|p| !hidden.is_excluded(&p.path))
         })
         .collect()
 }

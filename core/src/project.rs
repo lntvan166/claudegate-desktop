@@ -19,6 +19,9 @@ pub struct ProjectSummary {
     pub next_recheck_at: Option<i64>,
     /// The registered roots folded into this project as scopes (`ScopeKind::Nested`).
     pub nested: Vec<String>,
+    /// Epoch ms of the newest `capturedAt` among the counted pending rows; `None` when none has
+    /// one. A hidden project with a capture newer than when it was hidden comes back on its own.
+    pub newest_capture_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -95,6 +98,8 @@ pub struct ProjectView {
     /// Epoch ms of the earliest moment a `waiting` row may settle and disappear; the UI re-fetches
     /// then. `None` when nothing is waiting.
     pub next_recheck_at: Option<i64>,
+    /// See `ProjectSummary::newest_capture_ms`, over every pending row.
+    pub newest_capture_ms: Option<i64>,
 }
 
 fn line_counts(before: &str, after: &str) -> (usize, usize) {
@@ -414,6 +419,7 @@ fn load_project_full(
         accepted: vec![],
         rejected: vec![],
         next_recheck_at: None,
+        newest_capture_ms: None,
     };
     if view.missing {
         return view;
@@ -431,6 +437,7 @@ fn load_project_full(
         load_scope(home, &scope, &primary, matcher, now_ms, &mut view);
     }
     view.pending.sort_by(|a, b| a.path.cmp(&b.path));
+    view.newest_capture_ms = view.pending.iter().filter_map(|p| p.captured_at.as_deref().and_then(parse_iso_ms)).max();
     view.accepted.sort_by(|a, b| b.decided_at.cmp(&a.decided_at));
     view.rejected.sort_by(|a, b| a.path.cmp(&b.path));
     view
@@ -444,14 +451,17 @@ pub fn listed_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     roots.iter().filter(|r| !(is_dir(r) && fold_parent(roots, r, &is_dir).is_some())).cloned().collect()
 }
 
-/// The summary of a loaded project. `name` is the folder's name as `root` spells it.
-pub fn summary_of(root: &Path, v: &ProjectView, pending: usize) -> ProjectSummary {
+/// The summary of a loaded project, counting the pending rows `counted` keeps. `name` is the
+/// folder's name as `root` spells it.
+pub fn summary_of(root: &Path, v: &ProjectView, counted: &dyn Fn(&PendingItem) -> bool) -> ProjectSummary {
     let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| v.root.clone());
+    let rows: Vec<&PendingItem> = v.pending.iter().filter(|p| counted(p)).collect();
     ProjectSummary {
         root: v.root.clone(),
         name,
         missing: v.missing,
-        pending,
+        pending: rows.len(),
+        newest_capture_ms: rows.iter().filter_map(|p| p.captured_at.as_deref().and_then(parse_iso_ms)).max(),
         next_recheck_at: v.next_recheck_at,
         nested: v.scopes.iter().filter(|s| s.nested).map(|s| s.root.clone()).collect(),
     }
@@ -462,7 +472,7 @@ pub fn list_projects(home: &Path) -> Vec<ProjectSummary> {
         .into_iter()
         .map(|r: PathBuf| {
             let v = load_project(home, &r);
-            summary_of(&r, &v, v.pending.len())
+            summary_of(&r, &v, &|_| true)
         })
         .collect()
 }

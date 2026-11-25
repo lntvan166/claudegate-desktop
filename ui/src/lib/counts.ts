@@ -14,6 +14,18 @@ export function headerTotal(projects: { pending: number }[]): string {
   return `${n} pending in ${plural(withPending.length, "project", "projects")}`;
 }
 
+/** What the header adds for pending work in hidden projects: " · +4 in hidden projects", or "". */
+export function hiddenSuffix(hiddenPending: number, short = false): string {
+  if (hiddenPending <= 0) return "";
+  return short ? ` · +${hiddenPending} hidden` : ` · +${hiddenPending} in hidden projects`;
+}
+
+/** The hidden-projects disclosure: "Hidden projects (2) · 4 pending". */
+export function hiddenLabel(hidden: { pending: number }[]): string {
+  const n = hidden.reduce((s, p) => s + p.pending, 0);
+  return `Hidden projects (${hidden.length})${n > 0 ? ` · ${n} pending` : ""}`;
+}
+
 /** The bulk bar's count: the files (records) it acts on, or "N to review" when not the whole tab. */
 export function bulkLabel(count: number, tabCount: number, tab: "pending" | "accepted" | "rejected"): string {
   if (tab === "pending" && count !== tabCount) return `${count} to review`;

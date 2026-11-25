@@ -66,7 +66,7 @@
   import { actionFor, decisionFor, diffKeyFor, DIFF_HIDDEN_REFUSAL, isUndoKey, isTypingTarget, nextIndex, READ_ONLY_REFUSAL, refKeyFor, WAITING_REFUSAL } from "./lib/keys";
   import { writeClipboard } from "./lib/clipboard";
   import { clipboardText, formatRef, pasteHint, refRange, type LineRange } from "./lib/ref";
-  import { basename, groupsFor, scopeKind, scopeLabel, selectionAfterList, sortProjects, splitHidden, type Row } from "./lib/rows";
+  import { basename, groupsFor, resurfacing, scopeKind, scopeLabel, selectionAfterList, sortProjects, splitHidden, type Row } from "./lib/rows";
   import { Rechecks } from "./lib/recheck";
   import {
     MIN,
@@ -83,7 +83,7 @@
     type Pane,
     type Widths,
   } from "./lib/panes";
-  import { headerTotal, projectLine } from "./lib/counts";
+  import { headerTotal, hiddenSuffix, projectLine } from "./lib/counts";
   import {
     COLLAPSED_KEY,
     MODE_KEY,
@@ -285,6 +285,10 @@
   /** Hidden projects are out of the way: off the rail, out of the header total and the tray. */
   const split = $derived(splitHidden(projects, config.hiddenProjects));
   const totalPending = $derived(split.visible.reduce((s, p) => s + p.pending, 0));
+  /** Pending work in hidden projects: never counted in the total, but never out of sight either. */
+  const hiddenPending = $derived(split.hidden.reduce((s, p) => s + p.pending, 0));
+  /** Projects that came back from hidden on a new capture: marked "New" until selected once. */
+  let fresh = $state<string[]>([]);
   const counts = $derived({
     pending: view?.pending.length ?? 0,
     accepted: view?.accepted.length ?? 0,
@@ -386,11 +390,26 @@
     projects = sortProjects(
       projects.map((p) =>
         p.root === v.root
-          ? { ...p, missing: v.missing, pending: shownPending(v, p.pending), nextRecheckAt: v.nextRecheckAt }
+          ? { ...p, missing: v.missing, pending: shownPending(v, p.pending), nextRecheckAt: v.nextRecheckAt, newestCaptureMs: v.newestCaptureMs ?? null }
           : p,
       ),
     );
     rechecks.schedule(v.root, v.nextRecheckAt);
+    void resurface();
+  }
+
+  /** Brings back each hidden project with a capture newer than when it was hidden (`resurfacing`). */
+  async function resurface() {
+    const back = resurfacing(projects, config.hiddenProjects, config.hiddenAt);
+    if (back.length === 0) return;
+    try {
+      config = await setHiddenProjects((config.hiddenProjects ?? []).filter((r) => !back.includes(r)));
+      fresh = [...new Set([...fresh, ...back])];
+      const names = back.map((r) => projects.find((p) => p.root === r)?.name ?? basename(r));
+      announce(`${names.join(", ")} ${names.length === 1 ? "is" : "are"} back: Claude edited ${names.length === 1 ? "it" : "them"} after you hid ${names.length === 1 ? "it" : "them"}`);
+    } catch {
+      // The next list tries again.
+    }
   }
 
   async function loadProjects() {
@@ -399,6 +418,7 @@
       listError = null;
       rechecks.clear();
       for (const p of projects) rechecks.schedule(p.root, p.nextRecheckAt);
+      await resurface();
     } catch (e) {
       listError = String(e);
     } finally {
@@ -431,6 +451,7 @@
 
   function select(root: string) {
     viewError = null;
+    if (fresh.includes(root)) fresh = fresh.filter((r) => r !== root);
     if (root !== selected) {
       selected = root;
       filterText = "";
@@ -1213,10 +1234,10 @@
         </svg>
         <span class="chip-label">Read-only</span>
       </button>
-      <span class="total" class:none={totalPending === 0} title={headerTotal(split.visible)}>
-        <span class="total-long">{headerTotal(split.visible)}</span>
+      <span class="total" class:none={totalPending === 0} title={headerTotal(split.visible) + hiddenSuffix(hiddenPending)}>
+        <span class="total-long">{headerTotal(split.visible)}{hiddenSuffix(hiddenPending)}</span>
         <!-- A narrow window: the count alone; the list right below says where. -->
-        <span class="total-short" aria-hidden="true">{totalPending === 0 ? "Nothing pending" : `${totalPending} pending`}</span>
+        <span class="total-short" aria-hidden="true">{totalPending === 0 ? "Nothing pending" : `${totalPending} pending`}{hiddenSuffix(hiddenPending, true)}</span>
       </span>
       <button
         class="chip gear"
@@ -1245,6 +1266,7 @@
   <ProjectList
     projects={split.visible}
     hidden={split.hidden}
+    {fresh}
     onhide={(r) => void setHidden(r, true)}
     onshow={(r) => void setHidden(r, false)}
     appRoots={config.appRoots ?? []}

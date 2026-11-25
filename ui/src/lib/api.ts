@@ -25,6 +25,8 @@ export type ProjectSummary = {
   nextRecheckAt: number | null;
   /** Registered roots nested inside this one, shown as its scopes instead of as projects. */
   nested?: string[];
+  /** Epoch ms of the newest pending capture; null when none. A hidden project comes back on a newer one. */
+  newestCaptureMs?: number | null;
 };
 
 export type PendingItem = {
@@ -72,6 +74,8 @@ export type ProjectView = {
   rejected: RecordItem[];
   /** Epoch ms when a waiting row may settle; re-fetch the project then. Null when none waits. */
   nextRecheckAt: number | null;
+  /** Epoch ms of the newest pending capture; null when none. */
+  newestCaptureMs?: number | null;
 };
 
 export type DiffKind = "pending" | "accepted" | "rejected";

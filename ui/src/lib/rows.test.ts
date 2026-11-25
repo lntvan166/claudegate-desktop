@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProjectSummary, ProjectView } from "./api";
-import { groupsFor, initials, nodeKey, scopeKind, scopeLabel, selectionAfterList, sortProjects, splitHidden } from "./rows";
+import { groupsFor, initials, nodeKey, resurfacing, scopeKind, scopeLabel, selectionAfterList, sortProjects, splitHidden } from "./rows";
 import { buildTree } from "./tree";
 
 const view: ProjectView = {
@@ -168,5 +168,26 @@ describe("splitHidden (UX wave 7)", () => {
 
   it("matches a root written with a trailing slash", () => {
     expect(splitHidden(list, ["/w/b/"]).hidden.map((x) => x.root)).toEqual(["/w/b"]);
+  });
+});
+
+describe("resurfacing", () => {
+  const at = "2026-11-20T10:00:00.000Z";
+  const t = Date.parse(at);
+  const p = (root: string, newestCaptureMs: number | null) => ({ root, newestCaptureMs });
+  it("brings back a hidden project with a capture newer than its hiding", () => {
+    expect(resurfacing([p("/w/a", t + 1), p("/w/b", t - 1)], ["/w/a", "/w/b"], { "/w/a": at, "/w/b": at })).toEqual(["/w/a"]);
+  });
+  it("keeps one hidden when the capture is not newer, or there is none", () => {
+    expect(resurfacing([p("/w/a", t), p("/w/b", null)], ["/w/a", "/w/b"], { "/w/a": at, "/w/b": at })).toEqual([]);
+  });
+  it("never resurfaces a root without a stamp or with an unreadable one", () => {
+    expect(resurfacing([p("/w/a", t + 5)], ["/w/a"], {})).toEqual([]);
+    expect(resurfacing([p("/w/a", t + 5)], ["/w/a"], { "/w/a": "yesterday" })).toEqual([]);
+    expect(resurfacing([p("/w/a", t + 5)], ["/w/a"], undefined)).toEqual([]);
+  });
+  it("ignores shown projects and matches roots across trailing slashes", () => {
+    expect(resurfacing([p("/w/a", t + 5)], [], { "/w/a": at })).toEqual([]);
+    expect(resurfacing([p("/w/a", t + 5)], ["/w/a/"], { "/w/a/": at })).toEqual(["/w/a/"]);
   });
 });

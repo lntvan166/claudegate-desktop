@@ -27,6 +27,8 @@ const NOTES = "/home/dev/src/field-notes";
 /** An umbrella repo with a registered repo nested inside it, shown as one of its scopes. */
 const UMBRELLA = "/home/dev/src/umbrella";
 const UMB_NESTED = `${UMBRELLA}/umbrella-orders`;
+/** Hidden an hour ago, after its captures: it stays hidden, its pending shown in the disclosure. */
+const LAB = "/home/dev/src/scratch-lab";
 /** Added in the app (a Zed-only project), so it is marked and removable. */
 const TIDE = "/home/dev/src/tide-sim";
 
@@ -126,6 +128,19 @@ const views: Record<string, ProjectView> = {
     rejected: [],
     nextRecheckAt: null,
   },
+  [LAB]: {
+    root: LAB,
+    missing: false,
+    scopes: [{ root: LAB, isWorktree: false, shapeUnknown: [], error: null }],
+    pending: [
+      { ...pendingIn(LAB, "notebooks/fit.py", 26, 4), capturedAt: ago(3 * 1440) },
+      { ...pendingIn(LAB, "data/README.md", 5, 0), capturedAt: ago(3 * 1440 + 20) },
+      { ...pendingIn(LAB, "pyproject.toml", 2, 1), capturedAt: ago(3 * 1440 + 25) },
+    ],
+    accepted: [],
+    rejected: [],
+    nextRecheckAt: null,
+  },
   [BILLING]: { root: BILLING, missing: true, scopes: [], pending: [], accepted: [], rejected: [], nextRecheckAt: null },
   [TIDE]: {
     root: TIDE,
@@ -140,7 +155,13 @@ const views: Record<string, ProjectView> = {
 };
 
 /** workspace-roots.json, in order. */
-const rootsList = [SHOP, UMBRELLA, NOTES, BILLING, HERDR, TIDE];
+const rootsList = [SHOP, UMBRELLA, NOTES, BILLING, HERDR, TIDE, LAB];
+
+/** `ProjectSummary.newestCaptureMs`. */
+const newest = (v: ProjectView): number | null => {
+  const ms = v.pending.map((p) => (p.capturedAt ? Date.parse(p.capturedAt) : NaN)).filter((n) => !Number.isNaN(n));
+  return ms.length ? Math.max(...ms) : null;
+};
 
 const emptyView = (root: string): ProjectView => ({
   root,
@@ -366,6 +387,8 @@ let config: EditorConfig = {
   customEditor: "nvim +{line} {path}",
   readOnly: false,
   appRoots: [TIDE],
+  hiddenProjects: [LAB],
+  hiddenAt: { [LAB]: ago(60) },
 };
 
 /** What the extension would supply: a VS Code user setting and a project exclude list. */
@@ -501,6 +524,7 @@ export const mockApi: Api = {
           pending: filtered(views[root]).pending.filter((p) => !hidden(p.path)).length,
           nextRecheckAt: null,
           nested: views[root].scopes.filter((s) => s.nested).map((s) => s.root),
+          newestCaptureMs: newest(views[root]),
         };
       }),
     ),
@@ -551,7 +575,10 @@ export const mockApi: Api = {
     return delay(config);
   },
   setHiddenProjects: (roots) => {
-    config = { ...config, hiddenProjects: [...new Set(roots.map((r) => r.trim()).filter(Boolean))] };
+    const hidden = [...new Set(roots.map((r) => r.trim()).filter(Boolean))];
+    // core config.rs: a root that stays hidden keeps its stamp, a newly hidden one is stamped now.
+    const hiddenAt = Object.fromEntries(hidden.map((r) => [r, config.hiddenAt?.[r] ?? new Date().toISOString()]));
+    config = { ...config, hiddenProjects: hidden, hiddenAt };
     return delay(config);
   },
   getSettings: (root) => delay(mockSettings(root)),

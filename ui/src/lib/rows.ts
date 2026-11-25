@@ -146,6 +146,27 @@ export function initials(name: string): string {
 }
 
 /**
+ * The hidden roots that come back on their own: a pending capture newer than the moment they were
+ * hidden. A root with no stamp (or one that does not parse) stays hidden: the app stamps it when
+ * it first sees it, so only captures after that count.
+ */
+export function resurfacing(
+  projects: Pick<ProjectSummary, "root" | "newestCaptureMs">[],
+  hiddenRoots: string[] | undefined,
+  hiddenAt: Record<string, string> | undefined,
+): string[] {
+  const out: string[] = [];
+  for (const root of hiddenRoots ?? []) {
+    const stamp = hiddenAt?.[root];
+    const at = stamp ? Date.parse(stamp) : NaN;
+    if (Number.isNaN(at)) continue;
+    const p = projects.find((x) => norm(x.root) === norm(root));
+    if (p?.newestCaptureMs != null && p.newestCaptureMs > at) out.push(root);
+  }
+  return out;
+}
+
+/**
  * The project list split by the config's `hiddenProjects`: hidden projects leave the rail and count
  * toward nothing; they wait in the "Hidden projects" disclosure. Both keep the list's order.
  */

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ProjectSummary } from "../lib/api";
+  import { hiddenLabel } from "../lib/counts";
   import { initials } from "../lib/rows";
 
   let {
@@ -10,6 +11,7 @@
     onselect,
     ontoggle,
     hidden = [],
+    fresh = [],
     onhide = () => {},
     onshow = () => {},
     appRoots = [],
@@ -28,6 +30,8 @@
     ontoggle: () => void;
     /** Projects the user hid: listed only in the "Hidden projects" disclosure. */
     hidden?: ProjectSummary[];
+    /** Projects that came back from hidden on a new capture: marked "New" until selected. */
+    fresh?: string[];
     onhide?: (root: string) => void;
     onshow?: (root: string) => void;
     /** Roots the app added: marked "Added here" and removable. */
@@ -272,6 +276,7 @@
               <span class="name-row">
                 <span class="name">{p.name}</span>
                 {#if isAppAdded(p.root)}<span class="marker" title="You added this project here; ClaudeGate in VS Code did not">Added here</span>{/if}
+                {#if fresh.includes(p.root)}<span class="marker new" title="Was hidden; back because Claude edited it after you hid it">New</span>{/if}
               </span>
               {#if p.missing}
                 <span class="sub warn">Folder missing</span>
@@ -310,13 +315,14 @@
         <svg class="chev" class:open={showHidden} viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
           <path d="M6 4.5 9.5 8 6 11.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
-        Hidden projects ({hidden.length})
+        {hiddenLabel(hidden)}
       </button>
       {#if showHidden}
         <ul class="hidden-list">
           {#each hidden as p, i (p.root)}
             <li>
               <button class="hidden-name" class:active={p.root === selected} title={p.root} onclick={() => onselect(p.root)}>{p.name}</button>
+              {#if p.pending > 0}<span class="count num" aria-label="{p.pending} pending">{p.pending}</span>{/if}
               {#if isAppAdded(p.root)}
                 <button class="show" aria-label="Remove {p.name}" title="Remove this project" onclick={() => askRemove(p.root)}>Remove</button>
               {/if}
@@ -572,6 +578,10 @@
     border-radius: var(--radius-chip);
     line-height: 1.5;
   }
+  .marker.new {
+    color: var(--pending);
+    border-color: currentColor;
+  }
 
   .confirm {
     margin: 4px 0 6px;
@@ -747,6 +757,9 @@
     white-space: nowrap;
     font-size: var(--fs-small);
     color: var(--muted);
+  }
+  .hidden-list .count {
+    padding-right: 2px;
   }
   .hidden-name.active {
     color: var(--text);

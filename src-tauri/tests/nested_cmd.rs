@@ -81,3 +81,11 @@ fn the_nested_scope_uses_the_apps_exclude_when_the_app_owns_that_root() {
     let list = list_projects_opts(&f.home, &known, &opts);
     assert_eq!(list[0].pending, 2);
 }
+
+#[test]
+fn the_summary_carries_the_newest_capture() {
+    let f = fx();
+    let known: KnownMap = Default::default();
+    let list = list_projects_with(&f.home, &known);
+    assert_eq!(list[0].newest_capture_ms, claudegate_core::time::parse_iso_ms("2026-01-01T00:00:00Z"));
+}
