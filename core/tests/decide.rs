@@ -1064,3 +1064,26 @@ fn persist_refuses_a_session_corrupted_between_read_and_write() {
         assert_eq!(fs::read(&file).unwrap(), bad, "left as the other writer left it");
     }
 }
+
+/// A session that turned unreadable before the first write is refused by the preflight, before
+/// any workspace file is restored.
+#[test]
+fn a_corrupt_session_is_refused_before_any_workspace_file_is_written() {
+    use claudegate_core::decide::decide_with_preflight_hook;
+    for bad in [b"{ not json".to_vec(), vec![0xff, 0xfe, b'{', b'}']] {
+        let fx = Fx::new();
+        let a = fx.file("a.txt", "claude");
+        fx.write_session(&fx.ws, session_json(json!({ &a: pending(Some("orig")) }), json!([]), json!({})));
+        let file = fx.session_file(&fx.ws);
+        let bad2 = bad.clone();
+        let r = decide_with_preflight_hook(&fx.paths, &fx.ws, Action::Reject, fx.file_target(&fx.ws, &a), NOW, &mut || {
+            fs::write(&file, &bad2).unwrap();
+        });
+        match r {
+            Err(DecideError::Store { error: StoreError::Unreadable(_), changed, .. }) => assert!(changed.is_empty()),
+            other => panic!("{bad:?}: {other:?}"),
+        }
+        assert_eq!(fs::read_to_string(&a).unwrap(), "claude", "the workspace file is untouched");
+        assert_eq!(fs::read(&file).unwrap(), bad);
+    }
+}

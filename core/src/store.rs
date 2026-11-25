@@ -313,12 +313,23 @@ fn check_session_path(paths: &StorePaths) -> Result<(), StoreError> {
 /// follows is told the backup was taken, so one decision makes one backup.
 pub(crate) fn preflight(paths: &StorePaths) -> Result<(), StoreError> {
     check_session_path(paths)?;
-    if let Ok(text) = fs::read_to_string(&paths.session_file) {
-        if let Ok((_, Shape::Unknown(_))) = parse_session(&text) {
-            return Err(StoreError::UnknownShape);
-        }
+    if let Some((_, Shape::Unknown(_))) = read_disk_strict(&paths.session_file)? {
+        return Err(StoreError::UnknownShape);
     }
     backup(&paths.desktop_home, &paths.session_file)
+}
+
+/// The session file as `persist` and `preflight` read it: `None` only when it does not exist;
+/// any other read error, invalid UTF-8 or a parse error refuses (`Unreadable`).
+fn read_disk_strict(file: &Path) -> Result<Option<(Session, Shape)>, StoreError> {
+    match fs::read(file) {
+        Ok(bytes) => {
+            let text = String::from_utf8(bytes).map_err(|e| StoreError::Unreadable(e.to_string()))?;
+            Ok(Some(parse_session(&text).map_err(|e| StoreError::Unreadable(e.to_string()))?))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(StoreError::Unreadable(e.to_string())),
+    }
 }
 
 /// Read-merge-write `mine` under the lock, as the extension's `persist`: re-read the disk copy
@@ -336,14 +347,7 @@ pub(crate) fn persist(
 
     // Only a missing file means there is no disk copy to merge. Anything we cannot read, decode
     // or parse is refused, never overwritten with our state.
-    let disk = match fs::read(&paths.session_file) {
-        Ok(bytes) => {
-            let text = String::from_utf8(bytes).map_err(|e| StoreError::Unreadable(e.to_string()))?;
-            Some(parse_session(&text).map_err(|e| StoreError::Unreadable(e.to_string()))?)
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(StoreError::Unreadable(e.to_string())),
-    };
+    let disk = read_disk_strict(&paths.session_file)?;
     let mut session = match disk {
         Some((_, Shape::Unknown(_))) => return Err(StoreError::UnknownShape),
         Some((disk, Shape::Known)) => merge_fresh_captures(mine, disk, guards),
