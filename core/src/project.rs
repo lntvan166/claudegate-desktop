@@ -150,49 +150,66 @@ pub(crate) fn read_disk(path: &str) -> Option<String> {
     std::fs::read(path).ok().and_then(|b| String::from_utf8(b).ok())
 }
 
+/// One scope's session file, read and parsed once per load or decision.
+pub(crate) struct ScopeRead {
+    pub session: Option<Session>,
+    /// Unknown fields, when the session was written by a newer ClaudeGate.
+    pub shape_unknown: Vec<String>,
+    /// The shape is Unknown (even with no field named).
+    pub unknown: bool,
+    /// Why it could not be read or parsed.
+    pub error: Option<String>,
+    /// Why it is not strict UTF-8 (decide refuses such a session; the view reads it lossy).
+    pub not_utf8: Option<String>,
+}
+
+/// Reads and parses `scope`'s session file. A missing file is no session and no error.
+pub(crate) fn read_scope(home: &Path, scope: &Path) -> ScopeRead {
+    let mut out = ScopeRead { session: None, shape_unknown: vec![], unknown: false, error: None, not_utf8: None };
+    match std::fs::read(session_file_for(home, scope)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => out.error = Some(format!("cannot read session file: {e}")),
+        Ok(bytes) => {
+            out.not_utf8 = std::str::from_utf8(&bytes).err().map(|e| e.to_string());
+            match parse_session(&String::from_utf8_lossy(&bytes)) {
+                Ok((s, shape)) => {
+                    if let Shape::Unknown(f) = shape {
+                        out.shape_unknown = f;
+                        out.unknown = true;
+                    }
+                    out.session = Some(s);
+                }
+                Err(e) => out.error = Some(e.to_string()),
+            }
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn load_scope(
-    home: &Path,
     scope: &ReviewScope,
+    read: &ScopeRead,
     primary: &str,
     matcher: &ExcludeMatcher,
-    shadowed: &std::collections::HashSet<String>,
+    shadow: &Shadow,
     now_ms: i64,
     view: &mut ProjectView,
 ) {
     let scope_root = scope.root.as_path();
     let scope_str = scope_root.to_string_lossy().into_owned();
-    let mut sv = ScopeView {
+    let sv = ScopeView {
         root: scope_str.clone(),
         is_worktree: scope.kind == ScopeKind::Worktree,
         nested: scope.kind == ScopeKind::Nested,
-        shape_unknown: vec![],
-        error: None,
+        shape_unknown: read.shape_unknown.clone(),
+        error: read.error.clone(),
     };
-    let file = session_file_for(home, scope_root);
-    let session: Option<Session> = match std::fs::read(&file) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => {
-            sv.error = Some(format!("cannot read session file: {e}"));
-            None
-        }
-        Ok(bytes) => match parse_session(&String::from_utf8_lossy(&bytes)) {
-            Ok((s, shape)) => {
-                if let Shape::Unknown(f) = shape {
-                    sv.shape_unknown = f;
-                }
-                Some(s)
-            }
-            Err(e) => {
-                sv.error = Some(e.to_string());
-                None
-            }
-        },
-    };
+    let session = read.session.as_ref();
     if let Some(s) = session {
         for (path, e) in &s.files {
-            // Pending in a more specific (nested) scope too: that scope owns the row.
-            if matcher.is_excluded(path) || shadowed.contains(path) {
+            // Claimed by a more specific (nested) scope: that scope owns the row.
+            if matcher.is_excluded(path) || shadow.hides(path, e) {
                 continue;
             }
             let disk = read_disk(path);
@@ -346,36 +363,64 @@ pub fn review_scopes_in(roots: &[PathBuf], primary: &Path, max_attached: usize) 
     out
 }
 
-/// The pending keys of each scope's session as it is on disk (empty when it has none or cannot be
-/// read), in `scopes` order.
-pub(crate) fn pending_keys_of(home: &Path, scopes: &[ReviewScope]) -> Vec<std::collections::HashSet<String>> {
-    scopes
-        .iter()
-        .map(|s| {
-            std::fs::read(session_file_for(home, &s.root))
-                .ok()
-                .and_then(|b| parse_session(&String::from_utf8_lossy(&b)).ok())
-                .map(|(sess, _)| sess.files.into_keys().collect())
-                .unwrap_or_default()
-        })
-        .collect()
+/// What a scope's session claims for each path, so a less specific scope leaves the path to it:
+/// the pending entries it shows or holds as waiting (not settled no-ops, not excluded ones), and
+/// the newest decision it recorded per path (epoch ms).
+#[derive(Debug, Default)]
+pub(crate) struct Claims {
+    pending: std::collections::HashSet<String>,
+    decided: std::collections::HashMap<String, i64>,
 }
 
-/// The paths scope `i` must leave to a more specific scope: those pending in a scope whose owning
-/// root lies strictly inside scope `i`'s owner (a nested root, or one of its worktrees). Each
-/// entry belongs to the most specific scope only; a path only the parent has stays the parent's.
-pub(crate) fn shadowed_keys(
-    scopes: &[ReviewScope],
-    keys: &[std::collections::HashSet<String>],
-    i: usize,
-) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    for (j, s) in scopes.iter().enumerate() {
-        if j != i && strictly_inside(&s.owner, &scopes[i].owner) {
-            out.extend(keys[j].iter().cloned());
+/// The claims of one scope's session, filtered by that scope's own exclude.
+pub(crate) fn claims_of(session: Option<&Session>, matcher: &ExcludeMatcher, now_ms: i64) -> Claims {
+    let mut c = Claims::default();
+    let Some(s) = session else { return c };
+    for (path, e) in &s.files {
+        if matcher.is_excluded(path) {
+            continue;
+        }
+        let state = pending_state(e.original_content.as_deref(), read_disk(path).as_deref(), e.captured_at.as_deref(), now_ms);
+        if state != PendingState::Hidden {
+            c.pending.insert(path.clone());
         }
     }
-    out
+    let records = s.accepted.iter().chain(s.rejected.values());
+    for r in records {
+        if let Some(ms) = parse_iso_ms(&r.decided_at) {
+            let d = c.decided.entry(r.path.clone()).or_insert(ms);
+            *d = (*d).max(ms);
+        }
+    }
+    c
+}
+
+/// The claims of the scopes more specific than scope `i`: those whose owning root lies strictly
+/// inside scope `i`'s owner (a nested root, or one of its worktrees).
+pub(crate) struct Shadow<'a> {
+    deeper: Vec<&'a Claims>,
+}
+
+impl Shadow<'_> {
+    /// Whether a less specific scope leaves its entry `e` for `path` to a deeper scope: one that
+    /// has it pending (shown or waiting), or that decided it at or after `e` was captured (an
+    /// unreadable `capturedAt` counts as older). Display and decisions only; nothing is pruned.
+    pub(crate) fn hides(&self, path: &str, e: &FileEntry) -> bool {
+        let captured = e.captured_at.as_deref().and_then(parse_iso_ms);
+        self.deeper.iter().any(|c| {
+            c.pending.contains(path) || c.decided.get(path).is_some_and(|d| captured.is_none_or(|t| *d >= t))
+        })
+    }
+}
+
+pub(crate) fn shadow_for<'a>(scopes: &[ReviewScope], claims: &'a [Claims], i: usize) -> Shadow<'a> {
+    let deeper = scopes
+        .iter()
+        .enumerate()
+        .filter(|(j, s)| *j != i && strictly_inside(&s.owner, &scopes[i].owner))
+        .map(|(j, _)| &claims[j])
+        .collect();
+    Shadow { deeper }
 }
 
 /// `review_scopes_in` with the roots from `workspace-roots.json`.
@@ -453,10 +498,10 @@ fn load_project_full(
     if view.missing {
         return view;
     }
-    let mut matchers: Vec<(PathBuf, ExcludeMatcher)> = Vec::new();
     let scopes = review_scopes(home, &primary_path, max_attached);
-    let keys = pending_keys_of(home, &scopes);
-    for (i, scope) in scopes.iter().enumerate() {
+    // One matcher per owning root, one read per scope, reused for the claims and the rows.
+    let mut matchers: Vec<(PathBuf, ExcludeMatcher)> = Vec::new();
+    for scope in &scopes {
         if !matchers.iter().any(|(o, _)| *o == scope.owner) {
             let m = match exclude_for(&scope.owner) {
                 Some(globs) => ExcludeMatcher::new(&scope.owner, &globs),
@@ -464,9 +509,17 @@ fn load_project_full(
             };
             matchers.push((scope.owner.clone(), m));
         }
-        let matcher = &matchers.iter().find(|(o, _)| *o == scope.owner).expect("just added").1;
-        let shadowed = shadowed_keys(&scopes, &keys, i);
-        load_scope(home, scope, &primary, matcher, &shadowed, now_ms, &mut view);
+    }
+    let matcher_of = |owner: &Path| &matchers.iter().find(|(o, _)| *o == owner).expect("built above").1;
+    let reads: Vec<ScopeRead> = scopes.iter().map(|s| read_scope(home, &s.root)).collect();
+    let claims: Vec<Claims> = scopes
+        .iter()
+        .zip(&reads)
+        .map(|(s, r)| claims_of(r.session.as_ref(), matcher_of(&s.owner), now_ms))
+        .collect();
+    for (i, scope) in scopes.iter().enumerate() {
+        let shadow = shadow_for(&scopes, &claims, i);
+        load_scope(scope, &reads[i], &primary, matcher_of(&scope.owner), &shadow, now_ms, &mut view);
     }
     view.pending.sort_by(|a, b| a.path.cmp(&b.path));
     view.newest_capture_ms = newest_capture_ms(view.pending.iter());

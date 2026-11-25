@@ -16,9 +16,9 @@
 
 use crate::excludes::ExcludeMatcher;
 use crate::merge::{accept_entry, reject_entry, MergeGuards};
-use crate::model::{has_real_change, parse_session, FileEntry, Session, Shape};
+use crate::model::{has_real_change, FileEntry, Session};
 use crate::paths::{resolve_root, session_file_for};
-use crate::project::{pending_keys_of, project_matcher, read_disk, review_scopes, shadowed_keys};
+use crate::project::{claims_of, project_matcher, read_disk, read_scope, review_scopes, shadow_for, Claims, ScopeRead, Shadow};
 use crate::store::{persist, preflight, FileSnapshots, StoreError, StorePaths};
 use crate::workspace_write;
 use serde::Serialize;
@@ -303,34 +303,48 @@ fn run(
     // The primary, its worktrees, and the registered roots nested inside it (each with its own
     // session file and exclude), as the project view lists them.
     let scopes = review_scopes(&paths.home, &primary, crate::worktrees::MAX_WORKTREES);
-    // What each scope leaves to a more specific one, read before anything is written.
-    let pending_keys = pending_keys_of(&paths.home, &scopes);
-    let shadow_of = |i: usize| shadowed_keys(&scopes, &pending_keys, i);
-    let targets: Vec<(PathBuf, PathBuf, HashSet<String>)> = match &target {
-        Target::All => scopes.iter().enumerate().map(|(i, s)| (s.root.clone(), s.owner.clone(), shadow_of(i))).collect(),
+    // Every scope's session is read once, before anything is written: the targets' for the
+    // decision, every scope's for what it claims from a less specific one.
+    let reads: Vec<ScopeRead> = scopes.iter().map(|s| read_scope(&paths.home, &s.root)).collect();
+    // Each scope is filtered by the exclude of the root that owns it.
+    let mut matchers: Vec<(PathBuf, ExcludeMatcher)> = Vec::new();
+    for s in &scopes {
+        if !matchers.iter().any(|(o, _)| *o == s.owner) {
+            matchers.push((s.owner.clone(), project_matcher(&paths.home, &s.owner)));
+        }
+    }
+    let matcher_of = |owner: &Path| &matchers.iter().find(|(o, _)| *o == owner).expect("built above").1;
+    let now_ms = crate::time::parse_iso_ms(now_iso).unwrap_or_else(crate::time::now_ms);
+    let claims: Vec<Claims> = scopes
+        .iter()
+        .zip(&reads)
+        .map(|(s, r)| claims_of(r.session.as_ref(), matcher_of(&s.owner), now_ms))
+        .collect();
+    // Every path pending in any scope: a reapply or a revert never reopens one of them elsewhere.
+    let all_pending: RefCell<HashSet<String>> =
+        RefCell::new(reads.iter().filter_map(|r| r.session.as_ref()).flat_map(|s| s.files.keys().cloned()).collect());
+    let target_ix: Vec<usize> = match &target {
+        Target::All => (0..scopes.len()).collect(),
         Target::File { scope, .. } | Target::Folder { scope, .. } => {
-            let i = scopes.iter().position(|s| s.root.to_string_lossy() == scope.as_str()).ok_or(DecideError::NotFound)?;
-            vec![(scopes[i].root.clone(), scopes[i].owner.clone(), shadow_of(i))]
+            vec![scopes.iter().position(|s| s.root.to_string_lossy() == scope.as_str()).ok_or(DecideError::NotFound)?]
         }
     };
     if let Target::Folder { prefix, .. } = &target {
-        check_prefix(prefix, &targets[0].0)?;
+        check_prefix(prefix, &scopes[target_ix[0]].root)?;
     }
 
-    // Load and check every target scope before anything is written.
-    let mut loaded: Vec<(PathBuf, PathBuf, HashSet<String>, PathBuf, Session)> = Vec::new();
-    for (scope, owner, shadow) in targets {
-        let file = session_file_for(&paths.home, &scope);
-        if let Some(session) = load_checked(&scope, &file)? {
-            loaded.push((scope, owner, shadow, file, session));
+    // Check every target scope before anything is written.
+    let mut loaded: Vec<(usize, PathBuf, Session)> = Vec::new();
+    for i in target_ix {
+        let scope = &scopes[i].root;
+        if let Some(session) = checked(scope, &reads[i])? {
+            loaded.push((i, session_file_for(&paths.home, scope), session));
         }
     }
     if matches!(target, Target::File { .. }) && loaded.is_empty() {
         return Err(DecideError::NotFound);
     }
 
-    // Each scope is filtered by the exclude of the root that owns it.
-    let mut matchers: Vec<(PathBuf, ExcludeMatcher)> = Vec::new();
     // A file target names its key; confirmed keys only narrow folder and all targets.
     let ids: Option<Vec<String>> = keys.map(|k| match k {
         Confirm::Bare(k) => k.to_vec(),
@@ -343,15 +357,14 @@ fn run(
     // `report` holds only completed scopes; each scope works on its own and is folded in once
     // it is persisted (or had nothing to persist).
     let mut report = DecideReport::default();
-    for (scope, owner, shadow, file, mut session) in loaded {
-        if !matchers.iter().any(|(o, _)| *o == owner) {
-            matchers.push((owner.clone(), project_matcher(&paths.home, &owner)));
-        }
-        let matcher = &matchers.iter().find(|(o, _)| *o == owner).expect("just added").1;
+    for (i, file, mut session) in loaded {
+        let scope = scopes[i].root.clone();
+        let matcher = matcher_of(&scopes[i].owner);
+        let shadow = shadow_for(&scopes, &claims, i);
         let mut guards = MergeGuards::default();
         let mut changed = Vec::new();
         let mut scope_report = DecideReport::default();
-        let ctx = Ctx { scope: &scope, matcher, shadow: &shadow, now_iso, confirmed: confirmed.as_ref(), scoped, seen: &seen };
+        let ctx = Ctx { scope: &scope, matcher, shadow: &shadow, all_pending: &all_pending, now_iso, confirmed: confirmed.as_ref(), scoped, seen: &seen };
         let store = StorePaths { home: paths.home.clone(), desktop_home: paths.desktop_home.clone(), session_file: file };
         let mut w = Writes { store, preflighted: false, snaps: None, hook: &mut *before_preflight };
         let r = &mut scope_report;
@@ -409,30 +422,31 @@ fn check_prefix(prefix: &str, scope: &Path) -> Result<(), DecideError> {
     }
 }
 
-/// The scope's session, or `None` when it has no session file. Refuses an Unknown shape and a
-/// session that cannot be read or parsed: deciding against a log we cannot read could overwrite it.
-fn load_checked(scope: &Path, file: &Path) -> Result<Option<Session>, DecideError> {
+/// The scope's session as read, or `None` when it has no session file. Refuses an Unknown shape
+/// and a session that cannot be read, parsed or decoded as strict UTF-8: deciding against a log we
+/// cannot read could overwrite it (a lossy decode would be written back lossy).
+fn checked(scope: &Path, read: &ScopeRead) -> Result<Option<Session>, DecideError> {
     let unreadable =
-        |e: String| DecideError::ReadOnly(format!("The review log for {} could not be read ({e}).", scope.display()));
-    let bytes = match std::fs::read(file) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(unreadable(e.to_string())),
-    };
-    // Strict UTF-8, as `persist` reads it: a lossy decode here would be written back lossy.
-    let text = String::from_utf8(bytes).map_err(|e| unreadable(e.to_string()))?;
-    match parse_session(&text) {
-        Ok((_, Shape::Unknown(_))) => Err(DecideError::ReadOnly(UNKNOWN_SHAPE_MESSAGE.to_owned())),
-        Ok((s, Shape::Known)) => Ok(Some(s)),
-        Err(e) => Err(unreadable(e.to_string())),
+        |e: &str| DecideError::ReadOnly(format!("The review log for {} could not be read ({e}).", scope.display()));
+    if let Some(e) = &read.error {
+        return Err(unreadable(e));
     }
+    if let Some(e) = &read.not_utf8 {
+        return Err(unreadable(e));
+    }
+    if read.unknown {
+        return Err(DecideError::ReadOnly(UNKNOWN_SHAPE_MESSAGE.to_owned()));
+    }
+    Ok(read.session.clone())
 }
 
 struct Ctx<'a> {
     scope: &'a Path,
     matcher: &'a ExcludeMatcher,
-    /// Paths pending in a more specific scope too: a folder or all target leaves them to it.
-    shadow: &'a HashSet<String>,
+    /// What more specific scopes claim: a folder or all target leaves those entries to them.
+    shadow: &'a Shadow<'a>,
+    /// Every path pending in any of the project's scopes, kept current as reapply reopens one.
+    all_pending: &'a RefCell<HashSet<String>>,
     now_iso: &'a str,
     /// The keys the user confirmed, for a folder or all target; `None` means no narrowing.
     confirmed: Option<&'a HashSet<String>>,
@@ -468,7 +482,7 @@ fn is_under(path: &str, dir: &str) -> bool {
 fn pending_targets(ctx: &Ctx, target: &Target, s: &Session) -> Result<Vec<String>, DecideError> {
     let scope = ctx.scope.to_string_lossy();
     let keep = |fp: &str, e: &FileEntry| {
-        !ctx.matcher.is_excluded(fp) && !ctx.shadow.contains(fp) && has_real_change(e.original_content.as_deref(), read_disk(fp).as_deref())
+        !ctx.matcher.is_excluded(fp) && !ctx.shadow.hides(fp, e) && has_real_change(e.original_content.as_deref(), read_disk(fp).as_deref())
     };
     Ok(match target {
         Target::File { key, .. } => {
@@ -602,9 +616,12 @@ fn revert(
         if let Some(i) = s.accepted.iter().position(|r| r.id == rec.id) {
             s.accepted.remove(i);
         }
-        if !s.files.contains_key(&rec.path) && read_disk(&rec.path) == rec.after {
+        // Pending in this scope or any other (a nested root's session): never reopened twice.
+        let pending_anywhere = s.files.contains_key(&rec.path) || ctx.all_pending.borrow().contains(&rec.path);
+        if !pending_anywhere && read_disk(&rec.path) == rec.after {
             let entry = reopened(rec.before.clone(), rec.new_file, rec.session_id.clone(), ctx.now_iso);
             s.files.insert(rec.path.clone(), entry);
+            ctx.all_pending.borrow_mut().insert(rec.path.clone());
         }
         guards.dropped_accepted_ids.insert(rec.id.clone());
         report.done += 1;
@@ -644,7 +661,9 @@ fn reapply(
         let Some(rec) = s.rejected.get(&fp).cloned() else { continue };
         // Claude edited the file again since the reject: writing the old `after` would destroy
         // that edit and replace its frozen baseline. The new change is reviewed first.
-        if s.files.contains_key(&fp) {
+        // So is a path pending in any other scope (the nested root's session, say): writing this
+        // scope's old `after` would destroy Claude's current version there.
+        if s.files.contains_key(&fp) || ctx.all_pending.borrow().contains(&fp) {
             report.errors.push((fp, REEDITED_MESSAGE.to_owned()));
             continue;
         }
@@ -664,6 +683,7 @@ fn reapply(
         }
         changed.push(fp.clone());
         s.rejected.remove(&fp);
+        ctx.all_pending.borrow_mut().insert(fp.clone());
         s.files.insert(fp.clone(), reopened(rec.before, rec.new_file, rec.session_id, ctx.now_iso));
         guards.dropped_rejected_paths.insert(fp);
         report.done += 1;
