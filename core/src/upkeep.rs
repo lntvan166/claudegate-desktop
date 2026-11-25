@@ -2,7 +2,8 @@
 //! (v1.16.1) runs on every load of its own workspaces, which nothing runs for a root only the app
 //! has. Without it a no-op capture is never pruned and the accepted log only grows.
 //!
-//! Per scope (the primary root, then each nested worktree), on one load:
+//! Per scope (the primary root, then each of its worktrees; never a registered root nested inside
+//! it, nor that root's worktrees), on one load:
 //! - `pruneOutOfWorkspaceEntries`: pending entries not under the primary root (the window's
 //!   workspace folder in the extension, so a worktree session is judged by it too);
 //! - `cleanupExcludedOnce`: pending entries matching the project's effective exclude, once, then
@@ -24,7 +25,7 @@ use crate::excludes::ExcludeMatcher;
 use crate::merge::MergeGuards;
 use crate::model::{cap_accepted_bytes, parse_session, Session, Shape};
 use crate::paths::{resolve_root, session_file_for};
-use crate::project::{project_scopes_max, read_disk, should_prune_no_op};
+use crate::project::{read_disk, review_scopes, should_prune_no_op};
 use crate::projects::{owned_exclude, ProjectRecord};
 use crate::store::{persist, StorePaths};
 use serde::Serialize;
@@ -119,7 +120,10 @@ pub fn upkeep_with(
     }
     let matcher = ExcludeMatcher::new(&primary, &owned_exclude(&opts.record));
     let primary_str = primary.to_string_lossy().into_owned();
-    for scope in project_scopes_max(&primary, opts.max_attached) {
+    // The scopes the view and decisions use, minus those a nested registered root owns (itself
+    // and its worktrees): that root is kept up as its own, never by its parent.
+    let scopes = review_scopes(&paths.home, &primary, opts.max_attached).into_iter().filter(|s| s.owner == primary).map(|s| s.root);
+    for scope in scopes {
         let file = session_file_for(&paths.home, &scope);
         let mut su = ScopeUpkeep { scope: scope.to_string_lossy().into_owned(), ..Default::default() };
         match load(&file) {

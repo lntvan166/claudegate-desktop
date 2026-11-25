@@ -3,7 +3,7 @@ use crate::model::{has_real_change, parse_session, FileEntry, ReviewRecord, Sess
 use crate::paths::{resolve_root, session_file_for};
 use crate::roots::read_roots;
 use crate::time::{now_ms, parse_iso_ms};
-use crate::worktrees::{nested_worktrees_under_max, nested_worktrees_under_skip, MAX_WORKTREES};
+use crate::worktrees::{nested_worktrees_under_skip, MAX_WORKTREES};
 use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
 use std::path::{Path, PathBuf};
@@ -275,15 +275,6 @@ pub fn pending_state(
 /// Port of `shouldPruneNoOp`: the entry is a no-op that has out-aged its settle window.
 pub fn should_prune_no_op(entry: &FileEntry, disk: Option<&str>, now_ms: i64) -> bool {
     pending_state(entry.original_content.as_deref(), disk, entry.captured_at.as_deref(), now_ms) == PendingState::Hidden
-}
-
-/// The project's scopes: the primary root first, then every nested worktree (sorted). Upkeep
-/// uses this one: it never reaches a nested registered root, which is kept up as its own root.
-/// `primary` must already be resolved (`resolve_root`).
-pub(crate) fn project_scopes_max(primary: &Path, max_attached: usize) -> Vec<PathBuf> {
-    let mut scopes = vec![primary.to_path_buf()];
-    scopes.extend(nested_worktrees_under_max(primary, max_attached));
-    scopes
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

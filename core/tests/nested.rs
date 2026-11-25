@@ -413,3 +413,60 @@ fn a_scoped_confirmation_acts_on_that_scopes_row_only() {
     assert!(fx.session(&fx.nested)["rejected"].get(&f).is_none());
     assert!(fx.session(&fx.parent)["rejected"].get(&f).is_some());
 }
+
+fn worktree_in(dir: &Path, name: &str) -> PathBuf {
+    let wt = dir.join(name);
+    fs::create_dir_all(&wt).unwrap();
+    fs::write(wt.join(".git"), format!("gitdir: {}/.git/worktrees/{name}\n", dir.display())).unwrap();
+    wt
+}
+
+/// A settled no-op in `scope`'s session; the parent's upkeep would prune it if it reached it.
+fn noop_session(fx: &Fx, scope: &Path) {
+    let f = fx.file(&scope.join("same.txt"), "same");
+    fx.write_session(scope, json!({ &f: pending(Some("same")) }));
+}
+
+fn parent_upkeep(fx: &Fx, max_attached: usize) -> claudegate_core::upkeep::UpkeepReport {
+    let record = ProjectRecord { added_by_app: true, ..Default::default() };
+    upkeep(&fx.paths, &fx.parent, &UpkeepOpts { record, read_only: false, max_attached }, claudegate_core::time::now_ms())
+}
+
+#[test]
+fn the_parents_upkeep_never_tidies_a_nested_repos_worktree() {
+    let fx = Fx::new();
+    let wt = worktree_in(&fx.nested, "wt-n");
+    noop_session(&fx, &wt);
+    let before = fs::read(fx.session_file(&wt)).unwrap();
+    let r = parent_upkeep(&fx, 256);
+    assert!(r.scopes.iter().all(|s| s.scope != s_of(&wt)));
+    assert_eq!(fs::read(fx.session_file(&wt)).unwrap(), before);
+}
+
+#[test]
+fn the_parents_upkeep_never_tidies_a_nested_root_that_is_itself_a_worktree() {
+    let fx = Fx::new();
+    let wtroot = worktree_in(&fx.parent, "registered-wt");
+    fx.roots(&[fx.parent.clone(), fx.nested.clone(), wtroot.clone()]);
+    noop_session(&fx, &wtroot);
+    let before = fs::read(fx.session_file(&wtroot)).unwrap();
+    parent_upkeep(&fx, 256);
+    assert_eq!(fs::read(fx.session_file(&wtroot)).unwrap(), before);
+}
+
+#[test]
+fn a_nested_repos_worktree_does_not_use_up_the_parents_worktree_limit() {
+    let fx = Fx::new();
+    // Sorted first, so a scan that entered the nested repo would take the one slot with it.
+    let _ = worktree_in(&fx.nested, "a-wt");
+    let own = worktree_in(&fx.parent, "z-wt");
+    noop_session(&fx, &own);
+    let r = parent_upkeep(&fx, 1);
+    let scopes: Vec<String> = r.scopes.iter().map(|s| s.scope.clone()).collect();
+    assert_eq!(scopes, vec![s_of(&own)]);
+    assert!(fx.session(&own)["files"].as_object().unwrap().is_empty());
+}
+
+fn s_of(p: &Path) -> String {
+    p.to_string_lossy().into_owned()
+}
