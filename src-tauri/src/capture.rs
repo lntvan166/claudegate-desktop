@@ -51,7 +51,8 @@ pub struct CaptureView {
 pub struct HookView {
     pub state: String,
     /// The installed hook.py's `CLAUDEGATE_HOOK_VERSION` stamp (line 2); `None` for an unstamped
-    /// file (the extension's, version unknown), and for `upToDate`/`missing`.
+    /// file (the extension's, version unknown) and for `missing`. For `upToDate` it says who keeps
+    /// the hook current: stamped, this app's startup update; `None`, the extension.
     pub installed: Option<String>,
     /// The bundled hook's version, e.g. `v1.16.1`.
     pub bundled: String,
@@ -114,11 +115,13 @@ struct Read {
     status: CaptureStatus,
     taken_over: bool,
     hook: Option<HookVersion>,
+    /// hook.py's stamp, if it has one.
+    stamp: Option<String>,
 }
 
 fn read_full(home: &Path, python3: bool) -> Read {
     let literal = home.join(".claude").join("settings.json");
-    let unreadable = |r: String| Read { status: CaptureStatus::SettingsUnreadable(r), taken_over: false, hook: None };
+    let unreadable = |r: String| Read { status: CaptureStatus::SettingsUnreadable(r), taken_over: false, hook: None, stamp: None };
     let text = match fs::read(&literal) {
         Ok(b) => match String::from_utf8(b) {
             Ok(t) => Some(t),
@@ -151,7 +154,8 @@ fn read_full(home: &Path, python3: bool) -> Read {
     // Only a registered hook has a version worth reporting ("missing" means registered, no file).
     let hook = matches!(status, CaptureStatus::SetUpByApp { .. } | CaptureStatus::SetUpByExtension { .. })
         .then(|| hook_version(hook_py.as_deref(), BUNDLED_HOOK));
-    Read { status, taken_over, hook }
+    let stamp = hook_py.as_deref().and_then(|b| bundled_hook_version(&String::from_utf8_lossy(b)));
+    Read { status, taken_over, hook, stamp }
 }
 
 /// The capture status under `home`, with the marker's version for `SetUpByApp`. Read only.
@@ -179,7 +183,11 @@ pub fn view_of(s: &CaptureStatus) -> CaptureView {
 
 pub fn capture_view_for(home: &Path, python3: bool) -> CaptureView {
     let r = read_full(home, python3);
-    CaptureView { taken_over: r.taken_over, hook: r.hook.as_ref().map(hook_view_of), ..view_of(&r.status) }
+    let hook = r.hook.as_ref().map(|v| match v {
+        HookVersion::UpToDate => HookView { installed: r.stamp.clone(), ..hook_view_of(v) },
+        _ => hook_view_of(v),
+    });
+    CaptureView { taken_over: r.taken_over, hook, ..view_of(&r.status) }
 }
 
 /// Whether `<program> --version` runs and exits 0 within `timeout`. No shell: `program` is

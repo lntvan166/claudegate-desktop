@@ -108,7 +108,7 @@ fn app_with_trimmed_marker_version() {
             python_missing: false,
             taken_over: false,
             setup_supported: cfg!(unix),
-            hook: Some(HookView { state: "upToDate".into(), installed: None, bundled: bundled() }),
+            hook: Some(HookView { state: "upToDate".into(), installed: Some(bundled()), bundled: bundled() }),
         }
     );
 }
@@ -366,12 +366,51 @@ fn update_never_touches_the_extensions_hook() {
 }
 
 #[test]
-fn update_refuses_without_the_marker_even_if_the_hook_is_stamped() {
+fn update_rewrites_a_stamped_hook_with_no_marker() {
+    // The extension registered the entry; Update hook stamped hook.py; there is no marker. The
+    // stamp alone makes it this app's to keep current at startup.
     let f = fx();
-    f.as_app("v1.0.0");
-    fs::remove_file(f.cg(".installed-by-desktop")).unwrap();
-    fs::write(f.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\n").unwrap();
+    f.as_extension();
+    fs::write(f.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\nold\n").unwrap();
+    let settings = fs::read(f.settings()).unwrap();
+    let r = update_hook_with(&f.home, &f.cfg, true).unwrap();
+    assert_eq!(r, HookUpdate::Updated { from: "v1.0.0".into(), to: bundled() });
+    assert_eq!(fs::read_to_string(f.cg("hook.py")).unwrap(), BUNDLED_HOOK);
+    assert!(!f.cg(".installed-by-desktop").exists(), "the marker is never created");
+    assert_eq!(fs::read(f.settings()).unwrap(), settings);
+    assert_eq!(capture_view_for(&f.home, true).status, "vscode", "still registered by the extension");
+}
+
+#[test]
+fn update_never_downgrades_a_newer_stamped_hook_with_no_marker() {
+    let f = fx();
+    f.as_extension();
+    fs::write(f.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v99.0.0\nnewer\n").unwrap();
     assert_untouched(&f, || update_hook_with(&f.home, &f.cfg, true));
+}
+
+#[test]
+fn update_skips_a_stamped_hook_when_nothing_is_registered() {
+    let f = fx();
+    fs::create_dir_all(f.home.join(".claudegate")).unwrap();
+    fs::write(f.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\nold\n").unwrap();
+    assert_untouched(&f, || update_hook_with(&f.home, &f.cfg, true));
+    f.write_settings("{}");
+    assert_untouched(&f, || update_hook_with(&f.home, &f.cfg, true));
+}
+
+#[test]
+fn update_skips_a_symlinked_stamped_hook() {
+    let f = fx();
+    f.as_extension();
+    let real = f.home.join("real-hook.py");
+    fs::write(&real, "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\nold\n").unwrap();
+    fs::remove_file(f.cg("hook.py")).unwrap();
+    std::os::unix::fs::symlink(&real, f.cg("hook.py")).unwrap();
+    let r = update_hook_with(&f.home, &f.cfg, true);
+    assert!(matches!(r, Ok(HookUpdate::Skipped(_))), "{r:?}");
+    assert!(fs::read_to_string(&real).unwrap().contains("v1.0.0"));
+    assert!(fs::symlink_metadata(f.cg("hook.py")).unwrap().file_type().is_symlink());
 }
 
 #[test]
@@ -522,7 +561,12 @@ fn the_view_reports_the_hooks_version_state() {
     fs::write(f.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\nold\n").unwrap();
     assert_eq!(hook_state(&f), Some(HookView { state: "older".into(), installed: Some("v1.0.0".into()), bundled: bundled() }));
     fs::write(f.cg("hook.py"), BUNDLED_HOOK).unwrap();
-    assert_eq!(hook_state(&f).unwrap().state, "upToDate");
+    assert_eq!(hook_state(&f), Some(HookView { state: "upToDate".into(), installed: Some(bundled()), bundled: bundled() }));
+    // The extension's copy at the bundled tag (stamp line removed) is up to date, and unstamped.
+    let mut lines: Vec<&str> = BUNDLED_HOOK.split_inclusive('\n').collect();
+    lines.remove(1);
+    fs::write(f.cg("hook.py"), lines.concat()).unwrap();
+    assert_eq!(hook_state(&f), Some(HookView { state: "upToDate".into(), installed: None, bundled: bundled() }));
     fs::write(f.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v99.0.0\nnewer\n").unwrap();
     assert_eq!(hook_state(&f), Some(HookView { state: "newer".into(), installed: Some("v99.0.0".into()), bundled: bundled() }));
     fs::remove_file(f.cg("hook.py")).unwrap();

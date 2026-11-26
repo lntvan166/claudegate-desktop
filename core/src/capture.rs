@@ -362,19 +362,19 @@ pub fn version_newer(candidate: &str, installed: &str) -> bool {
     matches!((parse(candidate), parse(installed)), (Some(a), Some(b)) if a > b)
 }
 
-/// What the startup update of the app's own hook.py did.
+/// What the startup update of a stamped hook.py did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookUpdate {
-    /// hook.py was rewritten with the bundled copy and the marker now says `to`.
+    /// hook.py was rewritten with the bundled copy (and the marker, when there is one, says `to`).
     Updated { from: String, to: String },
     /// Nothing was written; why.
     Skipped(String),
 }
 
-/// Rewrites `<home>/.claudegate/hook.py` with the bundled copy when this app set capture up
-/// (marker present, status `SetUpByApp`, the installed hook.py carries our stamp) and the bundled
-/// version is newer than the marker. Never touches settings.json. See
-/// `store::update_app_hook`.
+/// Rewrites `<home>/.claudegate/hook.py` with the bundled copy when a hook is registered (by
+/// either side), the installed hook.py carries our stamp on line 2, and the bundled version is
+/// newer than that stamp. No marker needed; an unstamped (extension) hook is never touched. Never
+/// touches settings.json or hook.sh, and never creates the marker. See `store::update_app_hook`.
 pub fn update_app_hook(home: &Path, bundled_hook: &str, python3: bool, read_only: bool) -> Result<HookUpdate, String> {
     crate::store::update_app_hook(home, bundled_hook, python3, read_only)
 }

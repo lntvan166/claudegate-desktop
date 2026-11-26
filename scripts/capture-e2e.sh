@@ -118,4 +118,14 @@ py "import json; s=json.load(open('$SESSION')); f=s['files']['$WS/b.txt']; asser
 set +e; "$BIN" update-hook >/dev/null 2>&1; rc=$?; set -e
 [ "$rc" -eq 1 ] || fail "a second update-hook was not refused (exit $rc)"
 
+# 6. The startup update keeps a stamped hook current with no marker (the extension registered the
+#    entry), and never creates the marker; it never touches an unstamped hook.
+printf '#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\n' > "$HOME/.claudegate/hook.py"
+"$BIN" update | grep -q "Updated { from: \"v1.0.0\", to: \"$VER\" }" || fail "startup update skipped a stamped hook with no marker"
+cmp -s "$HOME/.claudegate/hook.py" "$REPO/src-tauri/resources/hook.py" || fail "stamped hook not updated"
+[ ! -e "$HOME/.claudegate/.installed-by-desktop" ] || fail "startup update created the marker"
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)  # the extension\n' > "$HOME/.claudegate/hook.py"
+"$BIN" update | grep -q '^Skipped' || fail "startup update touched an unstamped hook"
+grep -q 'the extension' "$HOME/.claudegate/hook.py" || fail "unstamped hook changed"
+
 echo "CAPTURE E2E OK"

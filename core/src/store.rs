@@ -1401,21 +1401,23 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
     Ok(report(None))
 }
 
-// ---- Updating the app's own hook.py ----------------------------------------------------------
+// ---- Updating a stamped hook.py at startup ----------------------------------------------------
 
 //
-// The app ships a newer hook.py than the one it installed: rewrite it, but only the copy this app
-// put there. Every one of these must hold, or nothing is written:
+// The app ships a newer hook.py than the stamped one installed: rewrite it. The stamp is the
+// ownership test here, not the marker: a hook.py carrying this app's `CLAUDEGATE_HOOK_VERSION`
+// stamp (line 2) was put there by this app, by setup or by Update hook, whoever registered the
+// settings entry. The extension's copy has no stamp, so once the extension rewrites hook.py (by
+// hash, when VS Code starts) the app backs off and the two never fight. Every one of these must
+// hold, or nothing is written:
 // - read-only mode is off, and python3 was found;
-// - the marker exists (refused outright otherwise: it is the record that the setup is ours);
-// - the installed hook.py exists, is a regular file and carries a `CLAUDEGATE_HOOK_VERSION`
-//   stamp (`app_owns_hook`): the extension's copy has none, so an extension that rewrote hook.py
-//   since setup keeps it;
-// - `capture_status` is exactly `SetUpByApp` (an entry registered, and the setup ours);
-// - the bundled version is newer than the installed hook.py's own stamp. The marker can disagree
-//   with the file (a half-finished earlier update); the file is what runs.
+// - the installed hook.py exists, is a regular file (not a symlink) and carries the stamp;
+// - a ClaudeGate entry is registered in settings.json (`SetUpByApp` or `SetUpByExtension`);
+// - the bundled version is newer than the installed hook.py's own stamp (never a downgrade). The
+//   marker can disagree with the file (a half-finished earlier update); the file is what runs.
 // hook.py is replaced atomically (its mode kept), comparing it with what was read right before
-// the rename; then the marker gets the new version. settings.json and hook.sh are never written.
+// the rename (still a regular file); then the marker, only when there is one, gets the new
+// version. The marker is never created; settings.json and hook.sh are never written.
 
 pub(crate) fn update_app_hook(
     home: &Path,
@@ -1434,44 +1436,42 @@ pub(crate) fn update_app_hook(
     let to = bundled_hook_version(bundled_hook).ok_or("the bundled hook has no version stamp")?;
     let cg = home.join(".claudegate");
     let (py, marker) = (cg.join(HOOK_PY_FILE), cg.join(MARKER_FILE));
-    match fs::symlink_metadata(&marker) {
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return skip("capture was not set up by this app (no marker)"),
-        Err(e) => return Err(format!("could not read {}: {e}", marker.display())),
-    }
     let installed = match fs::symlink_metadata(&py) {
         Ok(m) if m.file_type().is_file() => fs::read(&py).map_err(|e| format!("could not read {}: {e}", py.display()))?,
         Ok(_) => return skip("hook.py is not a regular file"),
         Err(e) if e.kind() == io::ErrorKind::NotFound => return skip("hook.py is missing"),
         Err(e) => return Err(format!("could not read {}: {e}", py.display())),
     };
-    if !app_owns_hook(true, Some(&installed)) {
-        return skip("hook.py has no version stamp: it is not this app's copy");
-    }
+    let Some(from) = bundled_hook_version(&String::from_utf8_lossy(&installed)) else {
+        return skip("hook.py has no version stamp: it is the extension's copy");
+    };
     let raw = match settings_target(home).and_then(fs::read) {
         Ok(b) => Some(String::from_utf8_lossy(&b).into_owned()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return skip(&format!("settings.json could not be read: {e}")),
     };
-    match capture_status(raw.as_deref(), true, python3) {
-        CaptureStatus::SetUpByApp { .. } => {}
-        other => return skip(&format!("capture status is {other:?}, not set up by this app")),
+    let marker_there = fs::symlink_metadata(&marker).is_ok();
+    match capture_status(raw.as_deref(), app_owns_hook(marker_there, Some(&installed)), python3) {
+        CaptureStatus::SetUpByApp { .. } | CaptureStatus::SetUpByExtension { .. } => {}
+        other => return skip(&format!("capture status is {other:?}: no hook is registered")),
     }
-    let from = bundled_hook_version(&String::from_utf8_lossy(&installed)).unwrap_or_default();
     if !version_newer(&to, &from) {
         return skip(&format!("hook.py is {from}, the bundled one is {to}: not newer"));
     }
     guard_hook_file(&cg, &py).map_err(|e| e.to_string())?;
-    let unchanged = || match fs::read(&py) {
-        Ok(now) if now == installed => Ok(()),
-        Ok(_) => Err(io::Error::other("hook.py changed while it was being updated")),
-        Err(e) => Err(e),
+    let unchanged = || match (fs::symlink_metadata(&py), fs::read(&py)) {
+        (Ok(m), Ok(now)) if m.file_type().is_file() && now == installed => Ok(()),
+        (_, Err(e)) => Err(e),
+        _ => Err(io::Error::other("hook.py changed while it was being updated")),
     };
     atomic_write_checked(&py, bundled_hook.as_bytes(), true, unchanged)
         .map_err(|e| format!("could not update {}: {e}", py.display()))?;
-    guard_hook_file(&cg, &marker)
-        .and_then(|()| atomic_write_bytes(&marker, to.as_bytes(), true))
-        .map_err(|e| format!("updated hook.py, but could not update {}: {e}", marker.display()))?;
+    match fs::symlink_metadata(&marker) {
+        Ok(m) if m.file_type().is_file() => guard_hook_file(&cg, &marker)
+            .and_then(|()| atomic_write_bytes(&marker, to.as_bytes(), true))
+            .map_err(|e| format!("updated hook.py, but could not update {}: {e}", marker.display()))?,
+        _ => {}
+    }
     Ok(HookUpdate::Updated { from, to })
 }
 
