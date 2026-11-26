@@ -29,6 +29,12 @@
     onnotice: (text: string) => void;
   } = $props();
 
+  let repoPane: RepoPane | undefined = $state();
+  /** Puts the keyboard in the Repositories pane (App calls it after switching to this view). */
+  export function focusStart() {
+    void repoPane?.focusStart();
+  }
+
   const COLLAPSED_KEY = "claudegate.gitlog.reposCollapsed";
 
   let repos = $state<RepoView[] | null>(null);
@@ -113,6 +119,7 @@
 
 <div class="gitlog-view" class:hidden={!active} style:--repos-w="{panes.repos}px" style:--changes-w="{panes.changes}px">
   <RepoPane
+    bind:this={repoPane}
     {repos}
     error={reposError}
     bind:cfg

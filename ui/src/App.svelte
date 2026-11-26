@@ -66,6 +66,7 @@
   import type { IconTheme } from "./lib/icons";
   import { actionFor, decisionFor, diffKeyFor, DIFF_HIDDEN_REFUSAL, isUndoKey, isTypingTarget, isViewKey, nextIndex, READ_ONLY_REFUSAL, refKeyFor, viewKeyLabel, WAITING_REFUSAL } from "./lib/keys";
   import { writeClipboard } from "./lib/clipboard";
+  import { firstShown, needsFocusMove, overlayShown, OVERLAY_SELECTOR } from "./lib/viewSwitch";
   import { clipboardText, formatRef, pasteHint, refRange, type LineRange } from "./lib/ref";
   import type { RowRef } from "./lib/rows";
   import { basename, groupsFor, restoreSelection, rowsOf, sameRow, scopeKind, scopeLabel, selectionAfterList, sortProjects, type Row } from "./lib/rows";
@@ -120,6 +121,9 @@
   let appView = $state<AppView>("review");
   /** The Git log view is mounted the first time it is opened, never at startup, then kept. */
   let gitlogMounted = $state(false);
+  let gitlogView: GitLogView | undefined = $state();
+  /** What had the keyboard in the review when it was hidden, to give it back on return. */
+  let reviewFocus: HTMLElement | null = null;
   function setView(v: AppView) {
     if (v === appView) return;
     if (v === "gitlog") {
@@ -127,9 +131,30 @@
       // Settings live in the review's sheet; Esc must not close them unseen.
       settingsOpen = false;
       rowMenu = null;
+      // Nor answer a question nobody can see: a bulk or "looks like a secret" confirmation.
+      actionBar?.cancel();
+      protectAsk = null;
+      const a = document.activeElement;
+      reviewFocus = a instanceof HTMLElement && a !== document.body ? a : null;
     }
     appView = v;
+    void tick().then(() => moveFocusFor(v));
   }
+  /** Focus off whatever the switch just hid: into the Repositories pane, or back where the review left it. */
+  function moveFocusFor(v: AppView) {
+    if (v !== appView) return;
+    const a = document.activeElement as HTMLElement | null;
+    if (!needsFocusMove(a, !a || a === document.body)) return;
+    if (v === "gitlog") {
+      gitlogView?.focusStart();
+      return;
+    }
+    const back = firstShown([reviewFocus]);
+    if (back) back.focus();
+    else if (fileTree) void fileTree.focusCurrent();
+  }
+  /** A menu or confirmation on screen (the hidden view's never count). */
+  const overlayUp = () => overlayShown(document.querySelectorAll<HTMLElement>(OVERLAY_SELECTOR));
 
   let projects = $state<ProjectSummary[]>([]);
   let loadingList = $state(true);
@@ -1033,7 +1058,7 @@
     // Ctrl+Shift+G: Review ⇄ Git log, from anywhere but a menu or a confirmation.
     if (isViewKey(e, isMac)) {
       e.preventDefault();
-      if (e.repeat || document.querySelector('[role="menu"], [data-confirm]')) return;
+      if (e.repeat || overlayUp()) return;
       setView(appView === "review" ? "gitlog" : "review");
       return;
     }
@@ -1593,7 +1618,7 @@
   </div>
 
   {#if gitlogMounted}
-    <GitLogView active={appView === "gitlog"} onnotice={announce} />
+    <GitLogView bind:this={gitlogView} active={appView === "gitlog"} onnotice={announce} />
   {/if}
 </div>
 
@@ -1811,6 +1836,13 @@
     border-color: var(--primary);
   }
 
+  /* The one header item that may cut, after the status chips: the gear must always fit. */
+  .status > .total {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .total {
     font-weight: 500;
     white-space: nowrap;
@@ -2052,9 +2084,9 @@
     }
   }
 
-  /* A phone-narrow window: the header keeps every control, in fewer words. The full total and
-     the read-only label stay for screen readers. */
-  @media (max-width: 520px) {
+  /* A narrow window: the header keeps every control, in fewer words. The full total and the
+     read-only label stay for screen readers. 760px leaves room for the view switch. */
+  @media (max-width: 760px) {
     .wordmark,
     .chip-label,
     .total-long {

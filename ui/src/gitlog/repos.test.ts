@@ -115,3 +115,15 @@ describe("pane widths", () => {
     expect(fitPanes({ repos: 400, changes: 320 }, 1600, true).repos).toBe(REPOS_RAIL);
   });
 });
+
+describe("profile names", () => {
+  it("matches own, trimmed names only", async () => {
+    const { hasProfile } = await import("./repos");
+    const p = { Checkout: ["a"] };
+    expect(hasProfile(p, "Checkout")).toBe(true);
+    expect(hasProfile(p, "  Checkout ")).toBe(true);
+    expect(hasProfile(p, "checkout")).toBe(false);
+    expect(hasProfile(p, "constructor")).toBe(false);
+    expect(hasProfile(p, "toString")).toBe(false);
+  });
+});

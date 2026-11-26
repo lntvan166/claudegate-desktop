@@ -21,6 +21,7 @@
     applyProfile,
     colorVar,
     fuzzyFilter,
+    hasProfile,
     isTicked,
     profileNames,
     rangeOf,
@@ -193,6 +194,18 @@
     e.stopPropagation();
   }
 
+  /** Where the keyboard lands when the view comes on screen: the list's current row, else the filter. */
+  export async function focusStart() {
+    await tick();
+    if (collapsed) {
+      document.querySelector<HTMLElement>('.repos button[aria-expanded]')?.focus();
+      return;
+    }
+    const id = cursor ?? order[0] ?? null;
+    const row = id ? listEl?.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`) : null;
+    (row ?? searchEl)?.focus();
+  }
+
   function openMenu(id: string, x: number, y: number) {
     if (!selection.includes(id)) {
       selection = [id];
@@ -283,7 +296,7 @@
   async function save() {
     const name = saveName.trim();
     if (!name) return;
-    const replacing = name in cfg.profiles;
+    const replacing = hasProfile(cfg.profiles, name);
     if (await run("save the profile", () => gitlogProfileSave(name))) {
       onnotice(replacing ? `${name} updated` : `${name} saved`);
       saveName = "";
@@ -448,7 +461,7 @@
           <label class="save-label" for="profile-save">Save the {cfg.ticked === null ? "whole list" : `${nTicked} shown`} as</label>
           <div class="inline">
             <input id="profile-save" placeholder="Profile name" bind:value={saveName} maxlength="80" />
-            <button class="small go" type="submit" disabled={busy || !saveName.trim()}>{saveName.trim() in cfg.profiles ? "Replace" : "Save"}</button>
+            <button class="small go" type="submit" disabled={busy || !saveName.trim()}>{hasProfile(cfg.profiles, saveName) ? "Replace" : "Save"}</button>
           </div>
         </form>
       </div>
@@ -487,6 +500,8 @@
             class:off={!on}
             role="option"
             aria-selected={selection.includes(r.id)}
+            aria-checked={on}
+            aria-describedby="repo-tick-hint"
             tabindex={(cursor ?? order[0]) === r.id ? 0 : -1}
             data-id={r.id}
             title={repoPath(r)}
@@ -497,11 +512,11 @@
               openMenu(r.id, e.clientX, e.clientY);
             }}
           >
+            <!-- The row is the checkbox for assistive tech (aria-checked, Space); this is its mouse target. -->
             <button
               class="tick"
-              role="checkbox"
-              aria-checked={on}
-              aria-label="Show {r.name}"
+              class:on
+              aria-hidden="true"
               tabindex="-1"
               disabled={busy}
               onclick={(e) => {
@@ -523,6 +538,8 @@
         {/each}
       {/if}
     </div>
+
+    <p id="repo-tick-hint" class="sr">Space shows or hides the selected repositories in the log</p>
 
     <footer>
       <button class="disclose" aria-expanded={discoveryOpen} onclick={() => (discoveryOpen = !discoveryOpen)}>
@@ -861,7 +878,7 @@
     border-radius: 3px;
     color: var(--on-primary);
   }
-  .tick[aria-checked="true"] {
+  .tick.on {
     background: var(--primary);
     border-color: var(--primary);
   }

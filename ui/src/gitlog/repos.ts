@@ -178,3 +178,8 @@ export function paneMax(w: GitLogPanes, pane: keyof GitLogPanes, total: number):
   const other = pane === "repos" ? w.changes : w.repos;
   return Math.max(PANE_MIN[pane], total - PANE_CHROME - PANE_MIN.diff - other);
 }
+
+/** Whether a profile of that (trimmed) name exists. Own keys only: "constructor" is not a profile. */
+export function hasProfile(profiles: Record<string, string[]>, name: string): boolean {
+  return Object.hasOwn(profiles, name.trim());
+}
