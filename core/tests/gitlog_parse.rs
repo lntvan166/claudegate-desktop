@@ -143,3 +143,39 @@ fn web_url_rejects_ftp_and_encoded_dots() {
     assert_eq!(web_url("https://github.com/acme/%2e%2e/x", A), None);
     assert_eq!(web_url("https://github.com/acme/a%2Fb", A), None);
 }
+
+#[test]
+fn real_git_rename_lines() {
+    let f = parse_changes("R100\t\"a/old/caf\\303\\251.rs\"\t\"a/new/caf\\303\\251.rs\"\n", "");
+    assert_eq!((f[0].path.as_str(), &f[0].status), ("a/new/café.rs", &FileStatus::Renamed { from: "a/old/café.rs".into() }));
+    let f = parse_changes("R100\ta/old/café.rs\ta/new/café.rs\n", "0\t0\ta/{old => new}/café.rs\n");
+    assert_eq!(f[0].path, "a/new/café.rs");
+    assert_eq!((f[0].added, f[0].removed), (Some(0), Some(0)));
+    let f = parse_changes("R100\t\"tab\\tname.rs\"\t\"tab\\trenamed.rs\"\n", "0\t0\t\"tab\\tname.rs\" => \"tab\\trenamed.rs\"\n");
+    assert_eq!(f[0].path, "tab\trenamed.rs");
+    assert_eq!(f[0].status, FileStatus::Renamed { from: "tab\tname.rs".into() });
+    assert_eq!(f[0].added, Some(0));
+}
+
+#[test]
+fn never_panics_on_random_input() {
+    let alphabet = ["a", "b", "é", "李", "🚀", "{", "}", " => ", "=>", "\"", "\\", "\t", "\n", "\r", "\0", "\x1e", " ", "/", ".git", "%2e", ":", "@", "R100", "A", "-", "1", "http://", "git@", "ssh://", "[", "]"];
+    let mut x: u64 = 0x2545F4914F6CDD1D;
+    let mut next = || {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (x >> 33) as usize
+    };
+    for _ in 0..200 {
+        let n = next() % 40;
+        let a: String = (0..n).map(|_| alphabet[next() % alphabet.len()]).collect();
+        let b: String = (0..n).map(|_| alphabet[next() % alphabet.len()]).collect();
+        let _ = parse_changes(&a, &b);
+        let _ = parse_changes(&b, &a);
+        let _ = parse_log(&a);
+        let _ = unquote_c_style(&a);
+        let _ = web_url(&a, A);
+        let _ = web_url(&format!("https://github.com/{a}"), A);
+        let _ = web_url(&format!("git@github.com:{a}.git"), A);
+        let _ = web_url(&format!("git@github.com:é{a}é"), A);
+    }
+}

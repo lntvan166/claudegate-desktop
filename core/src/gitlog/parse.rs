@@ -120,7 +120,7 @@ fn find_unquoted(s: &str, pat: &str, last: bool) -> Option<usize> {
         match b[i] {
             b'\\' if in_q => i += 1,
             b'"' => in_q = !in_q,
-            _ if !in_q && s[i..].starts_with(pat) => {
+            _ if !in_q && b[i..].starts_with(pat.as_bytes()) => {
                 found = Some(i);
                 if !last {
                     return found;

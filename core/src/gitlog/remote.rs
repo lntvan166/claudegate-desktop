@@ -51,7 +51,9 @@ pub fn web_url(remote: &str, sha: &str) -> Option<String> {
         return None;
     }
     let trimmed = r.path.trim_end_matches('/');
-    let trimmed = if trimmed.len() >= 4 && trimmed[trimmed.len() - 4..].eq_ignore_ascii_case(".git") {
+    // Compare bytes: a str slice at len-4 can fall inside a multibyte character.
+    let tb = trimmed.as_bytes();
+    let trimmed = if tb.len() >= 4 && tb[tb.len() - 4..].eq_ignore_ascii_case(b".git") {
         &trimmed[..trimmed.len() - 4]
     } else {
         trimmed
