@@ -1621,7 +1621,9 @@ pub(crate) fn update_app_hook(
 // - `compute_audit_patch` changes something (the audit entries are missing or stale) and refuses
 //   nothing (a malformed `hooks` or post event is an error, the file untouched);
 // - audit.py and audit.sh are each a regular file or absent (absent ones are created first, audit.sh
-//   at 0755 with `AUDIT_SH_CONTENT`; existing ones are kept as they are).
+//   at 0755 with `AUDIT_SH_CONTENT`; existing ones keep their content, but an existing audit.sh
+//   without its owner execute bit is restored to 0755 first, since an entry naming a wrapper that
+//   cannot run fails on every Bash call; that chmod is not undone on a later failure).
 // settings.json is then written by the setup protocol: a timestamped backup beside it, the write to
 // its realpath compared with what was read right before the rename, a re-read verified with
 // `verify_audit_content` (the PreToolUse entries exactly as they were), and a restore on failure.
@@ -1711,6 +1713,17 @@ fn repair_audit_unix(home: &Path, bundled_audit: &str) -> Result<crate::capture:
         match guard_hook_file(&cg, path).and_then(|()| create_file_exclusive(path, content, mode)) {
             Ok(()) => undo.created.push((path.clone(), content.to_vec())),
             Err(e) => return Err(failed(undo, format!("could not write {}: {e}", path.display()))),
+        }
+    }
+    if !write_sh {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::symlink_metadata(&audit_sh).map(|m| m.permissions().mode()).unwrap_or(0o755);
+        if mode & 0o100 == 0 {
+            let fixed = guard_hook_file(&cg, &audit_sh)
+                .and_then(|()| fs::set_permissions(&audit_sh, fs::Permissions::from_mode(0o755)));
+            if let Err(e) = fixed {
+                return Err(failed(undo, format!("{} is not executable and could not be made so: {e}", audit_sh.display())));
+            }
         }
     }
     if let Err(e) = install_fault("repair_after_files") {

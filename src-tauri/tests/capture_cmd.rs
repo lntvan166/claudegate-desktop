@@ -770,3 +770,19 @@ fn repair_keeps_an_existing_wrapper_and_audit_py() {
     assert!(created.is_empty());
     assert_eq!(fs::read_to_string(f.cg("audit.py")).unwrap(), "print('older audit')\n", "Update hook's job, not repair's");
 }
+
+#[test]
+fn repair_makes_a_non_executable_existing_wrapper_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fx();
+    f.as_extension();
+    let sh = "#!/usr/bin/env bash\npython3 \"$HOME/.claudegate/audit.py\"\n";
+    fs::write(f.cg("audit.sh"), sh).unwrap();
+    fs::set_permissions(f.cg("audit.sh"), fs::Permissions::from_mode(0o644)).unwrap();
+    let r = repair_audit_with(&f.home, &f.cfg, true).unwrap();
+    let AuditRepair::Repaired { created, .. } = r else { panic!("{r:?}") };
+    assert_eq!(created, vec![f.cg("audit.py")], "the existing wrapper is not replaced");
+    assert_eq!(fs::metadata(f.cg("audit.sh")).unwrap().permissions().mode() & 0o777, 0o755, "restored to 0755");
+    assert_eq!(fs::read_to_string(f.cg("audit.sh")).unwrap(), sh, "content kept");
+    assert_eq!(audit_entries(&f).len(), 2);
+}

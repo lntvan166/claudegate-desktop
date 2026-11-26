@@ -51,6 +51,26 @@ fn roots() -> Vec<PathBuf> {
     vec![PathBuf::from(ROOT)]
 }
 
+/// Audit file names pinned as literals, shared with the extension: audit.py's tests read the same
+/// `hooks/tests/audit_hash_cases.json` (here from the pinned checkout `xcheck/fetch-extension.sh`
+/// makes), so the hook and the app can never look for an audit file under different names.
+#[test]
+#[cfg(unix)]
+fn audit_file_names_match_the_extensions_literal_md5() {
+    let home = Path::new("/h");
+    let name = |root: &str| audit_file_for(home, Path::new(root)).file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(name(ROOT), "2d91df225581d15bbef1b5593f152409.jsonl");
+    let shared = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.xcheck-cache/claudegate/hooks/tests/audit_hash_cases.json");
+    let text = fs::read_to_string(&shared)
+        .unwrap_or_else(|e| panic!("run ./xcheck/fetch-extension.sh first ({}: {e})", shared.display()));
+    let cases: Value = serde_json::from_str(&text).unwrap();
+    let cases = cases["cases"].as_array().unwrap();
+    assert!(!cases.is_empty());
+    for c in cases {
+        assert_eq!(name(c["root"].as_str().unwrap()), c["file"].as_str().unwrap(), "{c}");
+    }
+}
+
 #[test]
 fn iso_helper_round_trips() {
     assert_eq!(parse_iso_ms(&iso(T0)), Some(T0));

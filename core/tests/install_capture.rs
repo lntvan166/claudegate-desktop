@@ -6,7 +6,8 @@
 //! Every install runs against a temp HOME. Nothing here touches the real ~/.claude or ~/.claudegate.
 
 use claudegate_core::capture::{
-    adoptable_hook, audit_command_shape, backups_to_prune, bundled_hook_version, compute_settings_patch, set_up_capture,
+    adoptable_hook, audit_command_shape, backups_to_prune, bundled_hook_version, compute_audit_patch, compute_settings_patch,
+    set_up_capture,
     verify_settings_content, CaptureStatus, InstallError, AUDIT_EVENTS, AUDIT_SH_CONTENT, HOOK_SH_CONTENT,
     POST_TOOL_MATCHER, PRE_TOOL_MATCHER, SETTINGS_BACKUP_RETENTION,
 };
@@ -38,6 +39,41 @@ fn settings_patch_matches_the_extension() {
         assert!(p.shape_error.is_none(), "{name}: {:?}", p.shape_error);
         assert_eq!(p.content, c["expected"]["content"].as_str().unwrap(), "{name}: content");
     }
+}
+
+/// The startup repair writes `compute_audit_patch`; Setup writes `compute_settings_patch`. Where the
+/// capture entry is already correct the two must produce the same bytes, or a repaired settings.json
+/// would differ from a set-up one (and the extension's next sync would rewrite it).
+#[test]
+fn audit_patch_is_byte_for_byte_the_settings_patch_when_capture_is_correct() {
+    let fx = fixture("settings_patch.json");
+    let mut compared = 0;
+    for c in fx["cases"].as_array().unwrap() {
+        let name = c["name"].as_str().unwrap();
+        let hook = c["hookCommand"].as_str().unwrap();
+        let audit = c["auditCommand"].as_str().unwrap_or("/home/u/.claudegate/audit.sh");
+        // The case's own input, then the same input with the capture entry made correct first.
+        let raw = c["raw"].as_str().unwrap().to_owned();
+        let capture_only = compute_settings_patch(&raw, hook, None);
+        if capture_only.parse_error {
+            continue;
+        }
+        let mut inputs = vec![capture_only.content.clone()];
+        if !capture_only.changed {
+            inputs.push(raw);
+        }
+        for input in inputs {
+            assert!(!compute_settings_patch(&input, hook, None).changed, "{name}: capture entry is correct");
+            let full = compute_settings_patch(&input, hook, Some(audit));
+            let repair = compute_audit_patch(&input, audit);
+            assert_eq!(repair.content, full.content, "{name}: content");
+            assert_eq!(repair.changed, full.changed, "{name}: changed");
+            assert_eq!(repair.parse_error, full.parse_error, "{name}: parseError");
+            assert_eq!(repair.shape_error, full.shape_error, "{name}: shapeError");
+            compared += 1;
+        }
+    }
+    assert!(compared >= 35, "only {compared} inputs compared");
 }
 
 #[test]
