@@ -1,11 +1,16 @@
 <script lang="ts">
   import { popoverLeft } from "../lib/popover";
   import { onMount, tick } from "svelte";
-  import { captureStatus, setUpCapture } from "../lib/api";
+  import { captureStatus, setUpCapture, updateCaptureHook } from "../lib/api";
   import {
     CONFIRM_TEXT,
     canRecheck,
     canSetUp,
+    canUpdateHook,
+    hookLine,
+    hookUpdateBlocked,
+    hookUpdateResult,
+    updateHookConfirm,
     capturing,
     UNSUPPORTED_TEXT,
     setupUnsupported,
@@ -14,6 +19,7 @@
     pythonWarning,
     setupResult,
     type CaptureView,
+    type HookView,
     type SetupResult,
   } from "../lib/capture";
 
@@ -21,7 +27,10 @@
 
   let view: CaptureView | null = $state(null);
   let open = $state(false);
-  let confirming = $state(false);
+  /** Which confirmation is showing: Set up, or Update hook. */
+  let confirming: "setup" | "hook" | null = $state(null);
+  /** The hook state the Update hook confirmation was asked about (a refresh can't swap its text). */
+  let askedHook: HookView | null = $state(null);
   let busy = $state(false);
   let error: string | null = $state(null);
   /** The last status read failed (with no status yet, the chip says so instead of "checking…"). */
@@ -67,22 +76,43 @@
 
   function close(refocus = true) {
     open = false;
-    confirming = false;
+    confirming = null;
     if (refocus) chip?.focus();
   }
 
-  async function askSetUp() {
+  async function ask(what: "setup" | "hook") {
     error = null;
     result = null;
-    confirming = true;
+    askedHook = view?.hook ?? null;
+    confirming = what;
     await tick();
     cancelBtn?.focus();
   }
 
   async function cancelConfirm() {
-    confirming = false;
+    const was = confirming;
+    confirming = null;
     await tick();
-    pop?.querySelector<HTMLButtonElement>("[data-setup]")?.focus();
+    pop?.querySelector<HTMLButtonElement>(was === "hook" ? "[data-update-hook]" : "[data-setup]")?.focus();
+  }
+
+  async function confirmUpdateHook() {
+    busy = true;
+    error = null;
+    try {
+      const r = await updateCaptureHook();
+      view = r.capture;
+      result = hookUpdateResult(r);
+      void refresh();
+    } catch (e) {
+      error = String(e);
+      void refresh();
+    } finally {
+      busy = false;
+      confirming = null;
+    }
+    await tick();
+    (pop?.querySelector<HTMLButtonElement>("button:not(:disabled)") ?? chip)?.focus();
   }
 
   async function confirmSetUp() {
@@ -98,7 +128,7 @@
       void refresh();
     } finally {
       busy = false;
-      confirming = false;
+      confirming = null;
     }
     // The confirmation's buttons are gone: hand focus to the popover's first control, else the chip.
     await tick();
@@ -163,7 +193,15 @@
   {#if open}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div class="pop" style:left={popLeft === null ? undefined : `${popLeft}px`} style:right={popLeft === null ? undefined : "auto"} role="dialog" aria-label="Capture" data-confirm tabindex="-1" bind:this={pop} {onkeydown}>
-      {#if confirming}
+      {#if confirming === "hook" && askedHook}
+        <p class="body strong">{updateHookConfirm(askedHook)}</p>
+        <div class="buttons">
+          <button class="btn go" data-answer disabled={busy} onclick={() => void confirmUpdateHook()}>
+            {busy ? "Updating…" : "Update"}
+          </button>
+          <button class="btn" data-answer disabled={busy} bind:this={cancelBtn} onclick={() => void cancelConfirm()}>Cancel</button>
+        </div>
+      {:else if confirming === "setup"}
         <p class="body strong">{CONFIRM_TEXT}</p>
         <div class="buttons">
           <button class="btn go" data-answer disabled={busy} onclick={() => void confirmSetUp()}>
@@ -187,6 +225,12 @@
         {#if pythonWarning(view)}
           <p class="banner warning">{pythonWarning(view)}</p>
         {/if}
+        {#if hookLine(view)}
+          <p class="body muted" data-hook-line>{hookLine(view)}</p>
+        {/if}
+        {#if hookUpdateBlocked(view, readOnly)}
+          <p class="body muted">{hookUpdateBlocked(view, readOnly)}</p>
+        {/if}
         {#if view.status === "not-set-up" && readOnly}
           <p class="body muted">Read-only mode is on. Turn it off to set up capture.</p>
         {/if}
@@ -199,10 +243,13 @@
         {#if error}
           <p class="banner error" role="alert">{error}</p>
         {/if}
-        {#if canSetUp(view, readOnly) || canRecheck(view)}
+        {#if canSetUp(view, readOnly) || canUpdateHook(view, readOnly) || canRecheck(view)}
           <div class="buttons">
             {#if canSetUp(view, readOnly)}
-              <button class="btn go" data-setup disabled={busy} onclick={() => void askSetUp()}>Set up…</button>
+              <button class="btn go" data-setup disabled={busy} onclick={() => void ask("setup")}>Set up…</button>
+            {/if}
+            {#if canUpdateHook(view, readOnly)}
+              <button class="btn" data-update-hook disabled={busy} onclick={() => void ask("hook")}>Update hook…</button>
             {/if}
             {#if canRecheck(view)}
               <button class="btn" disabled={busy} onclick={() => void checkAgain()}>Check again</button>

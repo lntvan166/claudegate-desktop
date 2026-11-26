@@ -4,6 +4,7 @@ import type {
   Api,
   CaptureView,
   ChangedPayload,
+  HookView,
   DecideAction,
   DecideReport,
   DecideTarget,
@@ -682,7 +683,15 @@ export const mockApi: Api = {
     if (config.readOnly) throw "Read-only mode is on. Turn it off in Settings to set up capture.";
     if (capture.status !== "not-set-up") throw "Capture is already set up; nothing was changed.";
     if (!capture.setupSupported) throw "Setting up capture is not supported on this platform yet.";
-    capture = { status: "app", version: "v1.16.1", note: null, pythonMissing: false, takenOver: false, setupSupported: true };
+    capture = {
+      status: "app",
+      version: MOCK_BUNDLED,
+      note: null,
+      pythonMissing: false,
+      takenOver: false,
+      setupSupported: true,
+      hook: { state: "upToDate", installed: null, bundled: MOCK_BUNDLED },
+    };
     return {
       settings: "/home/dev/.claude/settings.json",
       backup: "/home/dev/.claude/settings.json.claudegate-2026-11-18T10-20-30.123Z.bak",
@@ -690,6 +699,22 @@ export const mockApi: Api = {
       version: "v1.16.1",
       note: new URLSearchParams(location.search).get("captureNote"),
       adopted: false,
+      capture: { ...capture },
+    };
+  },
+  updateCaptureHook: async () => {
+    await delay(null);
+    if (config.readOnly) throw "ClaudeGate Desktop is in read-only mode. Turn it off to update the hook.";
+    const from = capture.hook;
+    if (!from || (capture.status !== "vscode" && capture.status !== "app"))
+      throw "Capture is not set up (no ClaudeGate hook in ~/.claude/settings.json), so hook.py was left alone.";
+    if (from.state === "upToDate") throw "hook.py is already the bundled version; nothing was changed.";
+    capture = { ...capture, hook: { state: "upToDate", installed: null, bundled: MOCK_BUNDLED } };
+    return {
+      hook: "/home/dev/.claudegate/hook.py",
+      backup: from.state === "missing" ? null : "/home/dev/.claudegate-desktop/backups/hook/hook-20261126T101530.123Z.py",
+      from,
+      to: MOCK_BUNDLED,
       capture: { ...capture },
     };
   },
@@ -713,9 +738,19 @@ export const mockApi: Api = {
 
 /**
  * The capture state the preview starts in: `?capture=vscode|app|not-set-up|settings-unreadable|python-missing`,
- * plus `&capturePython=missing` (the warning next to a capturing state), `&captureTakenOver=1`, and
- * `&unsupported` (core says setup isn't supported on this platform).
+ * plus `&capturePython=missing` (the warning next to a capturing state), `&captureTakenOver=1`,
+ * `&unsupported` (core says setup isn't supported on this platform), and
+ * `&captureHook=upToDate|older|different|missing`. A capturing preview starts with an outdated hook
+ * (the extension's unstamped copy under VS Code, an older stamp under this app), so Update hook… shows.
  */
+const MOCK_BUNDLED = "v1.17.0";
+function mockHook(status: CaptureView["status"], q: URLSearchParams): HookView | null {
+  if (status !== "vscode" && status !== "app") return null;
+  const want = q.get("captureHook") ?? (status === "vscode" ? "different" : "older");
+  const state = (["upToDate", "older", "different", "missing"].includes(want) ? want : "different") as HookView["state"];
+  const installed = state === "older" ? "v1.16.1" : null;
+  return { state, installed, bundled: MOCK_BUNDLED };
+}
 let captureFails = typeof location !== "undefined" && new URLSearchParams(location.search).get("capture") === "fail";
 let capture: CaptureView = (() => {
   const q = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
@@ -728,6 +763,7 @@ let capture: CaptureView = (() => {
     pythonMissing: (status === "vscode" || status === "app") && q.get("capturePython") === "missing",
     takenOver: status === "vscode" && q.get("captureTakenOver") === "1",
     setupSupported: !q.has("unsupported"),
+    hook: mockHook(status, q),
   };
 })();
 

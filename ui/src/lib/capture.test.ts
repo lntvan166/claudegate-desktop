@@ -10,7 +10,15 @@ import {
   pythonWarning,
   setupResult,
   setupUnsupported,
+  canUpdateHook,
+  hookLine,
+  hookOutdated,
+  hookUpdateBlocked,
+  hookUpdateResult,
+  updateHookConfirm,
   type CaptureView,
+  type HookReplacedView,
+  type HookView,
   type InstallView,
 } from "./capture";
 
@@ -21,6 +29,7 @@ const v = (status: CaptureView["status"], extra: Partial<CaptureView> = {}): Cap
   pythonMissing: false,
   takenOver: false,
   setupSupported: true,
+  hook: null,
   ...extra,
 });
 
@@ -187,5 +196,76 @@ describe("setupResult", () => {
   it("is a warning when the status read afterwards is not capturing", () => {
     const r = setupResult({ ...ok, capture: v("not-set-up") });
     expect(r.tone).toBe("warning");
+  });
+});
+
+const hk = (state: HookView["state"], installed: string | null = null): HookView => ({ state, installed, bundled: "v1.17.0" });
+
+describe("the hook line and Update hook", () => {
+  it("says which hook is installed and which this app has, for each state", () => {
+    expect(hookLine(v("vscode", { hook: hk("different") }))).toBe("Hook: VS Code extension's version · this app has v1.17.0");
+    expect(hookLine(v("vscode", { hook: hk("older", "v1.16.1") }))).toBe("Hook: v1.16.1 · this app has v1.17.0");
+    expect(hookLine(v("app", { hook: hk("different", "v2.0.0") }))).toBe("Hook: v2.0.0 · this app has v1.17.0");
+    expect(hookLine(v("vscode", { hook: hk("missing") }))).toBe("Hook: hook.py is missing · this app has v1.17.0");
+    expect(hookLine(v("app", { hook: hk("upToDate") }))).toBe("Hook: v1.17.0, the version bundled in this app");
+  });
+  it("has no hook line when nothing is registered", () => {
+    expect(hookLine(null)).toBeNull();
+    expect(hookLine(v("vscode"))).toBeNull();
+    for (const s of ["not-set-up", "settings-unreadable", "python-missing"] as const) {
+      expect(hookLine(v(s, { hook: hk("different") }))).toBeNull();
+    }
+  });
+  it("offers Update hook… for every state but upToDate", () => {
+    for (const st of ["older", "different", "missing"] as const) {
+      expect(canUpdateHook(v("vscode", { hook: hk(st, st === "older" ? "v1.16.1" : null) }), false)).toBe(true);
+      expect(canUpdateHook(v("app", { hook: hk(st) }), false)).toBe(true);
+      expect(hookOutdated(v("vscode", { hook: hk(st) }))).toBe(true);
+    }
+    expect(canUpdateHook(v("vscode", { hook: hk("upToDate") }), false)).toBe(false);
+    expect(canUpdateHook(v("vscode"), false)).toBe(false);
+    expect(canUpdateHook(v("not-set-up", { hook: hk("different") }), false)).toBe(false);
+    expect(canUpdateHook(null, false)).toBe(false);
+  });
+  it("hides the button in read-only mode and says why", () => {
+    const out = v("vscode", { hook: hk("different") });
+    expect(canUpdateHook(out, true)).toBe(false);
+    expect(hookUpdateBlocked(out, true)).toBe("Read-only mode is on. Turn it off to update the hook.");
+    expect(hookUpdateBlocked(out, false)).toBeNull();
+    expect(hookUpdateBlocked(v("vscode", { hook: hk("upToDate") }), true)).toBeNull();
+  });
+  it("hides the button where core can't write", () => {
+    expect(canUpdateHook(v("vscode", { hook: hk("different"), setupSupported: false }), false)).toBe(false);
+  });
+  it("confirms with the brief's copy, naming the bundled version", () => {
+    expect(updateHookConfirm(hk("different"))).toBe(
+      "Replace ~/.claudegate/hook.py with the version bundled in this app (v1.17.0)? hook.sh and ~/.claude/settings.json are not changed. The current file is backed up.",
+    );
+    expect(updateHookConfirm(hk("missing"))).toContain("There is no current file to back up.");
+  });
+  it("reports the result with the backup path", () => {
+    const r = (backup: string | null, after: HookView["state"]): HookReplacedView => ({
+      hook: "/h/.claudegate/hook.py",
+      backup,
+      from: hk("different"),
+      to: "v1.17.0",
+      capture: v("vscode", { hook: hk(after) }),
+    });
+    expect(hookUpdateResult(r("/h/.claudegate-desktop/backups/hook/hook-x.py", "upToDate"))).toEqual({
+      tone: "success",
+      text: "hook.py is now v1.17.0. The previous file is in /h/.claudegate-desktop/backups/hook/hook-x.py.",
+    });
+    expect(hookUpdateResult(r(null, "upToDate")).text).toBe("hook.py is now v1.17.0. There was no previous file.");
+    const w = hookUpdateResult(r("/b.py", "different"));
+    expect(w.tone).toBe("warning");
+    expect(w.text).toContain("VS Code extension's version");
+    expect(w.text).toContain("/b.py");
+  });
+});
+
+describe("detail with an outdated hook", () => {
+  it("does not claim the extension keeps an outdated hook up to date", () => {
+    expect(detail(v("vscode", { hook: hk("different") }))).not.toContain("keeps it up to date");
+    expect(detail(v("vscode", { hook: hk("upToDate") }))).toContain("The extension keeps it up to date.");
   });
 });

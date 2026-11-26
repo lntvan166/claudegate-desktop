@@ -8,12 +8,12 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { LaunchTarget } from "./launch";
 import type { DecideAction, DecideReport, DecideTarget, RejectOutcome } from "./decide";
-import type { CaptureView, InstallView } from "./capture";
+import type { CaptureView, HookReplacedView, HookView, InstallView } from "./capture";
 import type { EditorConfig } from "./editors";
 import type { SettingKey, SettingsView } from "./settings";
 import type { UpdateView } from "./update";
 
-export type { CaptureView, InstallView, UpdateView };
+export type { CaptureView, HookReplacedView, HookView, InstallView, UpdateView };
 export type { DecideAction, DecideReport, DecideTarget, EditorConfig, SettingKey, SettingsView };
 
 export type ProjectSummary = {
@@ -172,6 +172,8 @@ export interface Api {
    * for the user; blocked in read-only mode.
    */
   setUpCapture(): Promise<InstallView>;
+  /** Replaces ~/.claudegate/hook.py with the bundled hook, after a backup (after the UI's confirmation). */
+  updateCaptureHook(): Promise<HookReplacedView>;
   /** A newer release on GitHub, or null. Read only. */
   checkUpdate(): Promise<UpdateView | null>;
   /** Download, verify, install and restart (macOS, AppImage only). */
@@ -205,6 +207,7 @@ const tauriApi: Api = {
   pickFolder: () => invoke<string | null>("pick_folder"),
   captureStatus: (recheck) => invoke<CaptureView>("capture_status", { recheck }),
   setUpCapture: () => invoke<InstallView>("set_up_capture"),
+  updateCaptureHook: () => invoke<HookReplacedView>("update_capture_hook"),
   checkUpdate: () => invoke<UpdateView | null>("check_update"),
   installUpdate: () => invoke<void>("install_update"),
 };
@@ -259,5 +262,6 @@ export const pickFolder = async () => (await api()).pickFolder();
 export const projectInVsCode = async (root: string) => (await api()).projectInVsCode(root);
 export const captureStatus = async (recheck = false) => (await api()).captureStatus(recheck);
 export const setUpCapture = async () => (await api()).setUpCapture();
+export const updateCaptureHook = async () => (await api()).updateCaptureHook();
 export const checkUpdate = async () => (await api()).checkUpdate();
 export const installUpdate = async () => (await api()).installUpdate();
