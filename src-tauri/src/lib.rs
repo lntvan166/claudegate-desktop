@@ -47,6 +47,8 @@ pub fn run() {
             launch::launch_path,
             commands::list_projects,
             commands::get_project,
+            commands::get_audit,
+            commands::dismiss_audit,
             commands::get_diff,
             commands::decide,
             commands::get_settings,

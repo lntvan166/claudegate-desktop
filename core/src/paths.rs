@@ -11,8 +11,7 @@ pub fn claudegate_home() -> PathBuf {
     dirs::home_dir().unwrap_or_default().join(".claudegate")
 }
 
-/// `<home>/sessions/<md5(resolve_root(root))>.json`, the same name the extension and hook.py use.
-pub fn session_file_for(home: &Path, root: &Path) -> PathBuf {
+fn root_hash(root: &Path) -> String {
     let resolved = resolve_root(root);
     #[allow(unused_mut)]
     let mut key = resolved.to_string_lossy().into_owned();
@@ -20,8 +19,18 @@ pub fn session_file_for(home: &Path, root: &Path) -> PathBuf {
     {
         key = key.to_lowercase();
     }
-    let digest = Md5::digest(key.as_bytes());
-    home.join("sessions").join(format!("{:x}.json", digest))
+    format!("{:x}", Md5::digest(key.as_bytes()))
+}
+
+/// `<home>/sessions/<md5(resolve_root(root))>.json`, the same name the extension and hook.py use.
+pub fn session_file_for(home: &Path, root: &Path) -> PathBuf {
+    home.join("sessions").join(format!("{}.json", root_hash(root)))
+}
+
+/// `<home>/audit/<md5(resolve_root(root))>.jsonl`, the capture audit's file for `root` (audit.py
+/// hashes the root the same way as the session files).
+pub fn audit_file_for(home: &Path, root: &Path) -> PathBuf {
+    home.join("audit").join(format!("{}.jsonl", root_hash(root)))
 }
 
 /// Lexical absolute + normalised path, no symlink resolution (mirrors Node `path.resolve`).

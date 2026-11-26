@@ -609,6 +609,40 @@ impl claudegate_core::projects::AppProjects for ConfigProjects<'_> {
     }
 }
 
+/// `auditDismissed`: path -> when the user dismissed it (epoch ms). A miss is hidden while its
+/// own time is not after that. Lenient and never creates the file.
+pub fn read_audit_dismissed(path: &Path) -> std::collections::HashMap<String, i64> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| {
+            v.get("auditDismissed")?.as_object().map(|m| {
+                m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_i64()?))).collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Records `paths` as dismissed at `now_ms` (`auditDismissed[path]`), keeping every other key.
+/// Add-only except that entries older than `keep_ms` are pruned on the way, so the map cannot grow
+/// without bound. Dismissing hides an audit item in this app only; the audit files are never touched.
+pub fn dismiss_audit_paths(path: &Path, paths: &[String], now_ms: i64, keep_ms: i64, guard: Option<&Path>) -> Result<(), String> {
+    let paths: Vec<&str> = paths.iter().map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+    update_config(path, guard, |obj, _| {
+        let entry = obj.entry("auditDismissed").or_insert_with(|| serde_json::json!({}));
+        let map = entry.as_object_mut().ok_or("The auditDismissed entry in config.json is not an object.")?;
+        map.retain(|_, v| v.as_i64().is_some_and(|t| t >= now_ms - keep_ms));
+        for p in paths {
+            map.insert(p.to_string(), serde_json::json!(now_ms));
+        }
+        Ok(())
+    })
+    .map(|_| ())
+}
+
 /// The app's overrides as the core resolver reads them, plus each project's `extraHide`. Lenient:
 /// an unreadable file, or an entry of the wrong shape, reads as no override.
 pub fn read_app_settings(path: &Path) -> (claudegate_core::settings::AppSettings, std::collections::HashMap<String, Vec<String>>) {
