@@ -1,7 +1,10 @@
-// `claudegate [PATH]`: which project owns the path the app was launched with.
+// `claudegate [PATH]` and `claudegate log [PATH]`: which project owns the path the app was launched with.
+
+/** What the launch asks for: the review of the path's project, or the Git log with its repos ticked. */
+export type LaunchKind = "review" | "log";
 
 /** The path from Rust (src-tauri/src/launch.rs); `isDir` because the UI cannot stat. */
-export type LaunchTarget = { path: string; exists: boolean; isDir: boolean; canonical: string | null };
+export type LaunchTarget = { kind: LaunchKind; path: string; exists: boolean; isDir: boolean; canonical: string | null };
 
 /** A project and every root it shows: its own and its worktrees'. */
 export type Owner = { root: string; scopes: string[] };
@@ -56,4 +59,28 @@ export function launchNotice(t: LaunchTarget): string {
 export function addFolderFor(t: LaunchTarget): string {
   const p = norm(t.path);
   return t.isDir ? p : p.slice(0, Math.max(p.lastIndexOf("/"), 0)) || "/";
+}
+
+/**
+ * The repositories a `claudegate log PATH` launch ticks: those with a checkout (main or worktree)
+ * at or under the path, plus the deepest repository whose checkout contains the path (the path is
+ * inside it). Both the path and its symlink-free form are tried. Ids, in the list's order.
+ */
+export function reposForLaunch(
+  repos: { id: string; checkouts: { path: string }[] }[],
+  path: string,
+  canonical?: string | null,
+): string[] {
+  const targets = [norm(path), ...(canonical ? [norm(canonical)] : [])];
+  const under = new Set<string>();
+  let deepest: { id: string; len: number } | null = null;
+  for (const r of repos) {
+    for (const c of r.checkouts) {
+      const cp = norm(c.path);
+      if (targets.some((t) => within(t, cp))) under.add(r.id);
+      else if (targets.some((t) => within(cp, t)) && (!deepest || cp.length > deepest.len)) deepest = { id: r.id, len: cp.length };
+    }
+  }
+  if (deepest) under.add(deepest.id);
+  return repos.filter((r) => under.has(r.id)).map((r) => r.id);
 }

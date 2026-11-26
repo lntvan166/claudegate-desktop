@@ -829,10 +829,10 @@
   let launchAsk = $state<(LaunchTarget & { known?: { root: string; name: string } }) | null>(null);
 
   /** Selects the project owning `t.path` (and the pending row, for a file); otherwise asks. */
-  async function openLaunchTarget(t: LaunchTarget) {
+  async function openLaunchTarget(t: LaunchTarget, refresh = false) {
     launchAsk = null;
     settingsOpen = false;
-    setView("review");
+    setView(t.kind === "log" ? "gitlog" : "review");
     // A worktree scope can live anywhere, even inside another project's root; only a project's
     // view lists them, so roots and scopes are matched together, longest prefix wins.
     const views = await Promise.all(projects.map((p) => getProject(p.root).catch(() => null)));
@@ -845,6 +845,12 @@
     if (own.kind !== "workspace") {
       const p = own.kind === "known" ? projects.find((x) => x.root === own.root) : undefined;
       launchAsk = p ? { ...t, known: { root: p.root, name: p.name } } : t;
+      return;
+    }
+    if (t.kind === "log") {
+      // The view mounts lazily; wait for it, then tick the path's repos for this launch only.
+      await tick();
+      if (!(await gitlogView?.applyLaunch(t, refresh))) show({ text: `No git repositories under ${t.path} in your workspace.`, tone: "error" });
       return;
     }
     const owner = own.root;
@@ -865,11 +871,12 @@
     if (t.known) {
       const err = await addToWorkspaceAt(t.known.root);
       if (err) show({ text: `Couldn't add ${t.known.name} to your workspace: ${err}`, tone: "error" });
-      else await openLaunchTarget(t);
+      else await openLaunchTarget(t, true);
       return;
     }
     const err = await addProjectAt(addFolderFor(t));
     if (err) show({ text: `Couldn't add the project: ${err}`, tone: "error" });
+    else if (t.kind === "log") await openLaunchTarget(t, true);
   }
 
   async function changeReadOnly(on: boolean) {

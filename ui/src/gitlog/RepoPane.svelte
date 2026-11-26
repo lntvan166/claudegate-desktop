@@ -17,12 +17,14 @@
   } from "../lib/api";
   import {
     SCAN_DEPTH_MAX,
+    afterLaunchWrite,
     aheadBehind,
     applyProfile,
     colorVar,
     fuzzyFilter,
     hasProfile,
     isTicked,
+    launchToStore,
     profileNames,
     rangeOf,
     repoPath,
@@ -30,6 +32,7 @@
     worktreesOf,
     type GitLogConfig,
     type RepoView,
+    type TickEffect,
   } from "./repos";
 
   // The Repositories pane: which repos the merged log shows. Every change goes to config.json
@@ -44,6 +47,8 @@
     onrefresh,
     onnotice,
     onslash,
+    launchTicks = null,
+    onlaunchdone,
   }: {
     /** null while the first discovery runs. */
     repos: RepoView[] | null;
@@ -56,6 +61,15 @@
     onnotice: (text: string) => void;
     /** `/` in the empty filter: the Git log search takes it. */
     onslash?: () => void;
+    /**
+     * The ticks of a `claudegate log PATH` launch, in memory only (`cfg.ticked` already shows
+     * them). A change that edits ticks first writes them as the explicit stored list, so the
+     * change applies to what the user sees; one that replaces ticks drops them; one that
+     * touches neither (scan depth, patterns, profile names) keeps them.
+     */
+    launchTicks?: string[] | null;
+    /** The launch ticks are now stored, or replaced: the override is over. */
+    onlaunchdone?: () => void;
   } = $props();
 
   let query = $state("");
@@ -104,11 +118,16 @@
   });
   const profileLabel = $derived(cfg.ticked === null ? "All repositories" : (activeProfile ?? "Custom selection"));
 
-  async function run(what: string, f: () => Promise<GitLogConfig>): Promise<boolean> {
+  async function run(what: string, f: () => Promise<GitLogConfig>, effect: TickEffect = "edit"): Promise<boolean> {
     if (busy) return false;
     busy = true;
     try {
-      cfg = await f();
+      const launch = launchTicks;
+      const store = launchToStore(launch, effect);
+      if (store) await gitlogShowOnly(store);
+      const r = afterLaunchWrite(launch, effect, await f());
+      cfg = r.cfg;
+      if (r.over) onlaunchdone?.();
       return true;
     } catch (e) {
       onnotice(`Couldn't ${what}: ${e}`);
@@ -133,13 +152,13 @@
   }
 
   async function showOnly(ids: string[]) {
-    if (await run("show only that", () => gitlogShowOnly(ids))) onnotice(`Showing only ${many(ids)}`);
+    if (await run("show only that", () => gitlogShowOnly(ids), "replace")) onnotice(`Showing only ${many(ids)}`);
   }
   async function hide(ids: string[]) {
     if (await run("hide it", () => gitlogUntick(ids))) onnotice(`${many(ids)} hidden`);
   }
   async function showAll() {
-    if (await run("show every repository", () => gitlogShowAll())) onnotice("Showing every repository");
+    if (await run("show every repository", () => gitlogShowAll(), "replace")) onnotice("Showing every repository");
   }
 
   function select(id: string, e: MouseEvent | KeyboardEvent) {
@@ -290,7 +309,7 @@
 
   async function apply(name: string) {
     const { missing } = applyProfile(cfg, cfg.profiles[name] ?? [], all);
-    if (!(await run("apply the profile", () => gitlogProfileApply(name)))) return;
+    if (!(await run("apply the profile", () => gitlogProfileApply(name), "replace"))) return;
     profilesOpen = false;
     onnotice(
       missing > 0
@@ -316,14 +335,14 @@
       renaming = null;
       return;
     }
-    if (await run("rename the profile", () => gitlogProfileRename(r.from, to))) {
+    if (await run("rename the profile", () => gitlogProfileRename(r.from, to), "keep")) {
       renaming = null;
       onnotice(`${r.from} renamed to ${to}`);
     }
   }
   async function remove(name: string) {
     deleting = null;
-    if (await run("delete the profile", () => gitlogProfileDelete(name))) onnotice(`${name} deleted`);
+    if (await run("delete the profile", () => gitlogProfileDelete(name), "keep")) onnotice(`${name} deleted`);
   }
   function popKey(e: KeyboardEvent) {
     if (e.key !== "Escape") return;
@@ -343,18 +362,18 @@
   // ---- discovery ----
   async function setDepth(d: number) {
     if (d < 0 || d > SCAN_DEPTH_MAX) return;
-    if (await run("change the scan depth", () => gitlogScanDepth(d))) onrefresh();
+    if (await run("change the scan depth", () => gitlogScanDepth(d), "keep")) onrefresh();
   }
   async function addPattern() {
     const p = newPattern.trim();
     if (!p) return;
-    if (await run("exclude it", () => gitlogExclude(p))) {
+    if (await run("exclude it", () => gitlogExclude(p), "keep")) {
       newPattern = "";
       onrefresh();
     }
   }
   async function removePattern(p: string) {
-    if (await run("include it again", () => gitlogInclude(p))) onrefresh();
+    if (await run("include it again", () => gitlogInclude(p), "keep")) onrefresh();
   }
 
   const worktreeTitle = (r: RepoView) =>

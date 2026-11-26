@@ -183,3 +183,21 @@ export function paneMax(w: GitLogPanes, pane: keyof GitLogPanes, total: number):
 export function hasProfile(profiles: Record<string, string[]>, name: string): boolean {
   return Object.hasOwn(profiles, name.trim());
 }
+
+/** What a Repos pane write does to the ticks of a `claudegate log PATH` launch (held in memory only). */
+export type TickEffect = "edit" | "replace" | "keep";
+
+/** Before the write: the launch ticks to store as the explicit list first, or null when nothing is stored. */
+export function launchToStore(launch: string[] | null, effect: TickEffect): string[] | null {
+  return launch && effect === "edit" ? launch : null;
+}
+
+/** After the write: the config to show, and whether the launch override is over. */
+export function afterLaunchWrite<C extends { ticked: string[] | null }>(
+  launch: string[] | null,
+  effect: TickEffect,
+  next: C,
+): { cfg: C; over: boolean } {
+  if (launch && effect === "keep") return { cfg: { ...next, ticked: launch }, over: false };
+  return { cfg: next, over: launch !== null && effect !== "keep" };
+}

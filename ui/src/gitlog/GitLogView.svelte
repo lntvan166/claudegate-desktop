@@ -34,6 +34,7 @@
   import Filters from "./Filters.svelte";
   import LogList from "./LogList.svelte";
   import RepoPane from "./RepoPane.svelte";
+  import { reposForLaunch } from "../lib/launch";
   import { DEFAULT_FILTER, debounce, parseFilter, rowKey, type FilterState, type RowView } from "./log";
   import {
     DEFAULT_GITLOG_CONFIG,
@@ -76,6 +77,22 @@
     else void repoPane?.focusStart();
   }
 
+  /**
+   * `claudegate log PATH`: discovers again (when `refresh`, after the workspace changed), then ticks
+   * the repositories under the path, for this launch only. Resolves false when none of them is
+   * discovered, so the caller can say the path isn't in the workspace.
+   */
+  export async function applyLaunch(t: { path: string; canonical: string | null }, refresh = false): Promise<boolean> {
+    await load(refresh);
+    const ids = reposForLaunch(repos ?? [], t.path, t.canonical);
+    if (ids.length === 0) return false;
+    launchTicks = ids;
+    cfg = { ...cfg, ticked: ids };
+    // Filters and selection from before the launch would point at repos no longer shown.
+    selected = null;
+    return true;
+  }
+
   const COLLAPSED_KEY = "claudegate.gitlog.reposCollapsed";
 
   let repos = $state<RepoView[] | null>(null);
@@ -86,6 +103,12 @@
   let collapsed = $state(readCollapsed());
   let innerWidth = $state(typeof window === "undefined" ? 1200 : window.innerWidth);
   const panes = $derived(fitPanes(preferred, innerWidth, collapsed));
+  /**
+   * The ticks of a `claudegate log PATH` launch, for this launch only: `cfg.ticked` shows them,
+   * nothing is written to config.json. The Repos pane writes them out (as the explicit `ticked`
+   * list) the first time the user edits ticks, or drops them when the user replaces ticks.
+   */
+  let launchTicks = $state<string[] | null>(null);
   const shown = $derived((repos ?? []).filter((r) => isTicked(cfg.ticked, r.id)));
   const queryRepos = $derived(shown.map((r) => r.id));
 
@@ -362,6 +385,7 @@
   async function loadConfig() {
     try {
       cfg = await gitlogConfig();
+      if (launchTicks) cfg = { ...cfg, ticked: launchTicks };
       preferred = panesFrom(cfg.panes);
       filter = parseFilter(cfg.lastFilter);
       filtersRead = true;
@@ -411,6 +435,8 @@
     ontoggle={toggleCollapsed}
     onrefresh={() => void load(true)}
     {onnotice}
+    {launchTicks}
+    onlaunchdone={() => (launchTicks = null)}
     onslash={() => filters?.focusSearch()}
   />
 

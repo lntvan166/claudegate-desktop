@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   PALETTE_LEN,
+  afterLaunchWrite,
+  launchToStore,
   aheadBehind,
   applyProfile,
   colorVar,
@@ -125,5 +127,28 @@ describe("profile names", () => {
     expect(hasProfile(p, "checkout")).toBe(false);
     expect(hasProfile(p, "constructor")).toBe(false);
     expect(hasProfile(p, "toString")).toBe(false);
+  });
+});
+
+describe("launch ticks stay in memory until the user edits ticks", () => {
+  const launch = ["/work/acme/acme-api/.git"];
+  const stored = { ticked: null as string[] | null, scanDepth: 3 };
+  it("nothing is stored until a tick edit; then the launch ticks are written first", () => {
+    expect(launchToStore(launch, "keep")).toBeNull();
+    expect(launchToStore(launch, "replace")).toBeNull();
+    expect(launchToStore(launch, "edit")).toEqual(launch);
+    expect(launchToStore(null, "edit")).toBeNull();
+  });
+  it("a write that touches no ticks keeps the override over the stored (all-ticked) list", () => {
+    expect(afterLaunchWrite(launch, "keep", stored)).toEqual({ cfg: { ticked: launch, scanDepth: 3 }, over: false });
+  });
+  it("a write that replaces or edits ticks ends the override and shows what the backend answered", () => {
+    const next = { ticked: ["/x/.git"], scanDepth: 3 };
+    expect(afterLaunchWrite(launch, "replace", next)).toEqual({ cfg: next, over: true });
+    expect(afterLaunchWrite(launch, "edit", next)).toEqual({ cfg: next, over: true });
+  });
+  it("without a launch override nothing changes", () => {
+    expect(afterLaunchWrite(null, "keep", stored)).toEqual({ cfg: stored, over: false });
+    expect(afterLaunchWrite(null, "edit", stored)).toEqual({ cfg: stored, over: false });
   });
 });

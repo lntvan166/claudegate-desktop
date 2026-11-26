@@ -1,13 +1,27 @@
 #!/bin/sh
-# claudegate [PATH]: open ClaudeGate Desktop on the project that owns PATH (default: the current directory).
+# claudegate [PATH]      open ClaudeGate Desktop on the project that owns PATH (default: the current directory).
+# claudegate log [PATH]  open the Git log view with the repositories under PATH ticked (default: the current directory).
+# `--` ends option parsing, so a folder literally named log is `claudegate ./log` or `claudegate -- log`.
+kind=
+if [ "$1" = log ]; then
+  kind=log
+  shift
+fi
+[ "$1" = -- ] && shift
 target=${1:-$PWD}
 case $target in
   /*) ;;
   *) target=$PWD/$target ;;
 esac
-if [ ! -x /usr/bin/claudegate-desktop ]; then
-  echo "claudegate: /usr/bin/claudegate-desktop is not installed or not executable" >&2
+bin=${CLAUDEGATE_DESKTOP_BIN:-/usr/bin/claudegate-desktop}
+if [ ! -x "$bin" ]; then
+  echo "claudegate: $bin is not installed or not executable" >&2
   exit 127
 fi
-# Detached, so the terminal returns at once; output goes nowhere.
-setsid nohup /usr/bin/claudegate-desktop "$target" >/dev/null 2>&1 </dev/null &
+# Detached, so the terminal returns at once; output goes nowhere. The path is always absolute, so
+# the bare word `log` only ever reaches the app as the subcommand.
+if [ -n "$kind" ]; then
+  setsid nohup "$bin" log -- "$target" >/dev/null 2>&1 </dev/null &
+else
+  setsid nohup "$bin" "$target" >/dev/null 2>&1 </dev/null &
+fi
