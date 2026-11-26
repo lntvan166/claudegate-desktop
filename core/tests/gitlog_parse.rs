@@ -88,3 +88,58 @@ fn web_url_unknown_host_none() {
     }
     assert_eq!(web_url("git@github.com:a/b.git", "nothex"), None);
 }
+
+use claudegate_core::gitlog::unquote_c_style;
+
+#[test]
+fn unquotes_c_style() {
+    assert_eq!(unquote_c_style(r#""caf\303\251.rs""#), "café.rs");
+    assert_eq!(unquote_c_style(r#""a\tb\\c\"d.rs""#), "a\tb\\c\"d.rs");
+    assert_eq!(unquote_c_style("plain.rs"), "plain.rs");
+}
+
+#[test]
+fn quoted_paths_in_changes() {
+    let f = parse_changes("A\t\"caf\\303\\251.rs\"\nM\t\"a\\tb.rs\"\nM\t\"q\\\"x.rs\"\n", "1\t0\t\"caf\\303\\251.rs\"\n2\t0\t\"a\\tb.rs\"\n3\t0\t\"q\\\"x.rs\"\n");
+    assert_eq!(f[0].path, "café.rs");
+    assert_eq!(f[1].path, "a\tb.rs");
+    assert_eq!(f[2].path, "q\"x.rs");
+    assert_eq!((f[0].added, f[1].added, f[2].added), (Some(1), Some(2), Some(3)));
+}
+
+#[test]
+fn quoted_rename() {
+    let f = parse_changes("R100\t\"caf\\303\\251.rs\"\t\"d\\303\\251j\\303\\240.rs\"\n", "1\t1\t\"caf\\303\\251.rs\" => \"d\\303\\251j\\303\\240.rs\"\n");
+    assert_eq!(f[0].path, "déjà.rs");
+    assert_eq!(f[0].status, FileStatus::Renamed { from: "café.rs".into() });
+    assert_eq!(f[0].added, Some(1));
+    let g = parse_changes("R100\tsrc/\"x\"\tsrc/y\n", "");
+    assert_eq!(g.len(), 1);
+    let f = parse_changes("R090\ta/\"o\\303\\251\"/f.rs\ta/n/f.rs\n", "4\t4\ta/{\"o\\303\\251\" => n}/f.rs\n");
+    assert_eq!(f[0].path, "a/n/f.rs");
+    assert_eq!(f[0].added, Some(4));
+}
+
+#[test]
+fn brace_rename_empty_sides() {
+    let f = parse_changes("R1\tsrc/f.rs\tsrc/b/f.rs\nR1\tsrc/a/g.rs\tsrc/g.rs\n", "1\t0\tsrc/{ => b}/f.rs\n2\t0\tsrc/{a => }/g.rs\n");
+    assert_eq!(f[0].added, Some(1));
+    assert_eq!(f[1].added, Some(2));
+}
+
+#[test]
+fn log_without_trailing_rs_and_crlf() {
+    let full = rec(A, "1", "a", "e", "ok", "");
+    let cut = format!("{}{B}\0{}\0a\0e\0s\0", full, 2);
+    assert_eq!(parse_log(&cut).len(), 1);
+    let f = parse_changes("M\ta.rs\r\nA\tb.rs\r\n", "1\t2\ta.rs\r\n3\t4\tb.rs\r\n");
+    assert_eq!(f.len(), 2);
+    assert_eq!((f[1].path.as_str(), f[1].added, f[1].removed), ("b.rs", Some(3), Some(4)));
+}
+
+#[test]
+fn web_url_rejects_ftp_and_encoded_dots() {
+    assert_eq!(web_url("ftp://github.com/acme/acme-web.git", A), None);
+    assert_eq!(web_url("https://github.com/acme/%2e%2e/x", A), None);
+    assert_eq!(web_url("https://github.com/acme/a%2Fb", A), None);
+}

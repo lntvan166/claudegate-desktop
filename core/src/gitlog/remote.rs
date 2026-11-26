@@ -42,7 +42,7 @@ fn parse_remote(url: &str) -> Option<Remote> {
 pub fn web_url(remote: &str, sha: &str) -> Option<String> {
     static SEG: OnceLock<Regex> = OnceLock::new();
     static AZ: OnceLock<Regex> = OnceLock::new();
-    if !(sha.len() == 40 || sha.len() == 64) || !sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+    if !super::parse::is_sha(sha) {
         return None;
     }
     let r = parse_remote(remote)?;
@@ -58,7 +58,7 @@ pub fn web_url(remote: &str, sha: &str) -> Option<String> {
     };
     let segs: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
     let seg = re(&SEG, r"^[A-Za-z0-9._~%+-]+$");
-    if segs.is_empty() || segs.iter().any(|s| !seg.is_match(s) || *s == "." || *s == "..") {
+    if segs.is_empty() || segs.iter().any(|s| !seg.is_match(s) || *s == "." || *s == ".." || has_encoded_dot_or_slash(s)) {
         return None;
     }
     let path = segs.join("/");
@@ -82,4 +82,10 @@ pub fn web_url(remote: &str, sha: &str) -> Option<String> {
         return Some(format!("{base}/{path}/commit/{sha}"));
     }
     None
+}
+
+/// `%2e` / `%2f` (any case) smuggle a dot segment or a slash past the segment check.
+fn has_encoded_dot_or_slash(s: &str) -> bool {
+    let l = s.to_ascii_lowercase();
+    l.contains("%2e") || l.contains("%2f")
 }
