@@ -1475,6 +1475,184 @@ pub(crate) fn update_app_hook(
     Ok(HookUpdate::Updated { from, to })
 }
 
+// ---- "Update hook": replacing whichever hook.py is installed ----------------------------------
+
+//
+// The user asked for it (the chip's Update hook… button, after a confirmation). Unlike the startup
+// update, this replaces the extension's hook.py too: someone who no longer opens VS Code never
+// gets the extension's own hash-based sync. Every one of these must hold, or nothing is written:
+// - read-only mode is off, the platform is unix, the bundled hook is stamped;
+// - a ClaudeGate entry is registered in settings.json (`SetUpByExtension` or `SetUpByApp`);
+// - hook.py is a regular file (or absent: then it is created, never replacing anything), and not
+//   already the bundled hook;
+// - the backup `<desktop_home>/backups/hook/hook-<stamp>.py` (mode kept) was written and synced.
+// hook.py is then replaced atomically, its mode kept, comparing it with the bytes read right
+// before the rename; any change since refuses. hook.sh, the marker and settings.json are never
+// written. If the extension later rewrites hook.py, nothing here undoes that.
+
+pub(crate) fn replace_hook(
+    home: &Path,
+    desktop_home: &Path,
+    bundled_hook: &str,
+    read_only: bool,
+) -> Result<crate::capture::HookReplaced, crate::capture::HookReplaceError> {
+    use crate::capture::HookReplaceError as E;
+    if read_only {
+        return Err(E::ReadOnly);
+    }
+    if !cfg!(unix) {
+        return Err(E::Unsupported);
+    }
+    let to = crate::capture::bundled_hook_version(bundled_hook).ok_or(E::BundledHook)?;
+    replace_hook_unix(home, desktop_home, bundled_hook, to)
+}
+
+#[cfg(not(unix))]
+fn replace_hook_unix(_: &Path, _: &Path, _: &str, _: String) -> Result<crate::capture::HookReplaced, crate::capture::HookReplaceError> {
+    Err(crate::capture::HookReplaceError::Unsupported)
+}
+
+#[cfg(unix)]
+fn replace_hook_unix(
+    home: &Path,
+    desktop_home: &Path,
+    bundled_hook: &str,
+    to: String,
+) -> Result<crate::capture::HookReplaced, crate::capture::HookReplaceError> {
+    use crate::capture::{app_owns_hook, hook_version, HookReplaceError as E, HookReplaced, HookVersion};
+    let cg = home.join(".claudegate");
+    let (py, marker) = (cg.join(HOOK_PY_FILE), cg.join(MARKER_FILE));
+    if !home.is_absolute() || !desktop_home.is_absolute() || desktop_home.starts_with(&cg) {
+        return Err(E::Failed("the backup folder must be an absolute path outside ~/.claudegate".into()));
+    }
+    // What is there now: these bytes are what the write compares against right before the rename.
+    let installed: Option<Vec<u8>> = match fs::symlink_metadata(&py) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Ok(m) if m.file_type().is_file() => {
+            Some(fs::read(&py).map_err(|e| E::Failed(format!("could not read {}: {e}", py.display())))?)
+        }
+        Ok(_) => return Err(E::NotRegularFile),
+        Err(e) => return Err(E::Failed(format!("could not read {}: {e}", py.display()))),
+    };
+    let raw = match settings_target(home).and_then(fs::read) {
+        Ok(b) => Some(String::from_utf8_lossy(&b).into_owned()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(E::NotRegistered(CaptureStatus::SettingsUnreadable(e.to_string()))),
+    };
+    let ours = app_owns_hook(fs::symlink_metadata(&marker).is_ok(), installed.as_deref());
+    match capture_status(raw.as_deref(), ours, true) {
+        CaptureStatus::SetUpByApp { .. } | CaptureStatus::SetUpByExtension { .. } => {}
+        other => return Err(E::NotRegistered(other)),
+    }
+    let from = hook_version(installed.as_deref(), bundled_hook);
+    if from == HookVersion::UpToDate {
+        return Err(E::UpToDate);
+    }
+    guard_hook_file(&cg, &py).map_err(|e| E::Failed(e.to_string()))?;
+
+    let backup = match &installed {
+        None => None,
+        Some(bytes) => {
+            let mode = mode_of(&py).unwrap_or(0o644);
+            Some(
+                backup_hook(desktop_home, bytes, mode)
+                    .map_err(|e| E::Failed(format!("could not back up hook.py, so it was not changed: {e}")))?,
+            )
+        }
+    };
+    install_fault("before_hook_replace").map_err(|e| E::Failed(e.to_string()))?;
+
+    let changed = std::cell::Cell::new(false);
+    let res = match &installed {
+        Some(old) => {
+            let unchanged = || match (fs::symlink_metadata(&py), fs::read(&py)) {
+                (Ok(m), Ok(now)) if m.file_type().is_file() && &now == old => Ok(()),
+                _ => {
+                    changed.set(true);
+                    Err(io::Error::other("hook.py changed while it was being updated"))
+                }
+            };
+            atomic_write_checked(&py, bundled_hook.as_bytes(), true, unchanged)
+        }
+        None => {
+            if !cg.is_dir() {
+                return Err(E::Failed(format!("{} is not a folder", cg.display())));
+            }
+            create_file_exclusive(&py, bundled_hook.as_bytes(), None).inspect_err(|e| {
+                if e.kind() == io::ErrorKind::AlreadyExists {
+                    changed.set(true);
+                }
+            })
+        }
+    };
+    match res {
+        Ok(()) => {}
+        Err(_) if changed.get() => return Err(E::Changed),
+        Err(e) => return Err(E::Failed(format!("could not write {}: {e}", py.display()))),
+    }
+    // Prune only once the write succeeded: a failed update never costs an older copy.
+    prune_hook_backups(&desktop_home.join("backups").join("hook"));
+    Ok(HookReplaced { hook: py, backup, from, to })
+}
+
+/// `hook-<stamp>[-N].py`'s `(stamp, N)`.
+fn hook_backup_key(name: &str) -> Option<(String, u64)> {
+    stamp_key(name.strip_prefix("hook-")?.strip_suffix(".py")?)
+}
+
+/// Copy `bytes` (hook.py as read) to `<desktop_home>/backups/hook/hook-<stamp>[-N].py` with
+/// `mode`, never overwriting a backup, synced before it counts.
+#[cfg(unix)]
+fn backup_hook(desktop_home: &Path, bytes: &[u8], mode: u32) -> io::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = desktop_home.join("backups").join("hook");
+    fs::create_dir_all(&dir)?;
+    let stamp = backup_stamp(SystemTime::now());
+    let mut n = 0u64;
+    loop {
+        let name = if n == 0 { format!("hook-{stamp}.py") } else { format!("hook-{stamp}-{n}.py") };
+        let dest = dir.join(&name);
+        match OpenOptions::new().write(true).create_new(true).open(&dest) {
+            Ok(mut f) => {
+                let written = f
+                    .write_all(bytes)
+                    .and_then(|()| f.sync_all())
+                    .and_then(|()| fs::set_permissions(&dest, fs::Permissions::from_mode(mode)));
+                drop(f);
+                if let Err(e) = written {
+                    let _ = fs::remove_file(&dest);
+                    return Err(e);
+                }
+                return Ok(dest);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < 10_000 => n += 1,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Keep the newest `HOOK_BACKUPS_KEPT` hook backups. Best-effort; other names are never touched.
+fn prune_hook_backups(dir: &Path) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    let mut all: Vec<((String, u64), PathBuf)> = rd
+        .flatten()
+        .filter_map(|e| Some((hook_backup_key(&e.file_name().into_string().ok()?)?, e.path())))
+        .collect();
+    let keep = crate::capture::HOOK_BACKUPS_KEPT;
+    if all.len() <= keep {
+        return;
+    }
+    all.sort();
+    let excess = all.len() - keep;
+    for (_, p) in all.into_iter().take(excess) {
+        let _ = fs::remove_file(p);
+    }
+}
+
+#[path = "../tests/unit/replace_hook.rs"]
+#[cfg(test)]
+mod replace_hook_tests;
+
 #[path = "../tests/unit/install_capture.rs"]
 #[cfg(test)]
 mod install_capture_tests;

@@ -4,7 +4,7 @@
 use claudegate_core::capture::{bundled_hook_version, version_newer, CaptureStatus, HookUpdate, InstallError};
 use claudegate_desktop_lib::capture::{
     capture_view_for, install_error_text, pick_python3, python3_available_with, read_status, set_up_capture_with, status_key,
-    update_hook_with, CaptureView, BUNDLED_HOOK,
+    update_capture_hook_with, update_hook_with, CaptureView, HookView, BUNDLED_HOOK,
 };
 use claudegate_desktop_lib::config::{config_path_in, save_read_only};
 use std::fs;
@@ -76,7 +76,7 @@ fn status_keys_cover_every_variant() {
 fn not_set_up_when_settings_absent_or_without_entry() {
     let f = fx();
     let v = capture_view_for(&f.home, true);
-    assert_eq!(v, CaptureView { status: "not-set-up".into(), version: None, note: None, python_missing: false, taken_over: false, setup_supported: cfg!(unix) });
+    assert_eq!(v, CaptureView { status: "not-set-up".into(), version: None, note: None, python_missing: false, taken_over: false, setup_supported: cfg!(unix), hook: None });
     f.write_settings(r#"{"model":"x","hooks":{"PreToolUse":[]}}"#);
     assert_eq!(capture_view_for(&f.home, true).status, "not-set-up");
 }
@@ -101,7 +101,15 @@ fn app_with_trimmed_marker_version() {
     let v = capture_view_for(&f.home, true);
     assert_eq!(
         v,
-        CaptureView { status: "app".into(), version: Some("v1.2.3".into()), note: None, python_missing: false, taken_over: false, setup_supported: cfg!(unix) }
+        CaptureView {
+            status: "app".into(),
+            version: Some("v1.2.3".into()),
+            note: None,
+            python_missing: false,
+            taken_over: false,
+            setup_supported: cfg!(unix),
+            hook: Some(HookView { state: "upToDate".into(), installed: None, bundled: bundled() }),
+        }
     );
 }
 
@@ -497,4 +505,73 @@ fn the_view_says_whether_setup_is_supported_here() {
     assert_eq!(capture_view_for(&f.home, true).setup_supported, cfg!(unix));
     let json = serde_json::to_value(capture_view_for(&f.home, true)).unwrap();
     assert_eq!(json["setupSupported"], serde_json::Value::Bool(cfg!(unix)));
+}
+
+// ---- Update hook ------------------------------------------------------------------------------
+
+fn hook_state(f: &Fx) -> Option<HookView> {
+    capture_view_for(&f.home, true).hook
+}
+
+#[test]
+fn the_view_reports_the_hooks_version_state() {
+    let f = fx();
+    assert_eq!(hook_state(&f), None, "not set up: no hook state");
+    f.as_extension();
+    assert_eq!(hook_state(&f), Some(HookView { state: "different".into(), installed: None, bundled: bundled() }));
+    fs::write(f.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\nold\n").unwrap();
+    assert_eq!(hook_state(&f), Some(HookView { state: "older".into(), installed: Some("v1.0.0".into()), bundled: bundled() }));
+    fs::write(f.cg("hook.py"), BUNDLED_HOOK).unwrap();
+    assert_eq!(hook_state(&f).unwrap().state, "upToDate");
+    fs::remove_file(f.cg("hook.py")).unwrap();
+    assert_eq!(hook_state(&f).unwrap().state, "missing");
+    let json = serde_json::to_value(capture_view_for(&f.home, true)).unwrap();
+    assert_eq!(json["hook"]["state"], "missing");
+    assert_eq!(json["hook"]["bundled"], serde_json::Value::String(bundled()));
+}
+
+#[test]
+fn update_hook_replaces_the_extensions_hook_and_backs_it_up_beside_the_config() {
+    let f = fx();
+    f.as_extension();
+    fs::write(f.cg("hook.sh"), "#!/usr/bin/env bash\npython3 \"$HOME/.claudegate/hook.py\"\n").unwrap();
+    let settings = fs::read(f.settings()).unwrap();
+    let sh = fs::read(f.cg("hook.sh")).unwrap();
+    let r = update_capture_hook_with(&f.home, &f.cfg, true).unwrap();
+    assert_eq!(fs::read_to_string(f.cg("hook.py")).unwrap(), BUNDLED_HOOK);
+    let backup = PathBuf::from(r.backup.expect("backed up"));
+    assert_eq!(backup.parent().unwrap(), f.cfg.parent().unwrap().join("backups/hook"));
+    assert_eq!(fs::read_to_string(&backup).unwrap(), "# the extension's hook, unstamped\n");
+    assert_eq!(r.from, HookView { state: "different".into(), installed: None, bundled: bundled() });
+    assert_eq!(r.to, bundled());
+    assert_eq!(r.capture.status, "vscode", "no marker: still the extension's setup");
+    assert_eq!(r.capture.hook.unwrap().state, "upToDate");
+    assert_eq!(fs::read(f.settings()).unwrap(), settings);
+    assert_eq!(fs::read(f.cg("hook.sh")).unwrap(), sh);
+    assert!(!f.cg(".installed-by-desktop").exists(), "no marker written");
+    // Done once: a second press refuses rather than backing up again.
+    assert!(update_capture_hook_with(&f.home, &f.cfg, true).unwrap_err().contains("already"));
+}
+
+#[test]
+fn update_hook_is_blocked_by_read_only_and_an_unreadable_config() {
+    let f = fx();
+    f.as_extension();
+    save_read_only(&f.cfg, true, None).unwrap();
+    let e = update_capture_hook_with(&f.home, &f.cfg, true).unwrap_err();
+    assert!(e.contains("update the hook"), "{e}");
+    fs::write(&f.cfg, "{ not json").unwrap();
+    assert!(update_capture_hook_with(&f.home, &f.cfg, true).is_err());
+    assert_eq!(fs::read_to_string(f.cg("hook.py")).unwrap(), "# the extension's hook, unstamped\n");
+    assert!(!f.cfg.parent().unwrap().join("backups").exists());
+}
+
+#[test]
+fn update_hook_refuses_when_capture_is_not_set_up() {
+    let f = fx();
+    fs::create_dir_all(f.home.join(".claudegate")).unwrap();
+    fs::write(f.cg("hook.py"), "leftover\n").unwrap();
+    let e = update_capture_hook_with(&f.home, &f.cfg, true).unwrap_err();
+    assert!(e.contains("not set up"), "{e}");
+    assert_eq!(fs::read_to_string(f.cg("hook.py")).unwrap(), "leftover\n");
 }

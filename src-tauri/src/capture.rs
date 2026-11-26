@@ -8,8 +8,8 @@
 use crate::commands::{blocking, check_writable_for};
 use crate::editor::{fallback_dirs, is_executable};
 use claudegate_core::capture::{
-    app_owns_hook, capture_status as core_status, CaptureStatus, HookUpdate, InstallError, InstallReport, HOOK_PY_FILE,
-    MARKER_FILE,
+    app_owns_hook, bundled_hook_version, capture_status as core_status, hook_version, CaptureStatus, HookReplaced,
+    HookUpdate, HookVersion, InstallError, InstallReport, HOOK_PY_FILE, MARKER_FILE,
 };
 use std::ffi::OsStr;
 use serde::Serialize;
@@ -41,6 +41,43 @@ pub struct CaptureView {
     /// Whether this build can set capture up at all (core refuses with `Unsupported` off unix).
     /// The UI asks this rather than guessing from the platform string.
     pub setup_supported: bool,
+    /// For `vscode`/`app`: how the installed hook.py compares with the bundled one.
+    pub hook: Option<HookView>,
+}
+
+/// `HookVersion` for the UI. `state` is one of `upToDate`, `older`, `different`, `missing`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookView {
+    pub state: String,
+    /// The installed hook.py's `CLAUDEGATE_HOOK_VERSION` stamp; `None` for an unstamped file (the
+    /// extension's, version unknown), and for `upToDate`/`missing`.
+    pub installed: Option<String>,
+    /// The bundled hook's version, e.g. `v1.16.1`.
+    pub bundled: String,
+}
+
+pub fn hook_view_of(v: &HookVersion) -> HookView {
+    let (state, installed) = match v {
+        HookVersion::UpToDate => ("upToDate", None),
+        HookVersion::Older { installed } => ("older", Some(installed.clone())),
+        HookVersion::Different { installed } => ("different", installed.clone()),
+        HookVersion::Missing => ("missing", None),
+    };
+    HookView { state: state.to_owned(), installed, bundled: bundled_hook_version(BUNDLED_HOOK).unwrap_or_default() }
+}
+
+/// A successful "Update hook", with the status read right after it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookReplacedView {
+    pub hook: String,
+    /// The previous hook.py's copy; `None` when there was none.
+    pub backup: Option<String>,
+    /// What was there before.
+    pub from: HookView,
+    pub to: String,
+    pub capture: CaptureView,
 }
 
 /// A successful `set_up_capture`, with the status read right after it.
@@ -72,11 +109,12 @@ pub fn status_key(s: &CaptureStatus) -> &'static str {
 struct Read {
     status: CaptureStatus,
     taken_over: bool,
+    hook: Option<HookVersion>,
 }
 
 fn read_full(home: &Path, python3: bool) -> Read {
     let literal = home.join(".claude").join("settings.json");
-    let unreadable = |r: String| Read { status: CaptureStatus::SettingsUnreadable(r), taken_over: false };
+    let unreadable = |r: String| Read { status: CaptureStatus::SettingsUnreadable(r), taken_over: false, hook: None };
     let text = match fs::read(&literal) {
         Ok(b) => match String::from_utf8(b) {
             Ok(t) => Some(t),
@@ -93,7 +131,8 @@ fn read_full(home: &Path, python3: bool) -> Read {
     let marker_path = cg.join(MARKER_FILE);
     let marker_there = fs::symlink_metadata(&marker_path).is_ok();
     // The same ownership test the startup update uses: the marker, and our stamp in hook.py.
-    let ours = app_owns_hook(marker_there, fs::read(cg.join(HOOK_PY_FILE)).ok().as_deref());
+    let hook_py = fs::read(cg.join(HOOK_PY_FILE)).ok();
+    let ours = app_owns_hook(marker_there, hook_py.as_deref());
     let status = match core_status(text.as_deref(), ours, python3) {
         CaptureStatus::SetUpByApp { python_missing, .. } => CaptureStatus::SetUpByApp {
             version: fs::read(&marker_path)
@@ -105,7 +144,10 @@ fn read_full(home: &Path, python3: bool) -> Read {
         other => other,
     };
     let taken_over = marker_there && matches!(status, CaptureStatus::SetUpByExtension { .. });
-    Read { status, taken_over }
+    // Only a registered hook has a version worth reporting ("missing" means registered, no file).
+    let hook = matches!(status, CaptureStatus::SetUpByApp { .. } | CaptureStatus::SetUpByExtension { .. })
+        .then(|| hook_version(hook_py.as_deref(), BUNDLED_HOOK));
+    Read { status, taken_over, hook }
 }
 
 /// The capture status under `home`, with the marker's version for `SetUpByApp`. Read only.
@@ -127,12 +169,13 @@ pub fn view_of(s: &CaptureStatus) -> CaptureView {
         python_missing,
         taken_over: false,
         setup_supported: cfg!(unix),
+        hook: None,
     }
 }
 
 pub fn capture_view_for(home: &Path, python3: bool) -> CaptureView {
     let r = read_full(home, python3);
-    CaptureView { taken_over: r.taken_over, ..view_of(&r.status) }
+    CaptureView { taken_over: r.taken_over, hook: r.hook.as_ref().map(hook_view_of), ..view_of(&r.status) }
 }
 
 /// Whether `<program> --version` runs and exits 0 within `timeout`. No shell: `program` is
@@ -244,6 +287,27 @@ pub fn set_up_capture_with(home: &Path, config_path: &Path, python3: bool) -> Re
     Ok(install_view(&report, capture_view_for(home, python3)))
 }
 
+pub fn hook_replaced_view(r: &HookReplaced, capture: CaptureView) -> HookReplacedView {
+    HookReplacedView {
+        hook: show(&r.hook),
+        backup: r.backup.as_deref().map(show),
+        from: hook_view_of(&r.from),
+        to: r.to.clone(),
+        capture,
+    }
+}
+
+/// "Update hook" minus Tauri: replaces `<home>/.claudegate/hook.py` with the bundled hook
+/// (whoever installed it), backed up under the config file's folder (`backups/hook/`). Read-only
+/// mode (or an unreadable config) blocks it; the core checks the rest. Never writes hook.sh, the
+/// marker or settings.json. The status is read again right after a success.
+pub fn update_capture_hook_with(home: &Path, config_path: &Path, python3: bool) -> Result<HookReplacedView, String> {
+    check_writable_for(config_path, "update the hook")?;
+    let desktop_home = crate::commands::desktop_home_for(config_path, &home.join(".claudegate"))?;
+    let r = claudegate_core::capture::replace_hook(home, &desktop_home, BUNDLED_HOOK, false).map_err(|e| e.to_string())?;
+    Ok(hook_replaced_view(&r, capture_view_for(home, python3)))
+}
+
 /// The startup update of the app's own hook.py. Read-only mode (or an unreadable config) skips
 /// it; `claudegate_core::capture::update_app_hook` checks the rest.
 pub fn update_hook_with(home: &Path, config_path: &Path, python3: bool) -> Result<HookUpdate, String> {
@@ -269,6 +333,12 @@ fn home() -> Result<PathBuf, String> {
 #[tauri::command]
 pub async fn capture_status(recheck: Option<bool>) -> Result<CaptureView, String> {
     blocking(move || Ok(capture_view_for(&home()?, python3_cached(recheck.unwrap_or(false))))).await?
+}
+
+/// "Update hook" (after the UI's confirmation).
+#[tauri::command]
+pub async fn update_capture_hook() -> Result<HookReplacedView, String> {
+    blocking(move || update_capture_hook_with(&home()?, &crate::config::config_path(), python3_cached(false))).await?
 }
 
 /// Sets capture up (after the UI's confirmation).

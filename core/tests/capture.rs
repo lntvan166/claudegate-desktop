@@ -139,3 +139,41 @@ fn unrelated_hook_is_not_ours() {
         CaptureStatus::NotSetUp
     );
 }
+
+mod hook_version_states {
+    use claudegate_core::capture::{hook_version, HookVersion};
+
+    const BUNDLED: &str = "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.17.0\nbody\n";
+
+    #[test]
+    fn the_bundled_hook_or_the_extensions_copy_at_its_tag_is_up_to_date() {
+        assert_eq!(hook_version(Some(BUNDLED.as_bytes()), BUNDLED), HookVersion::UpToDate);
+        assert_eq!(hook_version(Some(b"#!/usr/bin/env python3\nbody\n"), BUNDLED), HookVersion::UpToDate);
+    }
+
+    #[test]
+    fn an_older_stamp_is_older() {
+        let old = b"#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.16.1\nbody\n";
+        assert_eq!(hook_version(Some(old), BUNDLED), HookVersion::Older { installed: "v1.16.1".into() });
+    }
+
+    #[test]
+    fn an_unstamped_file_that_differs_is_the_extensions_with_no_version_guessed() {
+        assert_eq!(hook_version(Some(b"#!/usr/bin/env python3\nother\n"), BUNDLED), HookVersion::Different { installed: None });
+    }
+
+    #[test]
+    fn a_same_or_newer_stamp_with_other_bytes_is_different() {
+        let same = b"#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.17.0\nedited\n";
+        assert_eq!(hook_version(Some(same), BUNDLED), HookVersion::Different { installed: Some("v1.17.0".into()) });
+        let newer = b"#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v2.0.0\nx\n";
+        assert_eq!(hook_version(Some(newer), BUNDLED), HookVersion::Different { installed: Some("v2.0.0".into()) });
+        let odd = b"# CLAUDEGATE_HOOK_VERSION=nightly\nx\n";
+        assert_eq!(hook_version(Some(odd), BUNDLED), HookVersion::Different { installed: Some("nightly".into()) });
+    }
+
+    #[test]
+    fn no_file_is_missing() {
+        assert_eq!(hook_version(None, BUNDLED), HookVersion::Missing);
+    }
+}

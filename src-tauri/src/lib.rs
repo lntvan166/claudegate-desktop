@@ -54,6 +54,7 @@ pub fn run() {
             commands::pick_folder,
             capture::capture_status,
             capture::set_up_capture,
+            capture::update_capture_hook,
             commands::project_in_vs_code,
             commands::set_project_exclude,
             commands::take_back_exclude,

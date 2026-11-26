@@ -375,3 +375,93 @@ pub enum HookUpdate {
 pub fn update_app_hook(home: &Path, bundled_hook: &str, python3: bool, read_only: bool) -> Result<HookUpdate, String> {
     crate::store::update_app_hook(home, bundled_hook, python3, read_only)
 }
+
+/// How the installed hook.py compares with the bundled one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookVersion {
+    /// The bundled hook byte for byte, or the bundled hook minus its stamp line (`adoptable_hook`).
+    UpToDate,
+    /// Stamped with a version older than the bundled one.
+    Older { installed: String },
+    /// Anything else: stamped with the same, a newer or an unparseable version but different bytes,
+    /// or unstamped (`installed: None`, the extension's copy, whose version is not guessed).
+    Different { installed: Option<String> },
+    /// There is no hook.py.
+    Missing,
+}
+
+/// Classifies the installed hook.py (`None`: there is none) against `bundled_hook`. Pure.
+pub fn hook_version(installed: Option<&[u8]>, bundled_hook: &str) -> HookVersion {
+    let Some(bytes) = installed else { return HookVersion::Missing };
+    if adoptable_hook(bytes, bundled_hook) {
+        return HookVersion::UpToDate;
+    }
+    let stamp = bundled_hook_version(&String::from_utf8_lossy(bytes));
+    match (stamp, bundled_hook_version(bundled_hook)) {
+        (Some(have), Some(ship)) if version_newer(&ship, &have) => HookVersion::Older { installed: have },
+        (stamp, _) => HookVersion::Different { installed: stamp },
+    }
+}
+
+/// What "Update hook" wrote.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookReplaced {
+    /// `<home>/.claudegate/hook.py`.
+    pub hook: PathBuf,
+    /// The copy of the previous hook.py; `None` when there was none (it was created).
+    pub backup: Option<PathBuf>,
+    /// What was there before.
+    pub from: HookVersion,
+    /// The bundled version now installed.
+    pub to: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HookReplaceError {
+    ReadOnly,
+    Unsupported,
+    /// The bundled hook.py carries no `CLAUDEGATE_HOOK_VERSION` stamp.
+    BundledHook,
+    /// No ClaudeGate entry is registered in settings.json (or it could not be read): the status.
+    NotRegistered(CaptureStatus),
+    /// `~/.claudegate/hook.py` is a symlink, a folder, or anything but a regular file.
+    NotRegularFile,
+    /// It already is the bundled hook; nothing was written.
+    UpToDate,
+    /// hook.py changed between our read and our write; nothing was written.
+    Changed,
+    Failed(String),
+}
+
+impl std::fmt::Display for HookReplaceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HookReplaceError::ReadOnly => write!(f, "ClaudeGate Desktop is in read-only mode. Turn it off to update the hook."),
+            HookReplaceError::Unsupported => write!(f, "Updating the hook is not supported on this platform yet."),
+            HookReplaceError::BundledHook => write!(f, "The bundled hook has no version stamp; this build is broken."),
+            HookReplaceError::NotRegistered(_) => {
+                write!(f, "Capture is not set up (no ClaudeGate hook in ~/.claude/settings.json), so hook.py was left alone.")
+            }
+            HookReplaceError::NotRegularFile => {
+                write!(f, "~/.claudegate/hook.py is not a regular file (a symlink, say), so it was left alone.")
+            }
+            HookReplaceError::UpToDate => write!(f, "hook.py is already the bundled version; nothing was changed."),
+            HookReplaceError::Changed => {
+                write!(f, "hook.py changed while it was being updated (VS Code, most likely), so it was left as is. Check again.")
+            }
+            HookReplaceError::Failed(r) => write!(f, "Couldn't update hook.py ({r}). It was left as it was."),
+        }
+    }
+}
+
+impl std::error::Error for HookReplaceError {}
+
+/// Hook backups kept in `<desktop_home>/backups/hook/`.
+pub const HOOK_BACKUPS_KEPT: usize = 10;
+
+/// "Update hook": replaces `<home>/.claudegate/hook.py` with the bundled hook, whoever installed
+/// it, after backing it up under `<desktop_home>/backups/hook/`. Never writes hook.sh, the marker
+/// or settings.json. See `store::replace_hook`.
+pub fn replace_hook(home: &Path, desktop_home: &Path, bundled_hook: &str, read_only: bool) -> Result<HookReplaced, HookReplaceError> {
+    crate::store::replace_hook(home, desktop_home, bundled_hook, read_only)
+}
