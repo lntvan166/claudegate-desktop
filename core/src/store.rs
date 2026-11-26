@@ -735,7 +735,7 @@ pub(crate) fn excludes_remove(home: &Path, root: &Path) -> Result<(), StoreError
 // removed only if this call created it and it is empty.
 
 use crate::capture::{
-    backups_to_prune, capture_status, compute_settings_patch, verify_settings_content, CaptureStatus, InstallError,
+    audit_registered, backups_to_prune, capture_status, compute_settings_patch, verify_settings_content, CaptureStatus, InstallError,
     InstallReport, AUDIT_PY_FILE, AUDIT_SH_CONTENT, AUDIT_SH_FILE, HOOK_PY_FILE, HOOK_SH_CONTENT, HOOK_SH_FILE,
     MARKER_FILE, SETTINGS_BACKUP_RETENTION,
 };
@@ -897,6 +897,9 @@ struct Undo {
     /// The settings file, once we wrote it. From then on the hook files go only when that file has
     /// no ClaudeGate entry (`hook_files_may_go`), whether or not its own undo succeeded.
     written: Option<PathBuf>,
+    /// The startup audit repair: the files it created are only audit.py and audit.sh, so they go
+    /// when settings.json has no audit entry (`audit_files_may_go`), capture registered or not.
+    audit_only: bool,
 }
 
 struct SettingsUndo {
@@ -948,6 +951,9 @@ fn registration_of(target: &Path) -> OnDisk {
 /// never left pointing at a deleted hook.
 fn hook_files_may_go(target: &Path) -> Result<(), String> {
     match registration_of(target) {
+        OnDisk::NotRegistered if fs::read(target).is_ok_and(|b| audit_registered(&String::from_utf8_lossy(&b))) => {
+            Err("the hook files and marker were kept, because settings.json still has the ClaudeGate audit entries".into())
+        }
         OnDisk::NotRegistered | OnDisk::Absent => Ok(()),
         OnDisk::Registered => {
             Err("the hook files and marker were kept, because settings.json still has a ClaudeGate entry".into())
@@ -955,6 +961,19 @@ fn hook_files_may_go(target: &Path) -> Result<(), String> {
         OnDisk::Unknown(r) => Err(format!(
             "the hook files and marker were kept, because settings.json could not be checked for a ClaudeGate entry ({r})"
         )),
+    }
+}
+
+/// `hook_files_may_go` for the audit repair's own files: only while settings.json has no audit
+/// entry (or is gone).
+fn audit_files_may_go(target: &Path) -> Result<(), String> {
+    match fs::read(target) {
+        Ok(b) if audit_registered(&String::from_utf8_lossy(&b)) => {
+            Err("audit.py and audit.sh were kept, because settings.json still has the audit entries".into())
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("audit.py and audit.sh were kept, because settings.json could not be checked ({e})")),
     }
 }
 
@@ -998,6 +1017,7 @@ impl Undo {
             }
         }
         let files_may_go = match &self.written {
+            Some(target) if self.audit_only => audit_files_may_go(target),
             Some(target) => hook_files_may_go(target),
             None => Ok(()),
         };
@@ -1344,13 +1364,13 @@ fn install_unix(
     if let Err(e) = guard_settings_target(home, &target) {
         return Err(failed(undo, e));
     }
-    if fs::symlink_metadata(&audit_sh).is_err() {
-        return Err(failed(undo, format!("{} is gone, so its entries were not registered", audit_sh.display())));
-    }
     let mut ours = patch.content.into_bytes();
     corrupt_point(&mut ours);
     if let Err(e) = install_fault("before_write") {
         return Err(failed(undo, e));
+    }
+    if fs::symlink_metadata(&audit_sh).is_err() {
+        return Err(failed(undo, format!("{} is gone, so its entries were not registered", audit_sh.display())));
     }
     let refused_why = std::cell::RefCell::new(None);
     let check = || unchanged_since_read("while setting up").map_err(|why| {
@@ -1589,6 +1609,185 @@ pub(crate) fn update_app_hook(
     Ok(HookUpdate::Updated { from, to })
 }
 
+// ---- Startup repair of the audit registration --------------------------------------------------
+
+//
+// A machine that never runs the extension never gets its `syncSettingsIfNeeded`, so a setup made
+// before the capture audit existed (by either side) keeps a PreToolUse entry and no audit entries.
+// At launch, once, this adds them. Every one of these must hold, or nothing is written:
+// - read-only mode is off, python3 was found, the platform is unix;
+// - a ClaudeGate entry is registered in settings.json (`SetUpByApp` or `SetUpByExtension`): repair
+//   only, never a first-time install;
+// - `compute_audit_patch` changes something (the audit entries are missing or stale) and refuses
+//   nothing (a malformed `hooks` or post event is an error, the file untouched);
+// - audit.py and audit.sh are each a regular file or absent (absent ones are created first, audit.sh
+//   at 0755 with `AUDIT_SH_CONTENT`; existing ones are kept as they are).
+// settings.json is then written by the setup protocol: a timestamped backup beside it, the write to
+// its realpath compared with what was read right before the rename, a re-read verified with
+// `verify_audit_content` (the PreToolUse entries exactly as they were), and a restore on failure.
+// A failure puts back what this call wrote under the same rules as setup (`Undo`). hook.py, hook.sh,
+// the marker and the PreToolUse entry are never written.
+
+pub(crate) fn repair_audit_registration(
+    home: &Path,
+    bundled_audit: &str,
+    python3: bool,
+    read_only: bool,
+) -> Result<crate::capture::AuditRepair, String> {
+    use crate::capture::AuditRepair;
+    let skip = |why: &str| Ok(AuditRepair::Skipped(why.to_owned()));
+    if read_only {
+        return skip("read-only mode is on");
+    }
+    if !python3 {
+        return skip("python3 was not found");
+    }
+    if !cfg!(unix) {
+        return skip("not supported on this platform");
+    }
+    repair_audit_unix(home, bundled_audit)
+}
+
+#[cfg(not(unix))]
+fn repair_audit_unix(_: &Path, _: &str) -> Result<crate::capture::AuditRepair, String> {
+    Ok(crate::capture::AuditRepair::Skipped("not supported on this platform".into()))
+}
+
+#[cfg(unix)]
+fn repair_audit_unix(home: &Path, bundled_audit: &str) -> Result<crate::capture::AuditRepair, String> {
+    use crate::capture::{compute_audit_patch, verify_audit_content, AuditRepair};
+    let cg = home.join(".claudegate");
+    let (audit_py, audit_sh) = (cg.join(AUDIT_PY_FILE), cg.join(AUDIT_SH_FILE));
+    let literal = settings_literal(home);
+    let audit_command = audit_sh.to_str().ok_or("the home folder's path is not valid UTF-8")?.to_owned();
+
+    // 1. Read and decide.
+    let target = settings_target(home).map_err(|e| format!("settings.json could not be read: {e}"))?;
+    let raw = match fs::read(&target) {
+        Ok(b) => String::from_utf8(b).map_err(|_| "settings.json is not UTF-8 text".to_owned())?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(AuditRepair::Skipped("no settings.json".into())),
+        Err(e) => return Err(format!("settings.json could not be read: {e}")),
+    };
+    match capture_status(Some(&raw), false, true) {
+        CaptureStatus::SetUpByApp { .. } | CaptureStatus::SetUpByExtension { .. } => {}
+        CaptureStatus::SettingsUnreadable(r) => return Err(format!("settings.json can't be updated safely ({r})")),
+        other => return Ok(AuditRepair::Skipped(format!("capture status is {other:?}: nothing to repair"))),
+    }
+    let patch = compute_audit_patch(&raw, &audit_command);
+    if let Some(why) = patch.shape_error {
+        return Err(format!("settings.json can't be updated safely ({why})"));
+    }
+    if patch.parse_error {
+        return Err("settings.json can't be updated safely (not a JSON object)".into());
+    }
+    if !patch.changed {
+        return Ok(AuditRepair::Skipped("the audit entries are already registered".into()));
+    }
+    let wanted = |p: &Path| match fs::symlink_metadata(p) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
+        Ok(m) if m.file_type().is_file() => Ok(false),
+        Ok(_) => Err(format!("{} is not a regular file, so the audit entries were not added", p.display())),
+        Err(e) => Err(format!("could not check {}: {e}", p.display())),
+    };
+    let (write_py, write_sh) = (wanted(&audit_py)?, wanted(&audit_sh)?);
+
+    let mut undo = Undo { audit_only: true, ..Undo::default() };
+    let failed = |undo: Undo, why: String| match undo.run() {
+        None => why,
+        Some(r) => format!("{why}; putting things back also failed: {r}"),
+    };
+
+    // 2. The files the entries will run, before settings.json names them.
+    if let Err(e) = create_dir_tracked(&cg, &mut undo) {
+        return Err(failed(undo, format!("could not create {}: {e}", cg.display())));
+    }
+    for (path, content, mode, want) in [
+        (&audit_py, bundled_audit.as_bytes(), None, write_py),
+        (&audit_sh, AUDIT_SH_CONTENT.as_bytes(), Some(0o755), write_sh),
+    ] {
+        if !want {
+            continue;
+        }
+        match guard_hook_file(&cg, path).and_then(|()| create_file_exclusive(path, content, mode)) {
+            Ok(()) => undo.created.push((path.clone(), content.to_vec())),
+            Err(e) => return Err(failed(undo, format!("could not write {}: {e}", path.display()))),
+        }
+    }
+    if let Err(e) = install_fault("repair_after_files") {
+        return Err(failed(undo, e.to_string()));
+    }
+
+    // 3. Back up what we read; refuse if it changed since.
+    let unchanged_since_read = || -> Result<(), String> {
+        match fs::read(&target) {
+            Ok(now) if now == raw.as_bytes() => Ok(()),
+            Ok(_) => Err("settings.json changed while the audit entries were being added; try again".into()),
+            Err(e) => Err(format!("could not re-read settings.json: {e}")),
+        }
+    };
+    if let Err(why) = unchanged_since_read() {
+        return Err(failed(undo, why));
+    }
+    let backup = match backup_settings(&literal, raw.as_bytes()) {
+        Ok(p) => p,
+        Err(e) => return Err(failed(undo, format!("could not back up settings.json, so it was not changed: {e}"))),
+    };
+
+    // 4. Write to the realpath, compared with what was read right before the rename.
+    if let Err(e) = guard_settings_target(home, &target) {
+        return Err(failed(undo, e.to_string()));
+    }
+    let mut ours = patch.content.into_bytes();
+    corrupt_point(&mut ours);
+    if let Err(e) = install_fault("repair_before_write") {
+        return Err(failed(undo, e.to_string()));
+    }
+    let refused_why = std::cell::RefCell::new(None);
+    let check = || {
+        unchanged_since_read().map_err(|why| {
+            *refused_why.borrow_mut() = Some(why.clone());
+            io::Error::other(why)
+        })
+    };
+    if let Err(e) = atomic_write_checked(&target, &ours, true, check) {
+        let why = refused_why.borrow_mut().take().unwrap_or_else(|| format!("could not write settings.json: {e}"));
+        return Err(failed(undo, why));
+    }
+    undo.settings = Some(SettingsUndo { home: home.to_path_buf(), target: target.clone(), backup: Some(backup.clone()), ours: ours.clone() });
+    undo.written = Some(target.clone());
+    if let Err(e) = install_fault("repair_after_write") {
+        return Err(failed(undo, e.to_string()));
+    }
+
+    // 5. Verify. Another program's bytes are never restored over: the repair held if they kept the
+    //    audit entries.
+    let created: Vec<PathBuf> = undo.created.iter().map(|(p, _)| p.clone()).collect();
+    let after = match fs::read(&target) {
+        Ok(b) => b,
+        Err(e) => {
+            return Ok(AuditRepair::Repaired {
+                created,
+                backup,
+                note: Some(format!("settings.json was written but could not be read back to check it ({e})")),
+            })
+        }
+    };
+    if after != ours {
+        let note = concurrent_note(Some(&backup));
+        if audit_registered(&String::from_utf8_lossy(&after)) {
+            prune_settings_backups(&literal);
+            return Ok(AuditRepair::Repaired { created, backup, note: Some(note) });
+        }
+        undo.settings = None;
+        return Err(failed(undo, format!("{note} It no longer has the audit entries")));
+    }
+    if let Some(problem) = verify_audit_content(&String::from_utf8_lossy(&after), &raw, &audit_command) {
+        return Err(failed(undo, format!("settings.json did not verify after the write: {problem}")));
+    }
+    prune_settings_backups(&literal);
+    Ok(AuditRepair::Repaired { created, backup, note: None })
+}
+
 // ---- "Update hook": replacing whichever hook.py is installed ----------------------------------
 
 //
@@ -1667,30 +1866,32 @@ fn replace_hook_unix(
         CaptureStatus::SetUpByApp { .. } | CaptureStatus::SetUpByExtension { .. } => {}
         other => return Err(E::NotRegistered(other)),
     }
-    let from = hook_version(installed.as_deref(), bundled_hook);
-    match &from {
-        HookVersion::UpToDate => return Err(E::UpToDate),
-        HookVersion::Newer { installed } => return Err(E::Newer(installed.clone())),
-        _ => {}
-    }
-    // The marker beside an unstamped hook.py: the extension had taken the hook over. The stamped
-    // bundled hook makes it this app's again (`app_owns_hook`); say so rather than leave it silent.
-    let app_owns_now = !ours && fs::symlink_metadata(&marker).is_ok();
-    guard_hook_file(&cg, &py).map_err(|e| E::Failed(e.to_string()))?;
-
     let audit_py = cg.join(AUDIT_PY_FILE);
     let audit_state = audit_py_state(&audit_py, bundled_audit)
         .map_err(|e| E::Failed(format!("could not read {}: {e}", audit_py.display())))?;
+    let audit_outdated = matches!(audit_state, AuditPy::Absent | AuditPy::Stale(_));
+    let from = hook_version(installed.as_deref(), bundled_hook);
+    match &from {
+        // hook.py is current: only a missing or stale audit.py is left to bring up to date.
+        HookVersion::UpToDate if !audit_outdated => return Err(E::UpToDate),
+        HookVersion::Newer { installed } => return Err(E::Newer(installed.clone())),
+        _ => {}
+    }
+    let write_hook = from != HookVersion::UpToDate;
+    // The marker beside an unstamped hook.py: the extension had taken the hook over. The stamped
+    // bundled hook makes it this app's again (`app_owns_hook`); say so rather than leave it silent.
+    let app_owns_now = write_hook && !ours && fs::symlink_metadata(&marker).is_ok();
+    guard_hook_file(&cg, &py).map_err(|e| E::Failed(e.to_string()))?;
 
     let backup = match &installed {
-        None => None,
-        Some(bytes) => {
+        Some(bytes) if write_hook => {
             let mode = mode_of(&py).unwrap_or(0o644);
             Some(
                 backup_hook(desktop_home, "hook", bytes, mode)
                     .map_err(|e| E::Failed(format!("could not back up hook.py, so it was not changed: {e}")))?,
             )
         }
+        _ => None,
     };
     let audit_backup = match &audit_state {
         AuditPy::Stale(bytes) => {
@@ -1719,17 +1920,20 @@ fn replace_hook_unix(
     let audit = write_audit_py(&cg, &audit_state, bundled_audit).map_err(|e| {
         drop_backup(E::Failed(format!("could not update {}, so hook.py was left as is: {e}", audit_py.display())))
     })?;
-    // A failure from here puts audit.py back too, so both are left as they were.
+    // A failure from here puts audit.py back too, so both are left as they were; if that fails too,
+    // the error says so.
     let fail = |e: E| {
-        if let Some(w) = &audit {
-            let _ = undo_audit_py(w);
-        }
+        let e = match audit.as_ref().map(undo_audit_py) {
+            Some(Err(r)) => E::Failed(format!("{e} Also, {r}")),
+            _ => e,
+        };
         drop_backup(e)
     };
     install_fault("after_audit_replace").map_err(|e| fail(E::Failed(e.to_string())))?;
 
     let changed = std::cell::Cell::new(false);
     let res = match &installed {
+        _ if !write_hook => Ok(()),
         Some(old) => {
             let unchanged = || match (fs::symlink_metadata(&py), fs::read(&py)) {
                 (Ok(m), Ok(now)) if m.file_type().is_file() && &now == old => Ok(()),
@@ -1760,7 +1964,8 @@ fn replace_hook_unix(
     let dir = desktop_home.join("backups").join("hook");
     prune_hook_backups(&dir, "hook");
     prune_hook_backups(&dir, "audit");
-    Ok(HookReplaced { hook: py, backup, from, to, app_owns_now })
+    let audit_refreshed = audit.is_some();
+    Ok(HookReplaced { hook: py, backup, from, to, app_owns_now, audit_refreshed, audit_backup })
 }
 
 /// `hook-<stamp>[-N].py`'s `(stamp, N)`.

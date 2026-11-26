@@ -11,7 +11,8 @@
 #
 # Before a release is tagged: scripts/bump-hook.sh --from-cache <version> bundles from whatever
 # .xcheck-cache/claudegate has checked out now (a local clone at a branch, say), stamped <version>
-# (the planned release). It neither pins EXT_TAG nor fetches; it prints the ref it bundled. Re-run
+# (the planned release). It neither pins EXT_TAG nor fetches; it prints the ref it bundled, and
+# refuses a cache with uncommitted changes. Re-run
 # the plain form once <version> is tagged, so the pin and the bundle agree again.
 #
 # Commit the files it changes (fetch-extension.sh, resources/hook.py, resources/audit.py)
@@ -37,6 +38,12 @@ AUDIT_OUT=src-tauri/resources/audit.py
 
 if [ "$FROM_CACHE" = 1 ]; then
   [ -d "$CACHE/.git" ] || { echo "no checkout at $CACHE" >&2; exit 1; }
+  # A dirty tree is no ref at all: the bundle could not be reproduced from what it names.
+  if [ -n "$(git -C "$CACHE" status --porcelain)" ]; then
+    echo "$CACHE has uncommitted changes: commit or discard them first" >&2
+    git -C "$CACHE" status --short >&2
+    exit 1
+  fi
   echo "bundling from $CACHE at $(git -C "$CACHE" rev-parse --abbrev-ref HEAD) $(git -C "$CACHE" rev-parse --short HEAD), stamped $TAG"
 else
   grep -q '^EXT_TAG="v[0-9.]*"$' "$FETCH" || { echo "no EXT_TAG line in $FETCH" >&2; exit 1; }

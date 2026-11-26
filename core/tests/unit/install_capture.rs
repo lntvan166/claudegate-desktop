@@ -598,3 +598,87 @@ fn audit_files_stay_while_settings_still_registers_capture() {
         assert!(h.cg(f).exists(), "{f} removed under a registered entry");
     }
 }
+
+#[test]
+fn hook_files_stay_while_only_the_audit_entries_are_left() {
+    // Another program drops only the PreToolUse entry right after our write: capture is not set up,
+    // but the audit entries still name audit.sh, so no hook file goes.
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    let t = h.settings();
+    let err = install_with(&h, move |stage| {
+        if stage == "after_settings_write" {
+            let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&t).unwrap()).unwrap();
+            v["hooks"].as_object_mut().unwrap().remove("PreToolUse");
+            fs::write(&t, serde_json::to_string(&v).unwrap()).unwrap();
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("still has the ClaudeGate audit entries"), "{msg}");
+    for f in ["hook.py", "hook.sh", "audit.py", "audit.sh", ".installed-by-desktop"] {
+        assert!(h.cg(f).exists(), "{f} removed while an audit entry names it");
+    }
+}
+
+#[test]
+fn an_audit_sh_gone_before_the_write_refuses_it() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    let sh = h.cg("audit.sh");
+    let err = install_with(&h, move |stage| {
+        if stage == "before_write" {
+            fs::remove_file(&sh).unwrap();
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(matches!(err, InstallError::Failed { rollback: None, .. }), "{err:?}");
+    assert!(err.to_string().contains("audit.sh is gone, so its entries were not registered"), "{err}");
+    assert_eq!(fs::read(h.settings()).unwrap(), EXISTING.as_bytes(), "settings.json never written");
+    for f in ["hook.py", "hook.sh", "audit.py", ".installed-by-desktop"] {
+        assert!(!h.cg(f).exists(), "{f} left behind");
+    }
+}
+
+// ---- the startup repair of the audit registration ----
+
+fn registered_without_audit(h: &Home) -> String {
+    let s = format!(
+        "{{\n  \"model\": \"opus\",\n  \"hooks\": {{\"PreToolUse\": [{{\"matcher\": \"x\", \"hooks\": [{{\"type\": \"command\", \"command\": \"{}\"}}]}}]}}\n}}\n",
+        h.cg("hook.sh").display()
+    );
+    h.write_settings(&s);
+    s
+}
+
+#[test]
+fn a_repair_whose_write_does_not_verify_restores_and_removes_what_it_created() {
+    let h = Home::new();
+    let before = registered_without_audit(&h);
+    set_install_corrupt(Some(Box::new(|b: &mut Vec<u8>| *b = b"{\"model\":\"opus\",\"hooks\":{}}".to_vec())));
+    let r = crate::store::repair_audit_registration(&h.home, AUDIT, true, false);
+    set_install_corrupt(None);
+    let err = r.unwrap_err();
+    assert!(err.contains("did not verify"), "{err}");
+    assert!(!err.contains("also failed"), "{err}");
+    assert_eq!(fs::read_to_string(h.settings()).unwrap(), before, "restored byte for byte");
+    assert!(!h.cg("audit.py").exists() && !h.cg("audit.sh").exists(), "created files go with the entries");
+}
+
+#[test]
+fn a_repair_that_changes_the_capture_entry_does_not_verify() {
+    let h = Home::new();
+    let before = registered_without_audit(&h);
+    let audit_sh = h.cg("audit.sh").display().to_string();
+    let bad = format!(
+        "{{\"model\":\"opus\",\"hooks\":{{\"PreToolUse\":[],\"PostToolUse\":[{{\"hooks\":[{{\"command\":\"{audit_sh}\"}}]}}],\"PostToolUseFailure\":[{{\"hooks\":[{{\"command\":\"{audit_sh}\"}}]}}]}}}}"
+    );
+    let bad: &'static str = Box::leak(bad.into_boxed_str());
+    set_install_corrupt(Some(Box::new(move |b: &mut Vec<u8>| *b = bad.as_bytes().to_vec())));
+    let r = crate::store::repair_audit_registration(&h.home, AUDIT, true, false);
+    set_install_corrupt(None);
+    assert!(r.unwrap_err().contains("the PreToolUse entries changed"));
+    assert_eq!(fs::read_to_string(h.settings()).unwrap(), before);
+}

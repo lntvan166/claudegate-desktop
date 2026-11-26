@@ -226,6 +226,17 @@ fn ensure_hook_entry(
 /// are `JSON.stringify(settings, null, 2)`'s. With `audit_command`, the audit hook is registered
 /// under each of `AUDIT_EVENTS` too, after PreToolUse.
 pub fn compute_settings_patch(raw: &str, hook_command: &str, audit_command: Option<&str>) -> SettingsPatch {
+    patch_settings(raw, Some(hook_command), audit_command)
+}
+
+/// The audit half of `compute_settings_patch` alone, for the startup repair of a registered
+/// setup: PreToolUse is neither checked nor touched. Where the capture entry is already correct,
+/// this is byte for byte what `compute_settings_patch` writes.
+pub fn compute_audit_patch(raw: &str, audit_command: &str) -> SettingsPatch {
+    patch_settings(raw, None, Some(audit_command))
+}
+
+fn patch_settings(raw: &str, hook_command: Option<&str>, audit_command: Option<&str>) -> SettingsPatch {
     let mut settings = if raw.trim().is_empty() {
         OJson::Obj(Vec::new())
     } else {
@@ -241,7 +252,10 @@ pub fn compute_settings_patch(raw: &str, hook_command: &str, audit_command: Opti
     if present(settings.get("hooks")) && !matches!(settings.get("hooks"), Some(OJson::Obj(_))) {
         return refuse_shape(raw, "\"hooks\" in settings.json is not an object".into());
     }
-    let mut touched = vec!["PreToolUse"];
+    let mut touched = Vec::new();
+    if hook_command.is_some() {
+        touched.push("PreToolUse");
+    }
     if audit_command.is_some() {
         touched.extend(AUDIT_EVENTS);
     }
@@ -259,14 +273,16 @@ pub fn compute_settings_patch(raw: &str, hook_command: &str, audit_command: Opti
     let hooks = settings.get_mut("hooks").expect("set above");
 
     // PreToolUse: any group whose JSON mentions claudegate, as the extension (and `registered`).
-    let mut changed = ensure_hook_entry(
-        hooks,
-        "PreToolUse",
-        PRE_TOOL_MATCHER,
-        hook_command,
-        &|h| h.to_compact().contains("claudegate"),
-        &|c| c.contains("claudegate"),
-    );
+    let mut changed = hook_command.is_some_and(|hook_command| {
+        ensure_hook_entry(
+            hooks,
+            "PreToolUse",
+            PRE_TOOL_MATCHER,
+            hook_command,
+            &|h| h.to_compact().contains("claudegate"),
+            &|c| c.contains("claudegate"),
+        )
+    });
     if let Some(audit) = audit_command {
         let group_owns = |h: &OJson| {
             matches!(h.get("hooks"), Some(OJson::Arr(xs)) if xs.iter().any(|x| x.get("command").and_then(OJson::as_str).is_some_and(audit_command_shape)))
@@ -325,6 +341,51 @@ pub fn verify_settings_content(after: &str, previous: &str, hook_command: &str, 
         }
     }
     None
+}
+
+/// `verify_settings_content` for the startup repair (`compute_audit_patch`): every top-level key
+/// of `previous` survives, `hooks.PreToolUse` is exactly what it was, and the audit entry landed
+/// under each of `AUDIT_EVENTS`.
+pub fn verify_audit_content(after: &str, previous: &str, audit_command: &str) -> Option<String> {
+    let Ok(parsed) = serde_json::from_str::<Value>(after) else {
+        return Some("the file on disk is not valid JSON".into());
+    };
+    let Some(after_obj) = parsed.as_object() else {
+        return Some("the file on disk is not a JSON object".into());
+    };
+    let before = serde_json::from_str::<Value>(previous).ok();
+    if let Ok(prev @ OJson::Obj(_)) = OJson::parse(previous) {
+        for key in prev.keys() {
+            if !after_obj.contains_key(key) {
+                return Some(format!("top-level key \"{key}\" was lost"));
+            }
+        }
+    }
+    let pre = |v: &Value| v.get("hooks").and_then(|h| h.get("PreToolUse")).cloned();
+    if before.as_ref().and_then(pre) != pre(&parsed) {
+        return Some("the PreToolUse entries changed".into());
+    }
+    for event in AUDIT_EVENTS {
+        if !entry_landed(&parsed, event, audit_command) {
+            return Some(format!("the claudegate {event} audit entry is missing"));
+        }
+    }
+    None
+}
+
+/// Whether any `PostToolUse`/`PostToolUseFailure` hook command has the audit wrapper's shape
+/// (`audit_command_shape`). Unparseable text has none.
+pub fn audit_registered(settings_text: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<Value>(settings_text) else { return false };
+    AUDIT_EVENTS.iter().any(|event| {
+        v.get("hooks").and_then(|h| h.get(event)).and_then(Value::as_array).is_some_and(|groups| {
+            groups.iter().any(|g| {
+                g.get("hooks").and_then(Value::as_array).is_some_and(|xs| {
+                    xs.iter().any(|x| x.get("command").and_then(Value::as_str).is_some_and(audit_command_shape))
+                })
+            })
+        })
+    })
 }
 
 fn entry_landed(settings: &Value, event: &str, command: &str) -> bool {
@@ -527,6 +588,10 @@ pub struct HookReplaced {
     /// hook over): now stamped again, the app counts it as its own and its startup update keeps it
     /// current, until the extension replaces it again. The marker itself is not written.
     pub app_owns_now: bool,
+    /// audit.py was brought to the bundled copy (created, or replaced).
+    pub audit_refreshed: bool,
+    /// The copy of the audit.py it replaced; `None` when none was replaced.
+    pub audit_backup: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -573,6 +638,37 @@ impl std::fmt::Display for HookReplaceError {
 }
 
 impl std::error::Error for HookReplaceError {}
+
+/// What the startup repair of the audit registration did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuditRepair {
+    /// The audit entries were added or repaired in settings.json.
+    Repaired {
+        /// audit.py / audit.sh created first because they were missing.
+        created: Vec<PathBuf>,
+        /// The pre-repair copy of settings.json.
+        backup: PathBuf,
+        /// Set when another program rewrote settings.json right after ours but kept the entries.
+        note: Option<String>,
+    },
+    /// Nothing was written; why.
+    Skipped(String),
+}
+
+/// At startup: when capture is registered (by either side) but the audit entries under
+/// `AUDIT_EVENTS` are missing or stale, create audit.py (bundled) and audit.sh (0755) if missing,
+/// then add or repair those entries through the guarded settings.json protocol. Repair only: never
+/// a first-time install, never hook.py, hook.sh, the marker or the PreToolUse entry. `Err` is a
+/// refusal or a failure (everything it wrote put back where it could). See
+/// `store::repair_audit_registration`.
+pub fn repair_audit_registration(
+    home: &Path,
+    bundled_audit: &str,
+    python3: bool,
+    read_only: bool,
+) -> Result<AuditRepair, String> {
+    crate::store::repair_audit_registration(home, bundled_audit, python3, read_only)
+}
 
 /// Hook backups kept in `<desktop_home>/backups/hook/`.
 pub const HOOK_BACKUPS_KEPT: usize = 10;

@@ -132,7 +132,7 @@ cmp -s "$HOME/.claudegate/audit.py" "$REPO/src-tauri/resources/audit.py" || fail
 rm "$HOME/.claudegate/.installed-by-desktop"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)  # the extension, older\n' > "$HOME/.claudegate/hook.py"
 chmod 0640 "$HOME/.claudegate/hook.py"
-"$BIN" status | py "import json,sys; v=json.load(sys.stdin); assert v['status']=='vscode' and v['hook']=={'state':'different','installed':None,'bundled':'$VER'}, v" \
+"$BIN" status | py "import json,sys; v=json.load(sys.stdin); assert v['status']=='vscode' and v['hook']=={'state':'different','installed':None,'bundled':'$VER','auditStale':False}, v" \
   || fail "status before Update hook"
 SH="$(md5sum < "$HOME/.claudegate/hook.sh")"
 OUT="$("$BIN" update-hook)" || fail "update-hook"
@@ -162,5 +162,25 @@ cmp -s "$HOME/.claudegate/hook.py" "$REPO/src-tauri/resources/hook.py" || fail "
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)  # the extension\n' > "$HOME/.claudegate/hook.py"
 "$BIN" update | grep -q '^Skipped' || fail "startup update touched an unstamped hook"
 grep -q 'the extension' "$HOME/.claudegate/hook.py" || fail "unstamped hook changed"
+
+# 7. Startup repair: a registered setup without the audit entries (and without audit.sh) gets the
+#    wrapper first, then the entries; the capture entry is left exactly as it was. Once.
+rm "$HOME/.claudegate/audit.sh"
+py "
+import json,os
+p=os.path.expanduser('~/.claude/settings.json')
+s=json.load(open(p))
+del s['hooks']['PostToolUse']; del s['hooks']['PostToolUseFailure']
+json.dump(s,open(p,'w'),indent=2)"
+export PRE="$(py "import json,os; print(json.dumps(json.load(open(os.path.expanduser('~/.claude/settings.json')))['hooks']['PreToolUse']))")"
+"$BIN" repair-audit | grep -q '^Repaired' || fail "repair-audit did not repair"
+[ -x "$HOME/.claudegate/audit.sh" ] || fail "repair-audit did not write audit.sh"
+py "
+import json,os
+s=json.load(open(os.path.expanduser('~/.claude/settings.json')))
+for ev in ('PostToolUse','PostToolUseFailure'):
+    assert s['hooks'][ev]==[{'matcher':'^Bash\$','hooks':[{'type':'command','command':os.path.expanduser('~/.claudegate/audit.sh')}]}], s['hooks'][ev]
+assert json.dumps(s['hooks']['PreToolUse'])==os.environ['PRE'], s['hooks']['PreToolUse']" || fail "settings.json after repair-audit"
+"$BIN" repair-audit | grep -q '^Skipped' || fail "a second repair-audit was not skipped"
 
 echo "CAPTURE E2E OK"

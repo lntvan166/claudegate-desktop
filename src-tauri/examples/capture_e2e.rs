@@ -3,9 +3,9 @@
 //! `$HOME/.claude/settings.json` and `$HOME/.claudegate`, so it exits 2 unless CLAUDEGATE_HOME
 //! and CLAUDEGATE_DESKTOP_CONFIG are both set and both inside $HOME (the script's temp HOME).
 //!
-//! Usage: capture_e2e add <dir> | setup | update | update-hook | status
+//! Usage: capture_e2e add <dir> | setup | update | repair-audit | update-hook | status
 use claudegate_desktop_lib::capture::{
-    capture_view_for, python3_cached, set_up_capture_with, update_capture_hook_with, update_hook_with,
+    capture_view_for, python3_cached, repair_audit_with, set_up_capture_with, update_capture_hook_with, update_hook_with,
 };
 use claudegate_desktop_lib::commands::add_project_with;
 use claudegate_desktop_lib::config::config_path;
@@ -44,6 +44,10 @@ fn main() {
             Ok(r) => println!("{r:?}"),
             Err(e) => fail(1, e),
         },
+        Some("repair-audit") => match repair_audit_with(&home, &cfg, python3_cached(true)) {
+            Ok(r) => println!("{r:?}"),
+            Err(e) => fail(1, e),
+        },
         Some("update-hook") => {
             let v = update_capture_hook_with(&home, &cfg, python3_cached(true)).unwrap_or_else(|e| fail(1, e));
             println!("{}", serde_json::to_string(&v).expect("serializable"));
@@ -51,6 +55,6 @@ fn main() {
         Some("status") => {
             println!("{}", serde_json::to_string(&capture_view_for(&home, python3_cached(true))).expect("serializable"))
         }
-        _ => fail(2, "usage: capture_e2e add <dir> | setup | update | update-hook | status"),
+        _ => fail(2, "usage: capture_e2e add <dir> | setup | update | repair-audit | update-hook | status"),
     }
 }

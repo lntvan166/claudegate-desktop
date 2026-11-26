@@ -217,6 +217,7 @@ fn an_up_to_date_hook_is_not_rewritten() {
     let h = Home::new();
     h.as_extension();
     fs::write(h.cg("hook.py"), HOOK).unwrap();
+    fs::write(h.cg("audit.py"), AUDIT).unwrap();
     assert_eq!(h.run().unwrap_err(), HookReplaceError::UpToDate);
     // The extension's copy at the same tag (the stamp line removed) is up to date too.
     fs::write(h.cg("hook.py"), "#!/usr/bin/env python3\nprint('new hook')\n").unwrap();
@@ -484,4 +485,51 @@ fn the_startup_update_refreshes_audit_py_with_hook_py() {
     assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), HOOK);
     assert!(!h.cg("audit.sh").exists());
     assert_eq!(fs::read_to_string(h.settings()).unwrap(), settings);
+}
+
+#[test]
+fn a_current_hook_py_with_a_stale_or_missing_audit_py_refreshes_audit_py_only() {
+    for stale in [true, false] {
+        let h = Home::new();
+        let settings = h.as_extension();
+        fs::write(h.cg("hook.py"), HOOK).unwrap();
+        if stale {
+            fs::write(h.cg("audit.py"), "print('older audit')\n").unwrap();
+        }
+        let hook_before = fs::metadata(h.cg("hook.py")).unwrap().modified().unwrap();
+        let r = h.run().unwrap();
+        assert_eq!(r.from, HookVersion::UpToDate);
+        assert!(r.audit_refreshed);
+        assert_eq!(r.backup, None, "hook.py was not replaced, so not backed up");
+        assert!(!r.app_owns_now);
+        assert_eq!(fs::read_to_string(h.cg("audit.py")).unwrap(), AUDIT);
+        assert_eq!(fs::metadata(h.cg("hook.py")).unwrap().modified().unwrap(), hook_before, "hook.py untouched");
+        assert_eq!(fs::read_to_string(h.settings()).unwrap(), settings);
+        match (stale, &r.audit_backup) {
+            (true, Some(b)) => assert_eq!(fs::read_to_string(b).unwrap(), "print('older audit')\n"),
+            (false, None) => {}
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(h.run().unwrap_err(), HookReplaceError::UpToDate, "then both are current");
+    }
+}
+
+#[test]
+fn a_failed_put_back_of_audit_py_is_reported() {
+    let h = Home::new();
+    h.as_extension();
+    fs::write(h.cg("audit.py"), "print('older audit')\n").unwrap();
+    let (py, audit) = (h.cg("hook.py"), h.cg("audit.py"));
+    set_install_fault(Some(Box::new(move |stage| {
+        if stage == "after_audit_replace" {
+            fs::write(&audit, "someone else's audit.py\n").unwrap();
+            fs::write(&py, "the extension synced in between\n").unwrap();
+        }
+        Ok(())
+    })));
+    let err = h.run().unwrap_err();
+    set_install_fault(None);
+    let HookReplaceError::Failed(msg) = &err else { panic!("{err:?}") };
+    assert!(msg.contains("audit.py was updated but could not be put back"), "{msg}");
+    assert_eq!(fs::read_to_string(h.cg("audit.py")).unwrap(), "someone else's audit.py\n", "theirs is left");
 }

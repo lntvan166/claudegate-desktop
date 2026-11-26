@@ -26,13 +26,18 @@ export type HookView = {
   installed: string | null;
   /** The bundled hook's version, e.g. `v1.16.1`. */
   bundled: string;
+  /** ~/.claudegate/audit.py is missing or differs from this app's copy: outdated even with hook.py current. */
+  auditStale: boolean;
 };
 
 /** capture.rs `HookReplacedView`: what Update hook did. */
 export type HookReplacedView = {
   hook: string;
-  /** The previous hook.py's copy; null when there was none. */
+  /** The previous hook.py's copy; null when there was none (or hook.py was already current). */
   backup: string | null;
+  /** The previous audit.py's copy; null when none was replaced. */
+  auditBackup: string | null;
+  /** What was there before (`from.auditStale`: audit.py was brought up to date). */
   from: HookView;
   to: string;
   /** The marker was beside the extension's unstamped hook: this app now keeps the hook up to date. */
@@ -182,8 +187,9 @@ function baseSetupResult(r: InstallView, projectCount: number | null): SetupResu
 /** Whether Update hook has something to bring up to the bundled version (capturing states only).
  *  A newer stamped hook is not outdated: replacing it would be a downgrade. */
 export function hookOutdated(v: CaptureView | null): boolean {
-  const s = capturing(v) ? v?.hook?.state : undefined;
-  return s === "older" || s === "different" || s === "missing";
+  const h = capturing(v) ? v?.hook : undefined;
+  if (!h) return false;
+  return h.state === "older" || h.state === "different" || h.state === "missing" || (h.state === "upToDate" && h.auditStale);
 }
 
 /** Which hook.py is installed, in words. */
@@ -198,6 +204,7 @@ function installedHook(h: HookView): string {
 export function hookLine(v: CaptureView | null): string | null {
   if (!capturing(v) || !v?.hook) return null;
   const h = v.hook;
+  if (h.state === "upToDate" && h.auditStale) return `Hook: ${h.installed ?? h.bundled}, but audit.py differs from this app's copy`;
   if (h.state === "upToDate") return h.installed ? `Hook: ${h.installed}, kept up to date by this app` : "Hook: VS Code extension's version";
   if (h.state === "newer") return `Hook: ${h.installed} is newer than this app's ${h.bundled}`;
   return `Hook: ${installedHook(h)} · this app has ${h.bundled}`;
@@ -214,6 +221,9 @@ export function hookUpdateBlocked(v: CaptureView | null, readOnly: boolean): str
 }
 
 export function updateHookConfirm(h: HookView): string {
+  if (h.state === "upToDate" && h.auditStale) {
+    return `Write ~/.claudegate/audit.py with the version bundled in this app (${h.bundled})? hook.py, hook.sh, audit.sh and ~/.claude/settings.json are not changed. A current audit.py is backed up.`;
+  }
   if (h.state === "missing") {
     return `Write ~/.claudegate/hook.py with the version bundled in this app (${h.bundled})? hook.sh and ~/.claude/settings.json are not changed. There is no current file to back up.`;
   }
@@ -230,12 +240,14 @@ export function updateHookConfirm(h: HookView): string {
 const APP_OWNS_NOW = "This app will keep this hook up to date until the VS Code extension replaces it.";
 
 export function hookUpdateResult(r: HookReplacedView): SetupResult {
-  const prev = r.backup ? `The previous file is in ${r.backup}.` : "There was no previous file.";
-  if (r.capture.hook?.state !== "upToDate") {
+  const auditPrev = r.auditBackup ? ` The previous audit.py is in ${r.auditBackup}.` : "";
+  const prev = (r.backup ? `The previous file is in ${r.backup}.` : "There was no previous file.") + auditPrev;
+  if (r.capture.hook?.state !== "upToDate" || r.capture.hook.auditStale) {
     const now = hookLine(r.capture) ?? `“${chipLabel(r.capture)}”`;
     return { tone: "warning", text: `hook.py was written, but it now reads: ${now}. ${prev}` };
   }
   // A stamped hook is the startup update's to keep current, whoever registered it (and whether or
   // not this took it back from the extension, `appOwnsNow`), until the extension rewrites it.
+  if (r.from.state === "upToDate") return { tone: "success", text: `audit.py is now this app's copy (${r.to}).${auditPrev}` };
   return { tone: "success", text: `hook.py is now ${r.to}. ${prev} ${APP_OWNS_NOW}` };
 }

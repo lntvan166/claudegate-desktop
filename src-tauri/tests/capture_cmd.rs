@@ -1,10 +1,10 @@
 //! Capture status, setup and the startup hook update through the app's functions, in a temp HOME
 //! with a temp desktop config. The real ~/.claude, ~/.claudegate and ~/.claudegate-desktop are
 //! never touched.
-use claudegate_core::capture::{bundled_hook_version, version_newer, CaptureStatus, HookUpdate, InstallError};
+use claudegate_core::capture::{bundled_hook_version, version_newer, AuditRepair, CaptureStatus, HookUpdate, InstallError};
 use claudegate_desktop_lib::capture::{
     capture_view_for, install_error_text, pick_python3, python3_available_with, read_status, set_up_capture_with, status_key,
-    update_capture_hook_with, update_hook_with, CaptureView, HookView, BUNDLED_AUDIT, BUNDLED_HOOK,
+    repair_audit_with, update_capture_hook_with, update_hook_with, CaptureView, HookView, BUNDLED_AUDIT, BUNDLED_HOOK,
 };
 use claudegate_desktop_lib::config::{config_path_in, save_read_only};
 use std::fs;
@@ -108,7 +108,7 @@ fn app_with_trimmed_marker_version() {
             python_missing: false,
             taken_over: false,
             setup_supported: cfg!(unix),
-            hook: Some(HookView { state: "upToDate".into(), installed: Some(bundled()), bundled: bundled() }),
+            hook: Some(HookView { state: "upToDate".into(), installed: Some(bundled()), bundled: bundled(), audit_stale: false }),
         }
     );
 }
@@ -563,18 +563,28 @@ fn the_view_reports_the_hooks_version_state() {
     let f = fx();
     assert_eq!(hook_state(&f), None, "not set up: no hook state");
     f.as_extension();
-    assert_eq!(hook_state(&f), Some(HookView { state: "different".into(), installed: None, bundled: bundled() }));
+    assert_eq!(hook_state(&f), Some(HookView { state: "different".into(), installed: None, bundled: bundled(), audit_stale: true }));
     fs::write(f.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\nold\n").unwrap();
-    assert_eq!(hook_state(&f), Some(HookView { state: "older".into(), installed: Some("v1.0.0".into()), bundled: bundled() }));
+    assert_eq!(hook_state(&f), Some(HookView { state: "older".into(), installed: Some("v1.0.0".into()), bundled: bundled(), audit_stale: true }));
     fs::write(f.cg("hook.py"), BUNDLED_HOOK).unwrap();
-    assert_eq!(hook_state(&f), Some(HookView { state: "upToDate".into(), installed: Some(bundled()), bundled: bundled() }));
+    assert_eq!(hook_state(&f), Some(HookView { state: "upToDate".into(), installed: Some(bundled()), bundled: bundled(), audit_stale: true }));
     // The extension's copy at the bundled tag (stamp line removed) is up to date, and unstamped.
     let mut lines: Vec<&str> = BUNDLED_HOOK.split_inclusive('\n').collect();
     lines.remove(1);
     fs::write(f.cg("hook.py"), lines.concat()).unwrap();
-    assert_eq!(hook_state(&f), Some(HookView { state: "upToDate".into(), installed: None, bundled: bundled() }));
+    assert_eq!(hook_state(&f), Some(HookView { state: "upToDate".into(), installed: None, bundled: bundled(), audit_stale: true }));
+    // audit.py is the other half: missing or different is stale, the bundled copy is not, a link is
+    // left alone.
+    fs::write(f.cg("audit.py"), BUNDLED_AUDIT).unwrap();
+    assert!(!hook_state(&f).unwrap().audit_stale);
+    fs::write(f.cg("audit.py"), "print('older audit')\n").unwrap();
+    assert!(hook_state(&f).unwrap().audit_stale);
+    fs::remove_file(f.cg("audit.py")).unwrap();
+    std::os::unix::fs::symlink(f.home.join("elsewhere.py"), f.cg("audit.py")).unwrap();
+    assert!(!hook_state(&f).unwrap().audit_stale);
+    fs::remove_file(f.cg("audit.py")).unwrap();
     fs::write(f.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v99.0.0\nnewer\n").unwrap();
-    assert_eq!(hook_state(&f), Some(HookView { state: "newer".into(), installed: Some("v99.0.0".into()), bundled: bundled() }));
+    assert_eq!(hook_state(&f), Some(HookView { state: "newer".into(), installed: Some("v99.0.0".into()), bundled: bundled(), audit_stale: true }));
     fs::remove_file(f.cg("hook.py")).unwrap();
     assert_eq!(hook_state(&f).unwrap().state, "missing");
     let json = serde_json::to_value(capture_view_for(&f.home, true)).unwrap();
@@ -594,7 +604,7 @@ fn update_hook_replaces_the_extensions_hook_and_backs_it_up_beside_the_config() 
     let backup = PathBuf::from(r.backup.expect("backed up"));
     assert_eq!(backup.parent().unwrap(), f.cfg.parent().unwrap().join("backups/hook"));
     assert_eq!(fs::read_to_string(&backup).unwrap(), "# the extension's hook, unstamped\n");
-    assert_eq!(r.from, HookView { state: "different".into(), installed: None, bundled: bundled() });
+    assert_eq!(r.from, HookView { state: "different".into(), installed: None, bundled: bundled(), audit_stale: true });
     assert_eq!(r.to, bundled());
     assert_eq!(r.capture.status, "vscode", "no marker: still the extension's setup");
     assert_eq!(r.capture.hook.unwrap().state, "upToDate");
@@ -665,4 +675,98 @@ fn update_refreshes_a_stale_audit_py_only_alongside_hook_py() {
     // hook.py current: nothing is written, a stale audit.py included.
     fs::write(f.cg("audit.py"), "print('older audit')\n").unwrap();
     assert_untouched(&f, || update_hook_with(&f.home, &f.cfg, true));
+}
+
+// ---- the startup repair of the audit registration ----
+
+fn audit_entries(f: &Fx) -> Vec<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(f.settings()).unwrap()).unwrap();
+    ["PostToolUse", "PostToolUseFailure"].iter().map(|e| v["hooks"][e].clone()).collect()
+}
+
+#[test]
+fn repair_adds_the_audit_entries_to_an_extension_setup_and_creates_the_files_first() {
+    let f = fx();
+    f.as_extension();
+    let pre_before = {
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(f.settings()).unwrap()).unwrap();
+        v["hooks"]["PreToolUse"].clone()
+    };
+    assert!(!f.cg("audit.sh").exists() && !f.cg("audit.py").exists());
+    let r = repair_audit_with(&f.home, &f.cfg, true).unwrap();
+    let AuditRepair::Repaired { created, backup, note } = r else { panic!("{r:?}") };
+    assert_eq!(created, vec![f.cg("audit.py"), f.cg("audit.sh")]);
+    assert!(backup.is_file() && note.is_none());
+    assert_eq!(fs::read_to_string(f.cg("audit.py")).unwrap(), BUNDLED_AUDIT);
+    assert_eq!(fs::read_to_string(f.cg("audit.sh")).unwrap(), claudegate_core::capture::AUDIT_SH_CONTENT);
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(fs::metadata(f.cg("audit.sh")).unwrap().permissions().mode() & 0o777, 0o755);
+    let cmd = f.cg("audit.sh").display().to_string();
+    let want = serde_json::json!([{ "matcher": "^Bash$", "hooks": [{ "type": "command", "command": cmd }] }]);
+    assert_eq!(audit_entries(&f), vec![want.clone(), want]);
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(f.settings()).unwrap()).unwrap();
+    assert_eq!(v["hooks"]["PreToolUse"], pre_before, "the capture entry is never touched");
+    assert_eq!(fs::read_to_string(f.cg("hook.py")).unwrap(), "# the extension's hook, unstamped\n", "hook.py untouched");
+    assert!(!f.cg(".installed-by-desktop").exists());
+    assert_eq!(capture_view_for(&f.home, true).status, "vscode");
+    // A second launch finds nothing to do and writes nothing.
+    let bytes = fs::read(f.settings()).unwrap();
+    assert!(matches!(repair_audit_with(&f.home, &f.cfg, true).unwrap(), AuditRepair::Skipped(_)));
+    assert_eq!(fs::read(f.settings()).unwrap(), bytes);
+}
+
+#[test]
+fn repair_writes_nothing_for_a_correct_setup_or_none_at_all() {
+    let f = fx();
+    set_up_capture_with(&f.home, &f.cfg, true).unwrap();
+    let snap = |f: &Fx| (fs::read(f.settings()).ok(), fs::read(f.cg("audit.sh")).ok(), fs::read(f.cg("audit.py")).ok());
+    let before = snap(&f);
+    assert!(matches!(repair_audit_with(&f.home, &f.cfg, true).unwrap(), AuditRepair::Skipped(_)));
+    assert_eq!(snap(&f), before);
+    // Not set up: repair only, never a first-time install.
+    let g = fx();
+    g.write_settings("{}");
+    assert!(matches!(repair_audit_with(&g.home, &g.cfg, true).unwrap(), AuditRepair::Skipped(_)));
+    assert_eq!(fs::read_to_string(g.settings()).unwrap(), "{}");
+    assert!(!g.cg("audit.sh").exists());
+}
+
+#[test]
+fn repair_is_blocked_by_read_only_and_a_missing_python() {
+    let f = fx();
+    f.as_extension();
+    let before = fs::read(f.settings()).unwrap();
+    assert!(matches!(repair_audit_with(&f.home, &f.cfg, false).unwrap(), AuditRepair::Skipped(_)));
+    save_read_only(&f.cfg, true, None).unwrap();
+    assert!(matches!(repair_audit_with(&f.home, &f.cfg, true).unwrap(), AuditRepair::Skipped(_)));
+    assert_eq!(fs::read(f.settings()).unwrap(), before);
+    assert!(!f.cg("audit.sh").exists() && !f.cg("audit.py").exists());
+}
+
+#[test]
+fn repair_refuses_malformed_settings_and_writes_nothing() {
+    for post in [r#""x""#, "{}", "false"] {
+        let f = fx();
+        f.as_extension();
+        let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(f.settings()).unwrap()).unwrap();
+        v["hooks"]["PostToolUseFailure"] = serde_json::from_str(post).unwrap();
+        let text = serde_json::to_string(&v).unwrap();
+        f.write_settings(&text);
+        let err = repair_audit_with(&f.home, &f.cfg, true).unwrap_err();
+        assert!(err.contains("can't be updated safely"), "{post}: {err}");
+        assert_eq!(fs::read_to_string(f.settings()).unwrap(), text, "{post}");
+        assert!(!f.cg("audit.sh").exists(), "{post}: no file written before the refusal");
+    }
+}
+
+#[test]
+fn repair_keeps_an_existing_wrapper_and_audit_py() {
+    let f = fx();
+    f.as_extension();
+    fs::write(f.cg("audit.sh"), "#!/usr/bin/env bash\npython \"$HOME/.claudegate/audit.py\"\n").unwrap();
+    fs::write(f.cg("audit.py"), "print('older audit')\n").unwrap();
+    let r = repair_audit_with(&f.home, &f.cfg, true).unwrap();
+    let AuditRepair::Repaired { created, .. } = r else { panic!("{r:?}") };
+    assert!(created.is_empty());
+    assert_eq!(fs::read_to_string(f.cg("audit.py")).unwrap(), "print('older audit')\n", "Update hook's job, not repair's");
 }
