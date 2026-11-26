@@ -171,6 +171,17 @@ fn never_panics_on_random_input() {
         let b: String = (0..n).map(|_| alphabet[next() % alphabet.len()]).collect();
         let _ = parse_changes(&a, &b);
         let _ = parse_changes(&b, &a);
+        // Well-formed numstat lines with a random path, so numstat_new_path sees braces,
+        // arrows and quotes rather than lines the tab split rejects first.
+        let counts = ["-", "0", "1", "12"];
+        let line_safe: Vec<&str> = alphabet.iter().copied().filter(|t| !t.contains(['\t', '\n', '\r'])).collect();
+        let numstat: String = (0..1 + next() % 4)
+            .map(|_| {
+                let path: String = (0..1 + next() % 12).map(|_| line_safe[next() % line_safe.len()]).collect();
+                format!("{}\t{}\t{}\n", counts[next() % counts.len()], counts[next() % counts.len()], path)
+            })
+            .collect();
+        let _ = parse_changes(&a, &numstat);
         let _ = parse_log(&a);
         let _ = unquote_c_style(&a);
         let _ = web_url(&a, A);
