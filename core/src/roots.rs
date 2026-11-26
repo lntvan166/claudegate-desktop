@@ -82,9 +82,38 @@ pub fn read_roots(home: &Path) -> Vec<PathBuf> {
     }
 }
 
+/// `read_roots` for a caller that must not act on a bad read: a missing file is no roots, but a
+/// file that cannot be read, is not JSON (the extension writes it in place, so it can be caught
+/// half-written) or is not a list of strings is an error.
+pub fn read_roots_strict(home: &Path) -> Result<Vec<PathBuf>, String> {
+    let file = home.join("workspace-roots.json");
+    let raw = match std::fs::read_to_string(&file) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("Cannot read {}: {e}", file.display())),
+    };
+    let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("{} is not valid JSON ({e}).", file.display()))?;
+    v.as_array()
+        .and_then(|a| a.iter().map(|x| x.as_str().map(PathBuf::from)).collect::<Option<Vec<_>>>())
+        .ok_or_else(|| format!("{} is not a list of folders.", file.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_strict_read_tells_missing_from_broken() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(read_roots_strict(d.path()), Ok(vec![]));
+        let f = d.path().join("workspace-roots.json");
+        std::fs::write(&f, r#"["/a","/b"]"#).unwrap();
+        assert_eq!(read_roots_strict(d.path()), Ok(vec![PathBuf::from("/a"), PathBuf::from("/b")]));
+        for bad in [r#"["/a", "/b"#, r#"{"a":1}"#, r#"["/a", 2]"#, ""] {
+            std::fs::write(&f, bad).unwrap();
+            assert!(read_roots_strict(d.path()).is_err(), "{bad}");
+        }
+    }
 
     fn with(content: Option<&str>) -> Vec<PathBuf> {
         let d = tempfile::tempdir().unwrap();

@@ -71,8 +71,13 @@ fn non_empty(s: Option<&str>) -> Option<String> {
 }
 
 /// `workspace` as stored: `None` when absent or not a list.
+/// Each root is reported resolved (`resolve_root`), as the rail's projects are spelled, so the UI
+/// matches them the way the backend does; spellings of one folder collapse to one.
 fn workspace_in(v: &serde_json::Value) -> Option<Vec<String>> {
-    workspace_of(v.as_object()?)
+    let ws = workspace_of(v.as_object()?)?;
+    let resolved = ws.iter().map(|r| claudegate_core::paths::resolve_root(Path::new(r)).to_string_lossy().into_owned());
+    let resolved: Vec<String> = resolved.collect();
+    Some(clean_roots(resolved.iter().map(String::as_str)))
 }
 
 fn workspace_of(obj: &serde_json::Map<String, serde_json::Value>) -> Option<Vec<String>> {
@@ -392,34 +397,35 @@ pub fn forget_project(path: &Path, root: &str, guard: Option<&Path>) -> Result<(
 }
 
 /// The roots the rail lists today (`workspace-roots.json`, a nested root folded into its parent),
-/// in the file's order. Read only.
-pub fn listed_root_strings(home: &Path) -> Vec<String> {
-    claudegate_core::project::listed_roots(&claudegate_core::roots::read_roots(home))
-        .into_iter()
-        .map(|r| r.to_string_lossy().into_owned())
-        .collect()
+/// in the file's order. Strict (`read_roots_strict`): the migration must never derive the
+/// workspace from a file caught half-written, since it drops the hidden list it derives from.
+pub fn listed_root_strings(home: &Path) -> Result<Vec<String>, String> {
+    let roots = claudegate_core::roots::read_roots_strict(home)?;
+    Ok(claudegate_core::project::listed_roots(&roots).into_iter().map(|r| r.to_string_lossy().into_owned()).collect())
 }
 
 /// The workspace in `obj`, or, when it has none yet, the one the migration derives: every listed
 /// root not in the retired `hiddenProjects`, in the listed order. Deriving also drops
 /// `hiddenProjects` and `hiddenAt`, in the same write as the caller's change. The bool says
-/// whether it derived.
+/// whether it derived. When the listed roots cannot be read nothing is changed and it fails, so
+/// the caller writes nothing and the next load retries.
 fn workspace_or_migrated(
     obj: &mut serde_json::Map<String, serde_json::Value>,
-    listed: impl FnOnce() -> Vec<String>,
-) -> (Vec<String>, bool) {
+    listed: impl FnOnce() -> Result<Vec<String>, String>,
+) -> Result<(Vec<String>, bool), String> {
     if let Some(w) = workspace_of(obj) {
-        return (w, false);
+        return Ok((w, false));
     }
+    let listed = listed()?;
     let hidden: Vec<String> = obj
         .get("hiddenProjects")
         .and_then(|h| h.as_array())
         .map(|a| clean_roots(a.iter().filter_map(|r| r.as_str())))
         .unwrap_or_default();
-    let ws = listed().into_iter().filter(|r| !hidden.iter().any(|h| same_root(h, r))).collect();
+    let ws = listed.into_iter().filter(|r| !hidden.iter().any(|h| same_root(h, r))).collect();
     obj.remove("hiddenProjects");
     obj.remove("hiddenAt");
-    (ws, true)
+    Ok((ws, true))
 }
 
 /// Sets `workspace` on the first load (see `workspace_or_migrated`); `home` is the ClaudeGate home
@@ -435,7 +441,7 @@ pub fn ensure_workspace(path: &Path, home: &Path, guard: Option<&Path>) -> Resul
         return Ok(c);
     }
     update_config_if(path, guard, |obj, _| {
-        let (ws, derived) = workspace_or_migrated(obj, || listed_root_strings(home));
+        let (ws, derived) = workspace_or_migrated(obj, || listed_root_strings(home))?;
         if derived {
             obj.insert("workspace".into(), serde_json::json!(ws));
         }
@@ -452,7 +458,7 @@ pub fn add_to_workspace(path: &Path, home: &Path, root: &str, guard: Option<&Pat
         return Err("No project to add.".into());
     }
     update_config_if(path, guard, |obj, _| {
-        let (mut ws, derived) = workspace_or_migrated(obj, || listed_root_strings(home));
+        let (mut ws, derived) = workspace_or_migrated(obj, || listed_root_strings(home))?;
         let added = !ws.iter().any(|r| same_root(r, &root));
         if added {
             ws.push(root.clone());
@@ -464,15 +470,15 @@ pub fn add_to_workspace(path: &Path, home: &Path, root: &str, guard: Option<&Pat
     })
 }
 
-/// Removes only `root` from the workspace (every spelling of it, and any root inside it, which
-/// the rail folds into its project), under the config lock. View only: capture is unchanged.
-pub fn remove_from_workspace(path: &Path, home: &Path, root: &str, guard: Option<&Path>) -> Result<Config, String> {
-    use claudegate_core::paths::resolve_root;
-    let gone = resolve_root(Path::new(root.trim()));
+/// Removes only `root` from the workspace (every spelling of it) and the `nested` roots the rail
+/// folds into its project (the project's own folded list, so a workspace root that merely sits
+/// inside the folder stays), under the config lock. View only: capture is unchanged.
+pub fn remove_from_workspace(path: &Path, home: &Path, root: &str, nested: &[String], guard: Option<&Path>) -> Result<Config, String> {
+    let gone: Vec<&str> = std::iter::once(root.trim()).chain(nested.iter().map(|n| n.trim())).collect();
     update_config_if(path, guard, |obj, _| {
-        let (mut ws, derived) = workspace_or_migrated(obj, || listed_root_strings(home));
+        let (mut ws, derived) = workspace_or_migrated(obj, || listed_root_strings(home))?;
         let before = ws.len();
-        ws.retain(|r| !resolve_root(Path::new(r)).starts_with(&gone));
+        ws.retain(|r| !gone.iter().any(|g| same_root(r, g)));
         let removed = ws.len() != before;
         if removed || derived {
             obj.insert("workspace".into(), serde_json::json!(ws));

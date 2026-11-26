@@ -697,22 +697,33 @@ pub fn add_project_with(cg_home: &Path, config_path: &Path, path: &str) -> Resul
 pub struct WorkspaceRemoved {
     pub config: crate::config::Config,
     pub removed: Option<claudegate_core::projects::Removed>,
+    /// Capture was stopped but the project could not be taken off the rail: why. `config` is then
+    /// the config as it stands.
+    pub workspace_error: Option<String>,
 }
 
 /// `remove_from_workspace` minus Tauri. Takes `root` off the rail (view only). With `stop_capture`
 /// it first runs the Remove flow (`remove_project_with`, every evidence rule included: only an
 /// app-added root, forget-only when VS Code or Cursor uses it, blocked in read-only mode); when
-/// that fails the workspace is left as it was.
+/// that fails the workspace is left as it was. When capture was stopped but the workspace write
+/// fails, that partial result comes back (`workspace_error`), never as a plain failure. `nested`
+/// is the project's folded nested roots, which leave the workspace with it.
 pub fn remove_from_workspace_with(
     cg_home: &Path,
     config_path: &Path,
     root: &str,
+    nested: &[String],
     stop_capture: bool,
     storage: &[PathBuf],
 ) -> Result<WorkspaceRemoved, String> {
     let removed = if stop_capture { Some(remove_project_with(cg_home, config_path, root, storage)?) } else { None };
-    let config = crate::config::remove_from_workspace(config_path, cg_home, root, Some(cg_home))?;
-    Ok(WorkspaceRemoved { config, removed })
+    match crate::config::remove_from_workspace(config_path, cg_home, root, nested, Some(cg_home)) {
+        Ok(config) => Ok(WorkspaceRemoved { config, removed, workspace_error: None }),
+        Err(e) if removed.is_some() => {
+            Ok(WorkspaceRemoved { config: crate::config::load_or_create(config_path), removed, workspace_error: Some(e) })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// `remove_project` minus Tauri. Only roots the app added; the session file is kept. When VS Code
@@ -858,10 +869,10 @@ pub async fn remove_project(root: String) -> Result<claudegate_core::projects::R
 }
 
 #[tauri::command]
-pub async fn remove_from_workspace(root: String, stop_capture: bool) -> Result<WorkspaceRemoved, String> {
+pub async fn remove_from_workspace(root: String, nested: Vec<String>, stop_capture: bool) -> Result<WorkspaceRemoved, String> {
     blocking(move || {
         let storage = claudegate_core::projects::storage_files(&ext_sources());
-        remove_from_workspace_with(&claudegate_home(), &crate::config::config_path(), &root, stop_capture, &storage)
+        remove_from_workspace_with(&claudegate_home(), &crate::config::config_path(), &root, &nested, stop_capture, &storage)
     })
     .await?
 }

@@ -83,10 +83,39 @@ fn migration_of_a_missing_config_lists_every_root_and_an_empty_workspace_stays_e
     f.set_roots(&[&a]);
     let c = ensure_workspace(&f.cfg, &f.cg, None).unwrap();
     assert_eq!(c.workspace, Some(vec![a.clone()]));
-    remove_from_workspace(&f.cfg, &f.cg, &a, None).unwrap();
+    remove_from_workspace(&f.cfg, &f.cg, &a, &[], None).unwrap();
     let c = ensure_workspace(&f.cfg, &f.cg, None).unwrap();
     assert_eq!(c.workspace, Some(vec![]), "an empty list is the user's, not a missing one");
     assert_eq!(f.config()["workspace"], json!([]));
+}
+
+#[test]
+fn migration_from_an_unreadable_roots_file_writes_nothing() {
+    let f = fx();
+    let a = f.dir("shop-api");
+    f.write_config(json!({ "editor": "hx {path}", "hiddenProjects": [a], "hiddenAt": { &a: "2026-11-20T10:00:00.000Z" } }));
+    let before = fs::read(&f.cfg).unwrap();
+    for bad in [format!("[\"{a}\", \"/w/hal"), "{\"not\": \"a list\"}".to_string(), "[1, 2]".to_string()] {
+        fs::write(f.cg.join("workspace-roots.json"), &bad).unwrap();
+        assert!(ensure_workspace(&f.cfg, &f.cg, None).is_err(), "{bad}");
+        assert!(add_to_workspace(&f.cfg, &f.cg, &a, None).is_err(), "{bad}");
+        assert!(remove_from_workspace(&f.cfg, &f.cg, &a, &[], None).is_err(), "{bad}");
+        assert_eq!(fs::read(&f.cfg).unwrap(), before, "config.json untouched for {bad}");
+    }
+    // Missing reads as no roots: the workspace is derived empty, the hidden list dropped.
+    fs::remove_file(f.cg.join("workspace-roots.json")).unwrap();
+    assert_eq!(ensure_workspace(&f.cfg, &f.cg, None).unwrap().workspace, Some(vec![]));
+    assert!(f.config().get("hiddenProjects").is_none());
+}
+
+#[test]
+fn the_config_reports_the_workspace_resolved_and_add_matches_it() {
+    let f = fx();
+    let a = f.dir("shop-api");
+    f.write_config(json!({ "workspace": [format!("{a}/./"), format!("{a}/")] }));
+    let c = add_to_workspace(&f.cfg, &f.cg, &a, None).unwrap();
+    assert_eq!(c.workspace, Some(vec![a.clone()]), "one entry, spelled as the rail spells it");
+    assert_eq!(load_or_create(&f.cfg).workspace, Some(vec![a]));
 }
 
 #[test]
@@ -128,7 +157,7 @@ fn removing_is_remove_only_under_concurrency() {
     std::thread::scope(|s| {
         for r in roots.iter().step_by(2) {
             let (cfg, cg) = (f.cfg.clone(), f.cg.clone());
-            s.spawn(move || remove_from_workspace(&cfg, &cg, r, None).unwrap());
+            s.spawn(move || remove_from_workspace(&cfg, &cg, r, &[], None).unwrap());
         }
     });
     let left: Vec<String> = roots.iter().skip(1).step_by(2).cloned().collect();
@@ -136,13 +165,15 @@ fn removing_is_remove_only_under_concurrency() {
 }
 
 #[test]
-fn removing_a_project_takes_its_nested_roots_with_it() {
+fn removing_a_project_takes_only_the_nested_roots_it_folds() {
     let f = fx();
     let (umb, other) = (f.dir("umbrella"), f.dir("umbrellax"));
     let nested = f.dir("umbrella/umbrella-orders");
-    f.write_config(json!({ "workspace": [umb, nested, other] }));
-    let c = remove_from_workspace(&f.cfg, &f.cg, &umb, None).unwrap();
-    assert_eq!(c.workspace, Some(vec![other]), "a sibling sharing the name prefix stays");
+    // Inside the parent's folder, but not one of its folded nested roots: it stays.
+    let unfolded = f.dir("umbrella/scratch");
+    f.write_config(json!({ "workspace": [umb, nested, unfolded, other] }));
+    let c = remove_from_workspace(&f.cfg, &f.cg, &umb, &[nested.clone()], None).unwrap();
+    assert_eq!(c.workspace, Some(vec![unfolded, other]), "a sibling sharing the name prefix stays");
 }
 
 #[test]
@@ -183,7 +214,7 @@ fn remove_from_workspace_alone_never_touches_capture() {
     f.write_config(json!({ "workspace": [] }));
     add_project_with(&f.cg, &f.cfg, &app).unwrap();
     let roots = f.roots_bytes();
-    let r = remove_from_workspace_with(&f.cg, &f.cfg, &app, false, &[]).unwrap();
+    let r = remove_from_workspace_with(&f.cg, &f.cfg, &app, &[], false, &[]).unwrap();
     assert!(r.removed.is_none());
     assert_eq!(r.config.workspace, Some(vec![]));
     assert_eq!(f.roots_bytes(), roots);
@@ -196,7 +227,7 @@ fn remove_with_stop_capture_runs_the_remove_flow() {
     let (app, keep) = (f.dir("app"), f.dir("keep"));
     f.write_config(json!({ "workspace": [keep] }));
     add_project_with(&f.cg, &f.cfg, &app).unwrap();
-    let r = remove_from_workspace_with(&f.cg, &f.cfg, &app, true, &[]).unwrap();
+    let r = remove_from_workspace_with(&f.cg, &f.cfg, &app, &[], true, &[]).unwrap();
     assert!(r.removed.unwrap().unregistered);
     assert_eq!(r.config.workspace, Some(vec![keep]));
     assert_eq!(f.roots_bytes().map(|b| serde_json::from_slice::<serde_json::Value>(&b).unwrap()), Some(json!([])));
@@ -211,7 +242,7 @@ fn stop_capture_keeps_the_evidence_rules_forget_only_when_vs_code_uses_the_root(
     add_project_with(&f.cg, &f.cfg, &app).unwrap();
     let storage = f.ws.join("storage.json");
     fs::write(&storage, json!({ "windowsState": { "lastActiveWindow": { "folder": format!("file://{app}") } } }).to_string()).unwrap();
-    let r = remove_from_workspace_with(&f.cg, &f.cfg, &app, true, &[storage]).unwrap();
+    let r = remove_from_workspace_with(&f.cg, &f.cfg, &app, &[], true, &[storage]).unwrap();
     assert!(!r.removed.unwrap().unregistered, "capture stays on");
     assert_eq!(f.roots_bytes().map(|b| serde_json::from_slice::<serde_json::Value>(&b).unwrap()), Some(json!([app])));
     assert_eq!(r.config.workspace, Some(vec![]));
@@ -225,12 +256,12 @@ fn stop_capture_that_fails_leaves_the_workspace_alone() {
     add_project_with(&f.cg, &f.cfg, &app).unwrap();
     add_to_workspace(&f.cfg, &f.cg, &vs, None).unwrap();
     // A root the app did not add is refused by the remove flow.
-    assert!(remove_from_workspace_with(&f.cg, &f.cfg, &vs, true, &[]).is_err());
+    assert!(remove_from_workspace_with(&f.cg, &f.cfg, &vs, &[], true, &[]).is_err());
     save_read_only(&f.cfg, true, None).unwrap();
-    let e = remove_from_workspace_with(&f.cg, &f.cfg, &app, true, &[]).unwrap_err();
+    let e = remove_from_workspace_with(&f.cg, &f.cfg, &app, &[], true, &[]).unwrap_err();
     assert!(e.contains("Read-only mode is on"));
     assert_eq!(f.config()["workspace"], json!([app, vs]));
     // Read-only still lets the view change: the workspace is the app's own.
-    let r = remove_from_workspace_with(&f.cg, &f.cfg, &app, false, &[]).unwrap();
+    let r = remove_from_workspace_with(&f.cg, &f.cfg, &app, &[], false, &[]).unwrap();
     assert_eq!(r.config.workspace, Some(vec![vs]));
 }
