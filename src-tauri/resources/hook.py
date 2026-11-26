@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# CLAUDEGATE_HOOK_VERSION=v1.17.0
+# CLAUDEGATE_HOOK_VERSION=v1.18.0
 """
 ClaudeGate PreToolUse hook.
 Captures original file content before any Claude write and records it in
@@ -153,6 +153,10 @@ def is_excluded(file_path: str, root: str, globs: list) -> bool:
     """Port of ExcludeMatcher.isExcluded: test the absolute path, the
     root-relative path and each ancestor directory of it, so a glob naming a
     folder (`.superpowers/sdd`, `**/dist`) excludes everything inside."""
+    return _excluded_by(file_path, root, _compile_globs(globs))
+
+
+def _compile_globs(globs: list) -> list:
     patterns = []
     for glob in globs:
         if not isinstance(glob, str):
@@ -161,6 +165,10 @@ def is_excluded(file_path: str, root: str, globs: list) -> bool:
             patterns.append(re.compile(glob_to_regex(glob)))
         except re.error:
             continue  # an invalid glob excludes nothing, as in the extension
+    return patterns
+
+
+def _excluded_by(file_path: str, root: str, patterns: list) -> bool:
     if not patterns:
         return False
     abs_path = file_path.replace("\\", "/")
@@ -336,6 +344,15 @@ MAX_CANDIDATE_LEN = 400
 # pathlib/file-object write calls that usually accompany them.
 _OPEN_WRITE_RE = re.compile(r"""open\s*\([^()]*?,\s*(['"])[^'"]*[wa+][^'"]*\1""")
 _WRITE_CALL_RE = re.compile(r"\.write(?:_text|_bytes|lines)?\s*\(")
+# The same for JavaScript runtimes: `fs.writeFileSync(p, s)`, `fs.promises.writeFile`,
+# `createWriteStream`, `Bun.write`, `Deno.writeTextFile`. Counted only when the
+# command runs node/tsx/deno/bun (_NODE_RUNTIME_RE), so a `grep writeFile(` or a
+# python body that mentions one is not a write. A call right after a JS quote
+# (`console.log('writeFile(')`) is text, not a call.
+_NODE_WRITE_RE = re.compile(
+    r"(?<![\w'`])(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|"
+    r"Bun\.write|Deno\.writeTextFile(?:Sync)?|Deno\.writeFile(?:Sync)?)\s*\(")
+_NODE_RUNTIME_RE = re.compile(r"^(?:node|nodejs|tsx|ts-node|deno|bun)(?:[0-9]+(?:\.[0-9]+)*)?$")
 
 # Tools whose non-flag arguments are write targets whenever they are invoked.
 _ALWAYS_WRITE_TOOLS = frozenset({
@@ -674,14 +691,12 @@ def _git_targets(args: list):
         if "--" in rest:
             after = rest[rest.index("--") + 1:]
             return [a for a in after if not a.startswith("-")]
-        # `git checkout .` / a branch name names no file — Tier 3, out of scope.
-        return [a for a in rest if not a.startswith("-") and _pathspec_shaped(a)]
-    if sub == "stash":
-        return [] if rest and rest[0] in ("pop", "apply") else None
-    if sub == "reset":
-        if "--hard" not in rest:
-            return None
-        return [a for a in rest if not a.startswith("-") and _pathspec_shaped(a)]
+        # `git checkout .` / a branch name names no file. A branch switch
+        # brings in other people's changes: never a capture (_implicit_op).
+        named = [a for a in rest if not a.startswith("-") and _pathspec_shaped(a)]
+        return named or None
+    # `stash pop/apply` and `reset --hard` rewrite the tree without naming a
+    # file: history operations, logged by _implicit_op and never captured.
     return None
 
 
@@ -723,6 +738,628 @@ def _tool_targets(words: list):
                     return _script_tool_files(name, args)
                 return [x for x in args if not x.startswith("-")]
     return None
+
+
+# Wrappers whose own options (and option values) come before the command they
+# run: `xargs -n1 git pull`, `watch -n 5 make gen`.
+_OPTION_WRAPPERS = {
+    "xargs": frozenset({"-n", "-I", "-P", "-L", "-s", "-d", "-E", "-a", "--max-args",
+                        "--max-procs", "--delimiter", "--arg-file"}),
+    "watch": frozenset({"-n", "--interval", "-d", "--differences", "-q", "--equexit"}),
+}
+
+
+def _strip_prefix(words: list) -> list:
+    """`words` without leading wrappers (`sudo`, `env`, `xargs -n1`, `watch
+    -n 5`, …) and `VAR=value`."""
+    while words:
+        head = words[0]
+        takes_value = _OPTION_WRAPPERS.get(head)
+        if takes_value is not None:
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                flag = words[0]
+                words = words[1:]
+                if flag in takes_value and words:
+                    words = words[1:]          # `-n 1`; `-n1` carries its own
+            continue
+        if head in _WRAPPERS:
+            words = words[1:]
+            continue
+        name, _, _ = head.partition("=")
+        if "=" in head and not head.startswith("-") and name.isidentifier():
+            words = words[1:]
+            continue
+        break
+    return words
+
+
+# Commands that bring in OTHER people's changes, or rewrite many files without
+# naming them. The maintainer's rule: a capture means "Claude changed this file
+# and the user should review it", so these never create a pending entry. They
+# are logged as `skip-implicit <cmd> <sub>` so the gap stays visible.
+_IMPLICIT_GIT = frozenset({"pull", "merge", "rebase", "cherry-pick", "revert", "switch"})
+_CODEGEN = frozenset({"protoc", "sqlc", "swag", "buf", "make", "gmake"})
+
+
+# Generators that rewrite files they do not name on the command line.
+_CODEGEN_EXTRA = frozenset({"mockgen", "stringer", "wire", "oapi-codegen", "ent", "gqlgen",
+                            "openapi-generator", "openapi-generator-cli", "prisma", "drizzle-kit"})
+# Runners in front of a generator: `timeout 60 buf generate`, `npx prisma generate`.
+_CODEGEN_RUNNERS = frozenset({"timeout", "nice", "ionice", "stdbuf", "npx", "pnpx", "bunx",
+                              "uvx", "time", "nohup"})
+# A pathspec naming the whole tree, or a whole directory: `git checkout -- .`.
+_WHOLE_TREE = frozenset({".", "./", ":/", ":", "*"})
+
+
+def _whole_tree(a: str) -> bool:
+    return a in _WHOLE_TREE or a.endswith("/")
+
+
+def _unwrap_subshell(words: list) -> list:
+    """`(git pull)`, `$(git pull`, `` `git stash pop` `` → the words of the
+    command inside. The lexer does not split on `(` or a backtick, so the
+    opener arrives glued to the first word and `)` to the last."""
+    if not words:
+        return words
+    first = _cmd_word(words[0])
+    words = ([first] if first else []) + list(words[1:])
+    if words:
+        last = words[-1].rstrip(")`")
+        words = words[:-1] + ([last] if last else [])
+    return words
+
+
+def _implicit_op(words: list, cwd: str | None = None):
+    """A short label (`git pull`, `make gen`, `tar -xzf`) when this segment is a
+    never-capture operation, else None. `cwd` lets `git checkout X` be told
+    apart: X that is not an existing path is a branch.
+
+    A subshell or a substitution counts the same: `(cd d && git pull)`,
+    `OUT=$(git pull)`, `` echo `git stash pop` ``."""
+    label = _implicit_op_plain(_unwrap_subshell(words), cwd)
+    if label:
+        return label
+    # A command substitution anywhere in the segment runs its own command.
+    for k, w in enumerate(words):
+        cut = -1
+        for opener in ("$(", "`"):
+            at = w.find(opener)
+            if at != -1 and (cut == -1 or at < cut):
+                cut = at
+        if cut == -1:
+            continue
+        inner = [w[cut:]] + list(words[k + 1:])
+        label = _implicit_op_plain(_unwrap_subshell(inner), cwd)
+        if label:
+            return label
+    return None
+
+
+def _implicit_op_plain(words: list, cwd: str | None = None):
+    words = _strip_prefix(words)
+    while words and _base(words[0]) in _CODEGEN_RUNNERS:
+        words = words[1:]
+        while words and (words[0].startswith("-") or _DURATION_RE.match(words[0])):
+            words = words[1:]
+    if not words:
+        return None
+    name = _base(words[0])
+    args = words[1:]
+    if name == "git":
+        idx = 0
+        while idx < len(args) and args[idx].startswith("-"):
+            idx += 2 if args[idx] in ("-C", "-c") else 1
+        if idx >= len(args):
+            return None
+        sub, rest = args[idx], args[idx + 1:]
+        operands = [a for a in rest if not a.startswith("-") and a != "--"]
+        if sub in ("checkout", "restore"):
+            after = rest[rest.index("--") + 1:] if "--" in rest else None
+            paths = after if after is not None else operands
+            if any(_whole_tree(a) for a in paths):
+                return "git " + sub
+            if sub == "checkout" and after is None:
+                # No `--`: git takes X as a ref unless it is a path. Anything
+                # we cannot show to be a file is a branch switch.
+                def is_path(a):
+                    if not _pathspec_shaped(a):
+                        return False
+                    if cwd is None and not os.path.isabs(a):
+                        return False
+                    return os.path.lexists(a if os.path.isabs(a) else os.path.join(cwd, a))
+                if not operands or not all(is_path(a) for a in operands):
+                    return "git checkout"
+            return None
+        hit = (sub in _IMPLICIT_GIT or sub in ("clean", "am")
+               or (sub == "stash" and rest[:1] not in (["list"], ["show"], ["drop"], ["clear"]))
+               or (sub == "reset" and "--hard" in rest))
+        return "git " + sub if hit else None
+    if name == "go":
+        return "go generate" if args[:1] == ["generate"] else None
+    if name in ("npm", "pnpm", "yarn", "bun"):
+        script = args[1] if args[:1] == ["run"] and len(args) > 1 else (
+            args[0] if args and name in ("yarn", "pnpm") else "")
+        # A build or a generator rewrites files it does not name.
+        hit = script.startswith("gen") or script == "build" or script.startswith("build:")
+        return (name + " run " + script) if hit else None
+    if name in _CODEGEN or name in _CODEGEN_EXTRA or name in ("unzip", "gunzip"):
+        return (name + " " + args[0]) if args else name
+    if name == "gzip" and any(a in ("-d", "--decompress") or re.match(r"^-[a-zA-Z]*d", a) for a in args):
+        return "gzip -d"
+    if name in ("7z", "7za", "7zr") and args[:1] in (["x"], ["e"]):
+        return name + " " + args[0]
+    if name == "bsdtar" and any(re.match(r"^-[a-zA-Z]*x", a) or a.startswith("x") for a in args[:2]):
+        return "bsdtar " + args[0]
+    if name == "tar" and args:
+        first = args[0]
+        extracts = (("x" in first and not first.startswith("-"))
+                    or any(re.match(r"^-[a-zA-Z]*x", a) or a in ("--extract", "--get")
+                           for a in args))
+        return ("tar " + first) if extracts else None
+    return None
+
+
+def _unsupported_delete(words: list):
+    """A deletion whose files we cannot name: `find … -delete`, `xargs rm`."""
+    for k, w in enumerate(words[:-1]):
+        if _base(w) == "xargs" and any(_base(x) in ("rm", "unlink") for x in words[k + 1:]):
+            return "xargs rm"
+    words = _strip_prefix(words)
+    if not words:
+        return None
+    name = _base(words[0])
+    if name == "find" and any(a in ("-delete",) for a in words[1:]):
+        return "find -delete"
+    if name == "find" and "-exec" in words and any(_base(w) == "rm" for w in words):
+        return "find -exec rm"
+    if name == "xargs" and any(_base(w) in ("rm", "unlink") for w in words[1:]):
+        return "xargs rm"
+    return None
+
+
+_RM_RECURSIVE_RE = re.compile(r"^-[a-zA-Z]*[rR]")
+# Characters the shell would expand. There is no glob expansion here, so an
+# operand carrying one names no file we can snapshot: it is logged instead.
+_GLOB_CHARS = frozenset("*?[{")
+# Files one recursive delete may capture. Past it the directory is logged as
+# `skip-too-many` and nothing in it is captured: a review panel of 400 deleted
+# build outputs helps nobody, and the walk must stay off the hot path.
+RM_WALK_CAP = 50
+# Directory entries a walk may look at before giving up, whatever it finds.
+_WALK_ENTRY_CAP = 2000
+# Operands of deletions and package commands one command may check on disk.
+# Each check is a stat or two; a 64 KiB `rm a b c …` must not cost thousands.
+_FS_OPERAND_BUDGET = 100
+
+
+def _deletion(words: list):
+    """`(recursive, operands)` for `rm` / `git rm`, else None. `git rm
+    --cached` only unstages — nothing leaves the disk — so it is None too."""
+    words = _strip_prefix(words)
+    if not words:
+        return None
+    name = _base(words[0])
+    args = words[1:]
+    if name == "git":
+        idx = 0
+        while idx < len(args) and args[idx].startswith("-"):
+            idx += 2 if args[idx] in ("-C", "-c") else 1
+        if idx >= len(args) or args[idx] != "rm":
+            return None
+        args = args[idx + 1:]
+        if "--cached" in args:
+            return None
+    elif name == "unlink":
+        return (False, args[:1]) if args else None
+    elif name == "shred":
+        if not any(a in ("-u", "--remove") or re.match(r"^-[a-zA-Z]*u", a) for a in args):
+            return None
+    elif name != "rm":
+        return None
+    recursive = False
+    operands: list = []
+    options_done = False
+    for a in args:
+        if not options_done and a == "--":
+            options_done = True
+            continue
+        if a.startswith("#"):
+            break                         # a shell comment: `rm a.go # old`
+        if not options_done and a.startswith("-") and a != "-":
+            if _RM_RECURSIVE_RE.match(a) or a == "--recursive":
+                recursive = True
+            continue
+        # `rm -- -x` removes a file named `-x`; `./-x` is the same file in a
+        # form the path checks accept.
+        operands.append("./" + a if a.startswith("-") else a)
+    return recursive, operands
+
+
+def _walk_files(top: str, cap: int = None, skip=None, entries: list = None):
+    """`(files, overflow)` — the regular files under `top`, never following a
+    symlink, never entering `.git`, never leaving `top`'s filesystem. `skip`
+    (a path predicate) prunes excluded directories and files before they are
+    counted. `overflow` is True, and the walk stops at once, when there are
+    more than `cap` (RM_WALK_CAP) files or it has looked at _WALK_ENTRY_CAP
+    entries — or, when `entries` (a one-item list) is given, once the
+    command's shared entry budget in it runs out, so ten large directories
+    cost one budget, not ten."""
+    if cap is None:
+        cap = RM_WALK_CAP
+    if entries is None:
+        entries = [_WALK_ENTRY_CAP]
+    files: list = []
+    stack = [top]
+    try:
+        device = os.stat(top, follow_symlinks=False).st_dev
+    except OSError:
+        return files, False
+    while stack:
+        d = stack.pop()
+        try:
+            it = os.scandir(d)
+        except OSError:
+            continue
+        with it:
+            for e in it:
+                entries[0] -= 1
+                if entries[0] < 0:
+                    return files, True
+                if e.name == ".git":
+                    continue
+                try:
+                    if e.is_symlink():
+                        continue
+                    if e.is_dir(follow_symlinks=False):
+                        if skip is not None and skip(e.path):
+                            continue
+                        if e.stat(follow_symlinks=False).st_dev != device:
+                            continue          # a mount point: another filesystem
+                        stack.append(e.path)
+                    elif e.is_file(follow_symlinks=False):
+                        if skip is not None and skip(e.path):
+                            continue
+                        files.append(e.path)
+                        if len(files) > cap:
+                            return files, True
+                except OSError:
+                    continue
+    return sorted(files), False
+
+
+# curl/wget options that take a value, so the value is not read as a URL.
+_CURL_VALUE_SHORT = frozenset("dHXuAeFTbcwxmrKECQUzYDpPt")
+_CURL_VALUE_LONG = frozenset("""
+    --data --data-raw --data-binary --data-urlencode --data-ascii --json --header
+    --request --user --user-agent --referer --form --form-string --upload-file
+    --cookie --cookie-jar --write-out --proxy --max-time --range --config --cert
+    --key --cacert --capath --connect-timeout --retry --retry-delay --dump-header
+    --resolve --connect-to --interface --limit-rate --max-filesize --oauth2-bearer
+    --output-dir --stderr --trace --trace-ascii --variable --expect100-timeout
+    """.split())
+_WGET_VALUE_SHORT = frozenset("oPeTtwQDlUARiBIXa")
+
+
+def _url_basename(url: str) -> str:
+    """The file name `curl -O` derives from a URL: its path's last segment."""
+    rest = url.split("://", 1)[1] if "://" in url else url
+    path = rest.split("/", 1)[1] if "/" in rest else ""
+    path = re.split(r"[?#]", path, 1)[0]
+    return path.rsplit("/", 1)[-1]
+
+
+def _curl_targets(args: list):
+    """`(targets, notes)` for curl: `-o F`, `--output[=] F`, and for `-O` /
+    `--remote-name` the URL's basename. None when curl writes to stdout."""
+    outs: list = []
+    urls: list = []
+    remote = header_name = False
+    out_dir = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        nxt = args[i + 1] if i + 1 < len(args) else None
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            if name == "--output-dir":
+                if eq:
+                    out_dir = val
+                elif nxt is not None:
+                    out_dir = nxt
+                    i += 1
+            elif name == "--output":
+                if eq:
+                    outs.append(val)
+                elif nxt is not None:
+                    outs.append(nxt)
+                    i += 1
+            elif name in ("--remote-name", "--remote-name-all"):
+                remote = True
+            elif name == "--remote-header-name":
+                header_name = True
+            elif name == "--url":
+                if eq:
+                    urls.append(val)
+                elif nxt is not None:
+                    urls.append(nxt)
+                    i += 1
+            elif name in _CURL_VALUE_LONG and not eq:
+                i += 1
+        elif a.startswith("-") and len(a) > 1:
+            for j in range(1, len(a)):
+                c = a[j]
+                if c == "o":
+                    if a[j + 1:]:
+                        outs.append(a[j + 1:])
+                    elif nxt is not None:
+                        outs.append(nxt)
+                        i += 1
+                    break
+                if c == "O":
+                    remote = True
+                elif c == "J":
+                    header_name = True
+                elif c in _CURL_VALUE_SHORT:
+                    if not a[j + 1:]:
+                        i += 1
+                    break
+        else:
+            urls.append(a)
+        i += 1
+    notes: list = []
+    if remote:
+        if header_name:
+            notes.append(("skip-unknown-name", "curl -J"))
+        else:
+            for u in urls:
+                name = _url_basename(u)
+                if name:
+                    outs.append(name)
+                else:
+                    notes.append(("skip-unknown-name", u))
+    if not outs and not notes:
+        return None
+    if out_dir:
+        # `--output-dir D` places both `-o F` and `-O` names under D.
+        outs = [o if os.path.isabs(o) or o in ("-", "/dev/null") else os.path.join(out_dir, o)
+                for o in outs]
+    return outs, notes
+
+
+def _wget_targets(args: list):
+    """`-O F`, `--output-document[=] F`. None without one: plain `wget URL`
+    names its file only at run time."""
+    outs: list = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        nxt = args[i + 1] if i + 1 < len(args) else None
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            if name == "--output-document":
+                if eq:
+                    outs.append(val)
+                elif nxt is not None:
+                    outs.append(nxt)
+                    i += 1
+        elif a.startswith("-") and len(a) > 1:
+            for j in range(1, len(a)):
+                c = a[j]
+                if c == "O":
+                    if a[j + 1:]:
+                        outs.append(a[j + 1:])
+                    elif nxt is not None:
+                        outs.append(nxt)
+                        i += 1
+                    break
+                if c in _WGET_VALUE_SHORT:
+                    if not a[j + 1:]:
+                        i += 1
+                    break
+        i += 1
+    return (outs, []) if outs else None
+
+
+def _named_writes(words: list):
+    """`(kind, targets, notes)` for a command that names the files it writes
+    as arguments — `curl -o`, `wget -O`, `git mv A B`, `ln T L` — else None."""
+    words = _strip_prefix(words)
+    if not words:
+        return None
+    name = _base(words[0])
+    args = words[1:]
+    if name == "curl":
+        got = _curl_targets(args)
+        return ("fetch",) + got + (None, False) if got else None
+    if name == "wget":
+        got = _wget_targets(args)
+        return ("fetch",) + got + (None, False) if got else None
+    if name == "git":
+        idx = 0
+        while idx < len(args) and args[idx].startswith("-"):
+            idx += 2 if args[idx] in ("-C", "-c") else 1
+        if idx >= len(args) or args[idx] != "mv":
+            return None
+        rest = args[idx + 1:]
+        if "-n" in rest or "--dry-run" in rest:
+            return None
+        return ("move", [a for a in rest if not a.startswith("-")], [], None, False)
+    if name == "ln":
+        if any(a in ("-t", "--target-directory") or a.startswith("--target-directory=")
+               for a in args):
+            return ("link", [], [("skip-unknown-name", "ln -t")], None, False)
+        operands = [a for a in args if not a.startswith("-")]
+        if not operands:
+            return None
+        link = operands[-1] if len(operands) >= 2 else os.path.basename(operands[0])
+        # The link's source, for the directory check in _scan_command: a
+        # symbolic one resolves against the link's own directory.
+        symbolic = any(re.match(r"^-[a-zA-Z]*s", a) or a == "--symbolic" for a in args)
+        return ("link", [link], [], operands[0], symbolic)
+    return None
+
+
+# Package commands that rewrite their manifest and lockfile without naming
+# them: tool -> (subcommands, files). Only files that already exist are
+# captured; a lockfile the command creates is left alone.
+_MANIFEST_COMMANDS = {
+    "npm": (frozenset({"install", "i", "add", "remove", "uninstall", "update", "rm", "un", "up", "r"}),
+            ("package.json", "package-lock.json")),
+    "pnpm": (frozenset({"add", "remove", "install", "update", "i", "rm", "up", "un", "uninstall"}),
+             ("package.json", "pnpm-lock.yaml")),
+    "yarn": (frozenset({"add", "remove", "install", "upgrade"}),
+             ("package.json", "yarn.lock")),
+    "bun": (frozenset({"add", "remove", "install", "i", "rm"}),
+            ("package.json", "bun.lockb", "bun.lock")),
+    "cargo": (frozenset({"add", "remove", "update", "rm"}),
+              ("Cargo.toml", "Cargo.lock")),
+    "uv": (frozenset({"add", "remove", "lock", "sync"}),
+           ("pyproject.toml", "uv.lock")),
+    "poetry": (frozenset({"add", "remove", "lock"}),
+               ("pyproject.toml", "poetry.lock")),
+}
+# Options that move the project directory: `npm --prefix X`, `pnpm -C X`,
+# `yarn --cwd X`, `uv --directory X`, `go -C X`.
+_PROJECT_DIR_FLAGS = frozenset({"--prefix", "-C", "--cwd", "--dir", "--directory", "--project"})
+
+
+def _manifest_files(words: list):
+    """`(project_dir or None, files)` for a package command that rewrites its
+    manifest (`go mod tidy`, `npm install`, `cargo add`, …), else None.
+    `project_dir` None means the segment's own directory."""
+    words = _strip_prefix(words)
+    if not words:
+        return None
+    name = _base(words[0])
+    if name != "go" and name not in _MANIFEST_COMMANDS:
+        return None
+    project = None
+    workspace = None
+    operands: list = []
+    args = words[1:]
+    i = 0
+    while i < len(args):
+        a = args[i]
+        flag, eq, val = a.partition("=")
+        if name == "npm" and flag in ("-w", "--workspace"):
+            value = val if eq else (args[i + 1] if i + 1 < len(args) else None)
+            if not eq:
+                i += 1
+            workspace = value
+        elif flag in _PKG_VALUE_FLAGS and not eq:
+            i += 1                          # `npm --loglevel warn install`
+        elif flag in _PROJECT_DIR_FLAGS or flag == "--manifest-path":
+            value = val if eq else (args[i + 1] if i + 1 < len(args) else None)
+            if not eq:
+                i += 1
+            if value:
+                project = (os.path.dirname(value) or ".") if flag == "--manifest-path" else value
+        elif a in ("-g", "--global", "--location=global"):
+            return None                     # a global install touches no project
+        elif not a.startswith("-"):
+            operands.append(a)
+        i += 1
+    if name == "go":
+        if operands[:2] == ["mod", "tidy"] or operands[:1] == ["get"]:
+            return project, ("go.mod", "go.sum")
+        return None
+    subs, files = _MANIFEST_COMMANDS[name]
+    if (operands[:1] and operands[0] in subs) or (name == "yarn" and not operands):
+        if workspace:
+            # `npm -w X install y`: X's manifest and the root lockfile.
+            return project, (os.path.join(workspace, "package.json"),) + files[1:]
+        return project, files
+    return None
+
+
+# Options of package tools that take a value, so the value is not read as the
+# subcommand: `npm --loglevel warn install`, `pnpm --filter web add x`.
+_PKG_VALUE_FLAGS = frozenset({"--loglevel", "--registry", "--cache", "--userconfig",
+                              "--filter", "-F", "--config", "--modules-folder",
+                              "--python", "-p", "--package", "--color"})
+
+
+def _project_root(start: str, anchor: str) -> str:
+    """The nearest directory at or above `start` holding `anchor` (`go.mod`,
+    `package.json`, …), never above the registered root that contains
+    `start`. `start` itself when none does — the files are then checked
+    there, and absent ones are left alone."""
+    root = workspace_root_for_file(start, start)
+    d = start
+    while True:
+        if os.path.isfile(os.path.join(d, anchor)):
+            return d
+        if root is None:
+            return start
+        nd = os.path.normcase(d)
+        if nd == root or not nd.startswith(root + os.sep):
+            return start
+        parent = os.path.dirname(d)
+        if parent == d:
+            return start
+        d = parent
+
+
+def _link_copy_dest(words: list, cwd: str | None):
+    """The destination of a `mv`, or of a `cp` that keeps links (`-a`, `-P`,
+    `-d`, `-R`), when a source is a symlink — else None. That destination
+    becomes a link: capturing it would make Reject write the old content
+    through the link into its target."""
+    words = _strip_prefix(words)
+    if not words or _base(words[0]) not in ("cp", "mv"):
+        return None
+    name = _base(words[0])
+    flags = [a for a in words[1:] if a.startswith("-")]
+    operands = [a for a in words[1:] if not a.startswith("-")]
+    if len(operands) < 2:
+        return None
+    if name == "cp" and not any(re.match(r"^-[a-zA-Z]*[aPdR]", f) or f in ("--archive", "--no-dereference")
+                                for f in flags):
+        return None
+    for src in operands[:-1]:
+        path = src if os.path.isabs(src) else (os.path.join(cwd, src) if cwd else None)
+        if path and os.path.islink(path):
+            return operands[-1]
+    return None
+
+
+def _node_script_writes(tokens: list, shell_text: str, text: str, heredocs: list, runs: list) -> bool:
+    """Does a JavaScript runtime here run a write call? Only the script it
+    actually runs counts: the argument of `-e`/`--eval`/`-p`, or a heredoc body
+    fed to it. `node scripts/build.js && grep -n "writeFile(" src/app.ts`
+    does not."""
+    pipelines, where = _pipelines(tokens, shell_text)
+    for pipeline in pipelines:
+        for seg in pipeline:
+            names = [_cmd_word(w) for w, _ in seg]
+            for k, w in enumerate(names):
+                if not _NODE_RUNTIME_RE.match(_base(w)):
+                    continue
+                rest = names[k + 1:]
+                for j, a in enumerate(rest[:-1]):
+                    if a in ("-e", "--eval", "-p", "--print", "eval") and _NODE_WRITE_RE.search(rest[j + 1]):
+                        return True
+                    if a.startswith("--eval=") and _NODE_WRITE_RE.search(a):
+                        return True
+                break
+    if not heredocs:
+        return False
+    offsets = [pos for _k, _v, pos in tokens]
+    for (op, start, end), r in zip(heredocs, runs):
+        if not r or not _NODE_WRITE_RE.search(text[start:end]):
+            continue
+        i = bisect.bisect_right(offsets, op) - 1
+        if i < 0:
+            continue
+        p, s0 = where[i]
+        if any(_NODE_RUNTIME_RE.match(_base(_cmd_word(w))) for seg in pipelines[p][s0:] for w, _ in seg):
+            return True
+    return False
+
+
+def _touches_git_dir(path: str) -> bool:
+    return ".git" in path.replace("\\", "/").split("/")
 
 
 # `sd [OPTIONS] FIND REPLACE [FILES...]` edits FILES in place — unlike sed it
@@ -1225,23 +1862,92 @@ _VAR_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9
 _ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
 
 
-def _expand_vars(value: str, env: dict) -> str | None:
+# Names the hook never takes from its own environment, even under the guard:
+# shell-managed or volatile values (`PWD` is the HOOK's directory, not the
+# session's), and `HOME` (see CLAUDE.md, "Hook behavior").
+_ENV_NEVER = frozenset({"PWD", "OLDPWD", "HOME", "TMPDIR", "SHLVL", "_"})
+
+
+def _env_fallback(name: str) -> str | None:
+    """An exported variable's value, if it may stand in for an unknown one.
+
+    `cd $PROJ_PATH && cat > features/x/commits.yaml` — `PROJ_PATH` is exported
+    from the user's shell rc, so the hook process sees the same value Claude's
+    shell does. Only an absolute value counts; the caller still checks where
+    the expanded path lands (see _expand_vars)."""
+    if name in _ENV_NEVER or name.startswith("CLAUDE"):
+        return None
+    value = os.environ.get(name)
+    if not value or not os.path.isabs(value):
+        return None
+    return value
+
+
+def _registered_roots() -> list:
+    """The workspace roots the extension registered, or [] on any trouble.
+    Read on demand: only an environment fallback asks."""
+    try:
+        with open(WORKSPACE_ROOTS_FILE, encoding="utf-8") as f:
+            roots = json.load(f)
+        return [os.path.normcase(os.path.abspath(r)) for r in roots if isinstance(r, str)]
+    except Exception:
+        return []
+
+
+def _inside_a_root(path: str) -> bool:
+    p = os.path.normcase(os.path.abspath(path))
+    return any(p == r or p.startswith(r + os.sep) for r in _registered_roots())
+
+
+def _cd_guard(path: str) -> bool:
+    """A `cd` through an environment value must land in a real directory."""
+    return os.path.isabs(path) and os.path.isdir(path)
+
+
+def _target_guard(path: str) -> bool:
+    """A write target through an environment value must have a real parent
+    directory or lie inside a registered workspace root."""
+    if not os.path.isabs(path):
+        return False
+    return os.path.isdir(os.path.dirname(path)) or _inside_a_root(path)
+
+
+def _assigned_before(env, name: str) -> bool:
+    """Was `name` assigned, unset, read or looped over earlier in the command?"""
+    if isinstance(env, _EnvAt):
+        h = env.hist.get(name)
+        return bool(h) and bisect.bisect_left(h[0], env.i) > 0
+    return name in env
+
+
+def _expand_vars(value: str, env, guard=None) -> str | None:
     """Substitute the literal assignments we have seen, or None if we cannot.
 
     `W=/tmp/wt-sandbox` followed by `cd "$W"` is how these commands are written
     in practice; without this the cd is unknowable and every relative target
-    after it is dropped. Only literals seen earlier in the same command are
-    substituted — the real environment is not consulted, so `$HOME` and
-    `$(pwd)` stay unknowable rather than being resolved against a process whose
-    directory is not the session's.
+    after it is dropped.
+
+    With a `guard` (a `cd` destination or an explicit write target), a name
+    the command never assigned may fall back to the hook's own environment —
+    `cd $PROJ_PATH`, where `PROJ_PATH` is exported from the user's shell rc.
+    Only when: nothing earlier in the command assigned or unset it (a local
+    assignment wins, even an unknowable one); it is not shell-managed (`PWD`,
+    `HOME`, … — _ENV_NEVER); its value is absolute; and `guard` accepts the
+    fully expanded path. `$(pwd)` and anything fancier stay unknowable.
     """
     if "$" not in value:
         return value
     missing = False
+    used_env = False
 
     def sub(m):
-        nonlocal missing
-        got = env.get(m.group(1) or m.group(2))
+        nonlocal missing, used_env
+        name = m.group(1) or m.group(2)
+        got = env.get(name)
+        if got is None and guard is not None and not getattr(env, "no_env", False) \
+                and not _assigned_before(env, name):
+            got = _env_fallback(name)
+            used_env = used_env or got is not None
         if got is None:
             missing = True
             return ""
@@ -1249,6 +1955,8 @@ def _expand_vars(value: str, env: dict) -> str | None:
 
     out = _VAR_REF_RE.sub(sub, value)
     if missing or "$" in out:
+        return None
+    if used_env and not guard(out):
         return None
     return out
 
@@ -1315,11 +2023,15 @@ class _EnvAt:
     per-variable history. A dict snapshot per segment was quadratic: 20,000
     `A<n>=x;` assignments in one command copied a growing dict 20,000 times."""
 
-    __slots__ = ("hist", "i")
+    __slots__ = ("hist", "i", "no_env")
 
-    def __init__(self, hist: dict, i: int):
+    def __init__(self, hist: dict, i: int, no_env: bool = False):
         self.hist = hist
         self.i = i
+        # True once the command has loaded variables we cannot see (`source
+        # .env`, `eval "$(direnv export bash)"`): the hook's own environment no
+        # longer says what they hold.
+        self.no_env = no_env
 
     def get(self, name: str, default=None):
         h = self.hist.get(name)
@@ -1327,6 +2039,22 @@ class _EnvAt:
             return default
         k = bisect.bisect_left(h[0], self.i) - 1
         return h[1][k] if k >= 0 else default
+
+
+def _loads_unseen_env(words: list) -> bool:
+    """Does this segment load variables from somewhere we cannot read?
+    `source .env`, `. ./.env`, `eval "$(…)"`, `set -a`, `export $(cat .env)`,
+    `direnv …`."""
+    if not words:
+        return False
+    head = _cmd_word(words[0])
+    if head in ("source", ".", "eval"):
+        return True
+    if head == "set" and any(re.match(r"^-[a-zA-Z]*a", w) for w in words[1:]):
+        return True
+    if head == "export" and any("$(" in w or "`" in w for w in words[1:]):
+        return True
+    return any(_base(_cmd_word(w)) == "direnv" for w in words)
 
 
 # Builtins whose operands are assignments that persist (`export F=a.go`).
@@ -1356,6 +2084,15 @@ def _segment_assignments(words: list) -> list:
         return [(w, None) for w in words[1:] if not w.startswith("-") and w.isidentifier()]
     if head == "for" and len(words) > 1 and words[1].isidentifier():
         return [(words[1], None)]
+    if head in ("printf", "mapfile", "readarray", "getopts"):
+        # `printf -v NAME …`, `mapfile NAME`, `getopts spec NAME` assign NAME.
+        if head == "printf":
+            names = [words[k + 1] for k in range(len(words) - 1) if words[k] == "-v"]
+        elif head == "getopts":
+            names = words[2:3]
+        else:
+            names = [w for w in words[1:] if not w.startswith("-")][-1:]
+        return [(n, None) for n in names if n.isidentifier()]
     if "read" in words[:2] and head in ("read", "while", "until"):
         k = words.index("read")
         return [(w, None) for w in words[k + 1:] if not w.startswith("-") and w.isidentifier()]
@@ -1379,14 +2116,16 @@ def _segment_cwds(segments: list, cwd: str | None, heredocs: list):
     hd_starts = [a for a, _ in heredocs]
     hist: dict = {}          # name -> ([segment index], [value or None])
     eff = cwd
+    tainted = False
     for j, (words, start) in enumerate(segments):
         starts.append(start)
         cwds.append(eff)
-        envs.append(_EnvAt(hist, j))
+        envs.append(_EnvAt(hist, j, tainted))
         i = bisect.bisect_right(hd_starts, start) - 1
         if i >= 0 and start < heredocs[i][1]:
             continue                      # heredoc body — prose, not a command
-        here = _EnvAt(hist, j + 1)        # sees this segment's own earlier assignments
+        tainted = tainted or _loads_unseen_env(words)
+        here = _EnvAt(hist, j + 1, tainted)  # sees this segment's own earlier assignments
         for name, value in _segment_assignments(words):
             expanded = _expand_vars(value, here) if value is not None else None
             h = hist.setdefault(name, ([], []))
@@ -1394,7 +2133,7 @@ def _segment_cwds(segments: list, cwd: str | None, heredocs: list):
             h[1].append(expanded)
         dest = _cd_destination(words)
         if dest is not None:
-            expanded = _expand_vars(dest, here) if dest else dest
+            expanded = _expand_vars(dest, here, _cd_guard) if dest else dest
             eff = _apply_cd(eff, expanded) if expanded is not None else None
     return starts, cwds, envs
 
@@ -1452,13 +2191,17 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
     we could not follow leaves a trace instead of vanishing.
     """
     if not command or not isinstance(command, str):
-        return False, [], []
+        return False, [], [], _new_extra()
     text = command[:MAX_COMMAND_CHARS]
 
     may_write = False
     ordered: list = []
     seen: set = set()
     unresolved: list = []
+    # `notes`: (event, detail) lines for the caller to log, even when nothing
+    # is captured. `dirs`: directories whose files a recursive delete removes,
+    # walked by the caller.
+    extra = _new_extra()
 
     # The shell and each heredoc body are lexed SEPARATELY. A body is Python, Go
     # or prose: lexed in line with the shell, its apostrophes, `\"` and
@@ -1506,16 +2249,36 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         i = at(offset)
         return seg_cwds[i] if i >= 0 else cwd
 
+    def explicit(tok: str, env) -> str | None:
+        """An explicit target with its variables expanded, or None (recorded
+        as unresolved) when they cannot be."""
+        if "$" not in tok:
+            return tok
+        expanded = _expand_vars(tok, env if env is not None else {}, _target_guard)
+        if expanded is None and tok not in unresolved and len(unresolved) < MAX_CANDIDATES:
+            unresolved.append(tok)
+        return expanded
+
+    def dropped(tok: str) -> None:
+        _drop(extra, tok)
+
     def add(tok: str, require_shape: bool, tok_cwd: str | None, env=None) -> None:
         if len(ordered) >= MAX_CANDIDATES:
-            return                        # full: nothing more can be kept
+            # Full. Count what would have been kept, cheaply (no disk probe),
+            # so the truncation shows up as one `skip-budget` line.
+            t = _normalize_token(tok)
+            if "$" not in t and _plausible(t) and (not require_shape or _path_shaped(t)) \
+                    and (t, tok_cwd) not in seen:
+                seen.add((t, tok_cwd))
+                dropped(t)
+            return
         tok = _normalize_token(tok)
         # An explicit target naming a variable: substitute the literal
         # assignments seen earlier in the command (`F=a.go; sed -i … "$F"`), or
         # record it as unresolved. Never for a speculative word — `$x` in a
         # python body is not a target, and logging it would only be noise.
         if not require_shape and "$" in tok:
-            expanded = _expand_vars(tok, env or {})
+            expanded = _expand_vars(tok, env if env is not None else {}, _target_guard)
             if expanded is None:
                 if tok not in unresolved and len(unresolved) < MAX_CANDIDATES:
                     unresolved.append(tok)
@@ -1537,6 +2300,21 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         if len(ordered) < MAX_CANDIDATES:
             ordered.append((tok, tok_cwd))
 
+    # Never-capture operations: `git pull`, `make gen`, `tar -xzf`. Logged once
+    # per command, never a candidate. The command's explicit targets elsewhere
+    # still count; its speculative pass does not run at all (see Tier 2c).
+    implicit_segs: set = set()
+    for k, ((segment, _start), seg_cwd) in enumerate(zip(segments, seg_cwds)):
+        label = _implicit_op(segment, seg_cwd)
+        if label:
+            implicit_segs.add(k)
+            extra["implicit"] = True
+            _note(extra, "skip-implicit", label, once=True)
+        else:
+            unsupported = _unsupported_delete(segment)
+            if unsupported:
+                _note(extra, "skip-unsupported", unsupported, once=True)
+
     # Tier 2a — explicit redirection targets (write targets by definition, so
     # they need no path shape: `cat > f <<EOF` names `f`).
     #
@@ -1551,15 +2329,158 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         if not _is_device(target):
             may_write = True
             i = at(pos)
+            if i in implicit_segs:
+                continue                  # `make gen > out.go`: the generator's output
             add(target, False, cwd_at(pos), seg_envs[i] if i >= 0 else None)
 
+    # Writes that name their files but must not switch on the speculative
+    # pass (Tier 2c) for the rest of the command: `rm a.go` is not a reason to
+    # guess at every word beside it.
+    quiet_write = False
+
+    budget = [_FS_OPERAND_BUDGET]
+
+    # Deletions — `rm`, `git rm`. Snapshotting the file before it goes leaves
+    # a pending entry whose disk state is "missing"; Reject writes it back.
+    for (segment, _start), seg_cwd, seg_env in zip(segments, seg_cwds, seg_envs):
+        deletion = _deletion(segment)
+        if deletion is None:
+            continue
+        recursive, operands = deletion
+        quiet_write = True
+        for op in operands:
+            if budget[0] <= 0:
+                dropped(op)
+                continue
+            budget[0] -= 1
+            if any(c in op for c in _GLOB_CHARS):
+                _note(extra, "skip-glob", op)
+                continue
+            tok = explicit(op, seg_env)
+            if tok is None or _touches_git_dir(tok):
+                continue
+            if not os.path.isabs(tok) and not seg_cwd:
+                add(tok, False, seg_cwd)          # main() logs skip-unknown-cwd
+                continue
+            path = os.path.normpath(tok if os.path.isabs(tok) else os.path.join(seg_cwd, tok))
+            try:
+                if os.path.islink(path):
+                    continue                      # rm removes the link, not a file we can restore
+                if os.path.isdir(path):
+                    if recursive and path not in extra["dirs"]:
+                        if len(extra["dirs"]) < MAX_CANDIDATES:
+                            extra["dirs"].append(path)
+                        else:
+                            dropped(op)
+                    continue
+                # Nothing there: deleting it changes nothing, and capturing it
+                # would record a "new file" that never existed.
+                if not os.path.isfile(path):
+                    continue
+            except (OSError, ValueError):
+                continue
+            add(tok, False, seg_cwd)
+
+    # Named writes — `curl -o F`, `curl -O URL`, `wget -O F`, `git mv A B`,
+    # `ln T L`. Quiet, like deletions.
+    for (segment, _start), seg_cwd, seg_env in zip(segments, seg_cwds, seg_envs):
+        named = _named_writes(segment)
+        if named is None:
+            continue
+        kind, targets, notes, source, symbolic = named
+        quiet_write = True
+        if budget[0] <= 0 or len(ordered) >= MAX_CANDIDATES:
+            for t in targets:
+                dropped(t)
+            continue
+        budget[0] -= 1
+        for event, detail in notes:
+            _note(extra, event, detail)
+
+        def at_seg(tok):
+            if os.path.isabs(tok):
+                return tok
+            return os.path.join(seg_cwd, tok) if seg_cwd else None
+
+        if kind == "move":
+            # A directory is not a file we can snapshot, and neither is where
+            # it lands: `git mv old-dir new-dir` moves many files unnamed.
+            resolved = [at_seg(t) for t in targets if "$" not in t]
+            if any(r and os.path.isdir(r) for r in resolved):
+                _note(extra, "skip-unknown-name", "git mv " + " ".join(targets)[:200])
+                continue
+        if kind == "link" and source and targets and "$" not in source:
+            link_at = at_seg(targets[0])
+            src = source
+            if symbolic and link_at and not os.path.isabs(src):
+                src = os.path.join(os.path.dirname(link_at), src)
+            elif not os.path.isabs(src):
+                src = at_seg(src)
+            if src and os.path.isdir(src):
+                continue                          # a link to a directory: no file to review
+        for t in targets:
+            tok = explicit(t, seg_env)
+            if tok is None:
+                continue
+            if kind == "link":
+                # Only a link that does not exist yet. Reject restores through
+                # a symlink (atomicWrite follows it), so capturing an existing
+                # L would write L's old content into the link's TARGET; a new
+                # link is rejected by unlinking it, which is safe.
+                base = tok if os.path.isabs(tok) else (os.path.join(seg_cwd, tok) if seg_cwd else None)
+                if base is None:
+                    continue
+                if os.path.isdir(base) and not os.path.islink(base):
+                    _note(extra, "skip-unknown-name", "ln into " + t)   # `ln -s ../x dir`
+                    continue
+                if os.path.lexists(base):
+                    _note(extra, "skip-link-replace", t)
+                    continue
+            add(tok, False, seg_cwd)
+
+    # Manifests a package command rewrites without naming them: `go mod tidy`
+    # -> go.mod, go.sum; `npm install` -> package.json, package-lock.json.
+    # Only those that exist now, in the project directory the command uses.
+    for (segment, _start), seg_cwd, seg_env in zip(segments, seg_cwds, seg_envs):
+        manifest = _manifest_files(segment)
+        if manifest is None:
+            continue
+        if len(ordered) >= MAX_CANDIDATES or budget[0] <= 0:
+            dropped(_base(segment[0]) + " manifest")
+            continue
+        budget[0] -= 1
+        quiet_write = True
+        project, files = manifest
+        if project is not None:
+            project = explicit(project, seg_env)
+            if project is None:
+                continue
+        if project is None or not os.path.isabs(project):
+            if not seg_cwd:
+                continue
+            project = os.path.join(seg_cwd, project or "")
+        # `cd src/sub && npm install` still rewrites the package's manifest.
+        anchor = os.path.basename(files[0])
+        project = _project_root(os.path.normpath(project), anchor)
+        for f in files:
+            path = os.path.normpath(os.path.join(project, f))
+            if os.path.isfile(path):
+                add(path, False, seg_cwd)
+
     # Tier 1/2b — known in-place writer tools and their arguments.
-    for (segment, start), seg_cwd, seg_env in zip(segments, seg_cwds, seg_envs):
+    for k, ((segment, start), seg_cwd, seg_env) in enumerate(zip(segments, seg_cwds, seg_envs)):
+        if k in implicit_segs:
+            continue                      # `git checkout release/1.x` names a ref
         targets = _tool_targets(segment)
         if targets is None:
             continue
         may_write = True
+        dest = _link_copy_dest(segment, seg_cwd)
         for t in targets:
+            if dest is not None and t == dest:
+                _note(extra, "skip-link-replace", t)
+                seen.add((_normalize_token(t), seg_cwd))   # nor by the speculative pass
+                continue
             add(t, False, seg_cwd, seg_env)
 
     # Tier 2a′ — a script handed to a local shell: `nohup sh -c 'run > out.log'`,
@@ -1572,7 +2493,9 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
             script = _shell_c_script(segment)
             if script is None:
                 continue
-            inner_writes, inner, inner_unresolved = _scan_command(script, seg_cwd, _depth + 1)
+            inner_writes, inner, inner_unresolved, inner_extra = _scan_command(
+                script, seg_cwd, _depth + 1)
+            _merge_extra(extra, inner_extra)
             if inner_writes:
                 may_write = True
             for tok in inner_unresolved:
@@ -1580,9 +2503,12 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
                     unresolved.append(tok)
             for tok, tok_cwd in inner:
                 key = (tok, tok_cwd)
-                if key not in seen and len(ordered) < MAX_CANDIDATES:
+                if key not in seen:
                     seen.add(key)
-                    ordered.append(key)
+                    if len(ordered) < MAX_CANDIDATES:
+                        ordered.append(key)
+                    else:
+                        dropped(tok)
 
     # Tier 2a″ — a heredoc fed to a local shell (`bash -s <<EOF`, `cat <<EOF |
     # sh`) is a script like a `sh -c` one: scan it as a command of its own,
@@ -1592,21 +2518,27 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         for (op, start, end), r in zip(found, runs):
             if r != "shell":
                 continue
-            inner_writes, inner, inner_unresolved = _scan_command(
+            inner_writes, inner, inner_unresolved, inner_extra = _scan_command(
                 text[start:end], cwd_at(op), _depth + 1)
+            _merge_extra(extra, inner_extra)
             if inner_writes:
                 may_write = True
             for tok in inner_unresolved:
                 if tok not in unresolved and len(unresolved) < MAX_CANDIDATES:
                     unresolved.append(tok)
             for key in inner:
-                if key not in seen and len(ordered) < MAX_CANDIDATES:
+                if key not in seen:
                     seen.add(key)
-                    ordered.append(key)
+                    if len(ordered) < MAX_CANDIDATES:
+                        ordered.append(key)
+                    else:
+                        dropped(key[0])
 
     # Tier 1 — in-language writes (python heredocs and -c one-liners). Not in
     # a body that is data: a test file written by `cat` that calls `.write(`.
     if _OPEN_WRITE_RE.search(code_text) or _WRITE_CALL_RE.search(code_text):
+        may_write = True
+    elif _NODE_WRITE_RE.search(code_text) and _node_script_writes(tokens, shell_text, text, found, runs):
         may_write = True
 
     # Tier 2c — every path-shaped literal in the command. This is what catches
@@ -1616,7 +2548,12 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
     # Not inside a `sh -c` script (depth > 0): there the words are mostly the
     # program being run (`sh -c './run_all.sh > out.log'`), and only the
     # explicit targets above are worth taking.
-    if may_write and _depth == 0:
+    #
+    # Never in a command that contains an implicit operation (`git pull`, `make
+    # gen`, `tar x`): its words are then as likely to name what the pull or the
+    # generator rewrote as what Claude did, and a baseline taken before the
+    # pull would mix upstream changes into the review. The maintainer's rule.
+    if may_write and _depth == 0 and not extra.get("implicit"):
         for kind, value, pos in tokens:
             if kind == "word":
                 add(value, True, cwd_at(pos))
@@ -1625,7 +2562,42 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         for literal, pos in _quoted_literals(code_text):
             add(literal, True, cwd_at(pos))
 
-    return may_write, ordered, unresolved
+    if _depth == 0 and extra["dropped"][0]:
+        _note(extra, "skip-budget", "%d dropped (first: %s)" % tuple(extra["dropped"]), once=True)
+    return may_write or quiet_write, ordered, unresolved, extra
+
+
+def _new_extra() -> dict:
+    # dropped: [count, first token] of candidates the caps cut off.
+    return {"notes": [], "dirs": [], "implicit": False, "dropped": [0, ""]}
+
+
+def _drop(extra: dict, tok: str) -> None:
+    if not extra["dropped"][0]:
+        extra["dropped"][1] = tok[:MAX_CANDIDATE_LEN]
+    extra["dropped"][0] += 1
+
+
+def _note(extra: dict, event: str, detail: str, once: bool = False) -> None:
+    """Queue a log line. `once`: at most one line of this event per command."""
+    if once and any(e == event for e, _ in extra["notes"]):
+        return
+    if len(extra["notes"]) < MAX_CANDIDATES or event in ("skip-budget", "skip-implicit"):
+        extra["notes"].append((event, detail))
+
+
+def _merge_extra(into: dict, other: dict) -> None:
+    if other.get("implicit"):
+        into["implicit"] = True
+    if other["dropped"][0]:
+        if not into["dropped"][0]:
+            into["dropped"][1] = other["dropped"][1]
+        into["dropped"][0] += other["dropped"][0]
+    for event, detail in other["notes"]:
+        _note(into, event, detail, once=(event == "skip-implicit"))
+    for d in other["dirs"]:
+        if d not in into["dirs"]:
+            into["dirs"].append(d)
 
 
 def command_may_write(command: str) -> bool:
@@ -1655,25 +2627,47 @@ def scan_targets(command: str, cwd: str | None = None):
     """`(paths_from_command(command, cwd), unresolved)` — the second item lists
     the explicit targets dropped because a variable in them cannot be expanded
     (see _scan_command). Both are empty for a command that cannot write."""
-    may_write, candidates, unresolved = _scan_command(command, cwd)
-    return (candidates, unresolved) if may_write else ([], [])
+    full = scan_full(command, cwd)
+    return full["candidates"], full["unresolved"]
 
 
-def capture_file(file_path: str, cwd: str, session_id, captured_at: str) -> None:
-    """Run one target through the capture pipeline. Returns (never exits) on
-    every skip, so a Bash command with several candidates keeps going."""
+def scan_full(command: str, cwd: str | None = None) -> dict:
+    """Everything main() needs from one command: `candidates`, `unresolved`
+    and `dirs` (all empty for a command that cannot write), and `notes` —
+    (event, detail) log lines, kept even then (`skip-implicit git pull`)."""
+    may_write, candidates, unresolved, extra = _scan_command(command, cwd)
+    if not may_write:
+        return {"candidates": [], "unresolved": [], "dirs": [], "notes": extra["notes"],
+                "implicit": bool(extra.get("implicit"))}
+    return {"candidates": candidates, "unresolved": unresolved,
+            "dirs": extra["dirs"], "notes": extra["notes"],
+            "implicit": bool(extra.get("implicit"))}
+
+
+# A file larger than this is not captured: its baseline would sit in the
+# session JSON, which the extension re-parses on every change — one 100 MB
+# dump.sql would make every later decision slow.
+MAX_CAPTURE_BYTES = 2 * 1024 * 1024
+# Files one Bash command may capture in all: its candidates plus the files of
+# its recursive deletes.
+MAX_FILES_PER_COMMAND = 50
+
+
+def _prepare(file_path: str, cwd: str):
+    """`(session_file, path, original_content)` for one target, or None after
+    logging why it is skipped. Reads the file; touches no session."""
     if not os.path.isabs(file_path):
         file_path = os.path.normpath(os.path.join(cwd, file_path))
 
     workspace_root = workspace_root_for_file(file_path, cwd)
     if workspace_root is None:
         log_event("skip-no-root", file_path)
-        return
+        return None
     # Matched against the window's root, not a nested worktree's: the extension's
     # ExcludeMatcher is anchored at the primary workspace folder.
     if is_excluded(file_path, workspace_root, excludes_for_root(workspace_root)):
         log_event("skip-excluded", file_path)
-        return
+        return None
     # A nested git worktree owns its own session deterministically, regardless of
     # which windows are open (fail-open: falls back to workspace_root on any error).
     worktree_root = worktree_root_for_file(file_path, workspace_root)
@@ -1681,49 +2675,179 @@ def capture_file(file_path: str, cwd: str, session_id, captured_at: str) -> None
         workspace_root = worktree_root
     session_file = workspace_session_file(workspace_root)
 
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                original_content: str | None = f.read()
-        except UnicodeDecodeError:
-            # Not UTF-8 text (binary). We cannot safely baseline or later
-            # restore it, and must NOT record it as a null "new" file — that
-            # would let a reject delete the user's real file. Skip capture (a
-            # non-zero exit could also block the edit).
-            log_event("skip-binary", file_path)
-            return
-        except OSError:
-            # Exists but unreadable (permissions, etc) — or a directory, which a
-            # liberal shell-path candidate can be. Same reasoning as above.
-            log_event("skip-unreadable", file_path)
-            return
-    else:
-        original_content = None  # genuinely new — Claude is creating it
+    try:
+        st = os.stat(file_path)
+    except FileNotFoundError:
+        return session_file, file_path, None   # genuinely new — Claude is creating it
+    except OSError:
+        log_event("skip-unreadable", file_path)
+        return None
+    if st.st_size > MAX_CAPTURE_BYTES:
+        log_event("skip-too-large", "%s %d" % (file_path, st.st_size))
+        return None
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            original_content: str | None = f.read()
+    except UnicodeDecodeError:
+        # Not UTF-8 text (binary). We cannot safely baseline or later
+        # restore it, and must NOT record it as a null "new" file — that
+        # would let a reject delete the user's real file. Skip capture (a
+        # non-zero exit could also block the edit).
+        log_event("skip-binary", file_path)
+        return None
+    except OSError:
+        # Exists but unreadable (permissions, etc) — or a directory, which a
+        # liberal shell-path candidate can be. Same reasoning as above.
+        log_event("skip-unreadable", file_path)
+        return None
+    return session_file, file_path, original_content
 
+
+def _commit(prepared: list, session_id, captured_at: str) -> tuple:
+    """Record prepared captures: one lock, one load and one save per session
+    file, however many files land in it. Per-file saves made `rm -rf` of a few
+    directories cost seconds on a 2 MB session.
+
+    Returns `(captured, already_pending)`: the paths this call newly captured,
+    and those it found already pending. The audit record keeps them apart —
+    only a new capture that did not change is a phantom."""
+    captured: list = []
+    already: list = []
+    by_session: dict = {}
+    for session_file, path, content in prepared:
+        by_session.setdefault(session_file, []).append((path, content))
+    for session_file, items in by_session.items():
+        try:
+            new, old = _commit_one(session_file, items, session_id, captured_at)
+            captured.extend(new)
+            already.extend(old)
+        except Exception:
+            log_event("error")          # one session's trouble must not cost the others
+    return captured, already
+
+
+def _commit_one(session_file: str, items: list, session_id, captured_at: str) -> tuple:
     # Hold the advisory lock across the whole read-modify-write so an accept/
     # reject the extension persists in this window can't be clobbered by our
     # write (and vice-versa). Fail-open: acquire_lock returns None on timeout.
     fd, lock_path = acquire_lock(session_file)
     try:
         session = load_session(session_file) or new_session()
-        existing = session["files"].get(file_path)
-        if existing is None or existing.get("reviewStatus") != "pending":
-            session["files"][file_path] = {
-                "originalContent": original_content,
-                "reviewStatus": "pending",
-                "newFile": original_content is None,
-                "sessionId": session_id,
-                "capturedAt": captured_at,
-            }
+        changed = []
+        already = []
+        for path, content in items:
+            existing = session["files"].get(path)
+            if existing is None or existing.get("reviewStatus") != "pending":
+                session["files"][path] = {
+                    "originalContent": content,
+                    "reviewStatus": "pending",
+                    "newFile": content is None,
+                    "sessionId": session_id,
+                    "capturedAt": captured_at,
+                }
+                changed.append(path)
+            else:
+                # An existing pending entry keeps its frozen baseline (no-op).
+                log_event("skip-already-pending", path)
+                already.append(path)
+        if changed:
             if session.get("status") == "reviewed":
                 session["status"] = "active"
             save_session(session, session_file)
-            log_event("captured", file_path)
-        else:
-            # An existing pending entry keeps its frozen baseline (no-op).
-            log_event("skip-already-pending", file_path)
+            for path in changed:
+                log_event("captured", path)
+        return changed, already
     finally:
         release_lock(fd, lock_path)
+
+
+AUDIT_INFLIGHT_DIR = os.path.join(CLAUDEGATE_DIR, "audit", "inflight")
+AUDIT_STALE_MS = 3600000
+AUDIT_MAX_REMOVALS = 50
+AUDIT_MAX_EXAMINED = 200   # entries the stale sweep looks at per run
+
+
+def _audit_inflight(hook_input: dict, started_ms: int, cwd: str, session_id,
+                    captured: list, already_pending: list, implicit: bool,
+                    background: bool) -> None:
+    """Leave `audit/inflight/<tool_use_id>.json` for the PostToolUse audit hook
+    and sweep records older than an hour. Never raises: the audit must not
+    affect capture."""
+    try:
+        try:
+            now = time.time()
+            removed = examined = 0
+            with os.scandir(AUDIT_INFLIGHT_DIR) as it:
+                for entry in it:
+                    if removed >= AUDIT_MAX_REMOVALS or examined >= AUDIT_MAX_EXAMINED:
+                        break
+                    examined += 1
+                    try:
+                        if (now - entry.stat(follow_symlinks=False).st_mtime) * 1000 > AUDIT_STALE_MS:
+                            os.remove(entry.path)
+                            removed += 1
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        tool_use_id = hook_input.get("tool_use_id")
+        if hook_input.get("tool_name") != "Bash" or not isinstance(tool_use_id, str) \
+                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", tool_use_id) \
+                or tool_use_id in (".", ".."):
+            return
+        # Private: the record carries paths and the session id.
+        for d in (os.path.dirname(AUDIT_INFLIGHT_DIR), AUDIT_INFLIGHT_DIR):
+            os.makedirs(d, mode=0o700, exist_ok=True)
+            try:
+                os.chmod(d, 0o700)
+            except OSError:
+                pass
+        record = {"startedAt": started_ms, "cwd": cwd,
+                  "sessionId": session_id if isinstance(session_id, str) else None,
+                  "captured": list(dict.fromkeys(captured)),
+                  "alreadyPending": list(dict.fromkeys(already_pending)),
+                  "implicit": implicit, "background": background}
+        final = os.path.join(AUDIT_INFLIGHT_DIR, tool_use_id + ".json")
+        tmp = "%s.%d.tmp" % (final, os.getpid())
+        try:
+            with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
+                           "w", encoding="utf-8") as f:
+                json.dump(record, f)
+            os.replace(tmp, final)
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def capture_file(file_path: str, cwd: str, session_id, captured_at: str) -> None:
+    """Run one target through the capture pipeline. Returns (never exits) on
+    every skip, so a Bash command with several candidates keeps going."""
+    prepared = _prepare(file_path, cwd)
+    if prepared is not None:
+        _commit([prepared], session_id, captured_at)
+
+
+def _walk_deleted_dir(directory: str, cwd: str, room: int, entries: list = None):
+    """`(files, reason)` for `rm -r directory`: the files to capture, or [] and
+    the reason nothing is — outside every root, excluded, or more than `room`
+    files. Exclusion is checked before walking, and excluded subtrees are
+    pruned rather than counted."""
+    root = workspace_root_for_file(directory, cwd)
+    if root is None:
+        return [], ("skip-no-root", directory)
+    patterns = _compile_globs(excludes_for_root(root))
+    if _excluded_by(directory, root, patterns):
+        return [], ("skip-excluded", directory)
+    files, overflow = _walk_files(directory, cap=room,
+                                  skip=(lambda p: _excluded_by(p, root, patterns)) if patterns else None,
+                                  entries=entries)
+    if overflow:
+        return [], ("skip-too-many", "%s >%d" % (directory, room))
+    return files, None
 
 
 def main() -> None:
@@ -1732,6 +2856,7 @@ def main() -> None:
     except (json.JSONDecodeError, ValueError):
         sys.exit(0)
 
+    started_ms = int(time.time() * 1000)
     tool_input = hook_input.get("tool_input") or {}
     cwd = hook_input.get("cwd", os.getcwd())
     session_id = hook_input.get("session_id")
@@ -1749,16 +2874,20 @@ def main() -> None:
     if not isinstance(command, str) or not command:
         sys.exit(0)
     try:
-        candidates, unresolved = scan_targets(command, cwd)
+        full = scan_full(command, cwd)
     except Exception:
         log_event("error")
         sys.exit(0)
+    candidates, unresolved = full["candidates"], full["unresolved"]
+    for event, detail in full["notes"]:
+        log_event(event, detail[:MAX_CANDIDATE_LEN].replace("\\", "\\\\").replace("\n", "\\n"))
     # An explicit target whose variable we cannot expand (`cat > $T/x`) is
     # not captured — guessing would record a path with no file behind it — but
     # it is logged, one line per token, so the gap shows up in hook.log.
     for token in unresolved:
         log_event("skip-unknown-var",
                   token[:MAX_CANDIDATE_LEN].replace("\\", "\\\\").replace("\n", "\\n"))
+    prepared: list = []
     for candidate, candidate_cwd in candidates:
         # A relative path whose directory the command made unknowable (`cd
         # "$REPO"`) must be dropped. Falling back to the session cwd would
@@ -1768,10 +2897,56 @@ def main() -> None:
             log_event("skip-unknown-cwd", candidate)
             continue
         try:
-            capture_file(candidate, candidate_cwd or cwd, session_id, captured_at)
+            got = _prepare(candidate, candidate_cwd or cwd)
         except Exception:
             # One bad candidate must not cost us the rest of the command.
             log_event("error")
+            continue
+        if got is not None:
+            prepared.append(got)
+    # `rm -r DIR`: each regular file in it, within what is left of the
+    # command's MAX_FILES_PER_COMMAND. A directory that does not fit
+    # contributes nothing; all such are logged on one `skip-too-many` line —
+    # `<dir> >N` for one, `<first>..<last> (N dirs)` for several.
+    too_many: list = []
+    entries = [_WALK_ENTRY_CAP]           # shared by every walk of this command
+    for directory in full["dirs"]:
+        room = min(RM_WALK_CAP, MAX_FILES_PER_COMMAND - len(prepared))
+        try:
+            files, reason = _walk_deleted_dir(directory, cwd, max(room, 0), entries) if room > 0 \
+                else ([], ("skip-too-many", "%s >%d" % (directory, 0)))
+        except Exception:
+            log_event("error")
+            continue
+        if reason is not None:
+            if reason[0] == "skip-too-many":
+                too_many.append(reason[1])
+            else:
+                log_event(*reason)
+            continue
+        for f in files:
+            try:
+                got = _prepare(f, cwd)
+            except Exception:
+                log_event("error")
+                continue
+            if got is not None:
+                prepared.append(got)
+    if len(too_many) == 1:
+        log_event("skip-too-many", too_many[0])
+    elif too_many:
+        first = too_many[0].rsplit(" >", 1)[0]
+        last = too_many[-1].rsplit(" >", 1)[0]
+        log_event("skip-too-many", "%s..%s (%d dirs)" % (first, last, len(too_many)))
+    captured: list = []
+    already: list = []
+    try:
+        captured, already = _commit(prepared, session_id, captured_at)
+    except Exception:
+        log_event("error")
+    _audit_inflight(hook_input, started_ms, cwd, session_id, captured, already,
+                    bool(full.get("implicit")),
+                    tool_input.get("run_in_background") is True)
 
 
 if __name__ == "__main__":

@@ -154,6 +154,10 @@ for (const f of upkeepFiles) {
   const pinned = fs.readFileSync(path.join(root, ".xcheck-cache", "claudegate", "hooks", "hook.py"), "utf8");
   if (!stampRe.test(bundled)) fail("bundled hook.py has no CLAUDEGATE_HOOK_VERSION stamp");
   else if (bundled.replace(stampRe, "") !== pinned) fail("bundled hook.py differs from the pinned tag's hooks/hook.py (ignoring the stamp line)");
+  // audit.py carries no stamp: byte for byte.
+  const bundledAudit = fs.readFileSync(path.join(root, "src-tauri", "resources", "audit.py"), "utf8");
+  const pinnedAudit = fs.readFileSync(path.join(root, ".xcheck-cache", "claudegate", "hooks", "audit.py"), "utf8");
+  if (bundledAudit !== pinnedAudit) fail("bundled audit.py differs from the pinned tag's hooks/audit.py");
 }
 
 // Capture setup: the shared fixtures through the extension's own hookInstaller.ts. It imports
@@ -172,21 +176,22 @@ let captureCases = 0;
 
   const patch = cap("settings_patch.json");
   for (const c of patch.cases) {
-    const r = hi.computeSettingsPatch(c.raw, c.hookCommand);
+    const r = hi.computeSettingsPatch(c.raw, c.hookCommand, c.auditCommand);
     const d = firstDiff({ content: r.content, changed: r.changed, parseError: !!r.parseError }, c.expected);
     if (d) fail(`capture patch "${c.name}": ${d}`);
     captureCases++;
   }
-  // Shapes core refuses: the extension throws, or writes a file that fails its own verification.
+  // Shapes both refuse: parseError + shapeError, the original bytes echoed, nothing changed.
   for (const c of patch.refuse) {
-    let safe = false;
-    try {
-      const r = hi.computeSettingsPatch(c.raw, c.hookCommand);
-      safe = hi.verifySettingsContent(r.content, c.raw, c.hookCommand) !== null;
-    } catch {
-      safe = true;
+    const r = hi.computeSettingsPatch(c.raw, c.hookCommand, c.auditCommand);
+    if (!(r.parseError && r.shapeError && !r.changed && r.content === c.raw)) {
+      fail(`capture refuse "${c.name}": the extension does not refuse (${JSON.stringify({ ...r, content: undefined })})`);
     }
-    if (!safe) fail(`capture refuse "${c.name}": the extension installs here, core refuses`);
+    captureCases++;
+  }
+  for (const c of cap("audit_command_shape.json").cases) {
+    const got = hi.AUDIT_COMMAND_SHAPE.test(c.command);
+    if (got !== c.ours) fail(`capture audit shape ${JSON.stringify(c.command)}: extension=${got}, fixture=${c.ours}`);
     captureCases++;
   }
   for (const c of cap("backups_to_prune.json").cases) {
@@ -195,7 +200,7 @@ let captureCases = 0;
     captureCases++;
   }
   for (const c of cap("verify_settings.json").cases) {
-    const got = hi.verifySettingsContent(c.after, c.previous, c.hookCommand);
+    const got = hi.verifySettingsContent(c.after, c.previous, c.hookCommand, c.auditCommand);
     if (got !== c.expected) fail(`capture verify "${c.name}": extension=${got}, fixture=${c.expected}`);
     captureCases++;
   }
@@ -212,6 +217,16 @@ let captureCases = 0;
   const ts = fs.readFileSync(path.join(ext, "src", "hookInstaller.ts"), "utf8");
   const wrapper = ts.match(/const sh = `([^`]*)`;/)?.[1].replace("${this.pythonCmd}", "python3").replace(/\\n/g, "\n");
   if (rsStr("HOOK_SH_CONTENT") !== wrapper) fail(`capture HOOK_SH_CONTENT: core=${JSON.stringify(rsStr("HOOK_SH_CONTENT"))}, extension=${JSON.stringify(wrapper)}`);
+  // The audit wrapper is a concatenation of template literals.
+  const auditParts = ts.match(/const auditSh =\s*((?:`[^`]*`\s*\+?\s*)+);/)?.[1].match(/`[^`]*`/g);
+  const auditWrapper = auditParts?.map((p) => p.slice(1, -1)).join("").replace("${this.pythonCmd}", "python3").replace(/\\n/g, "\n");
+  if (!auditWrapper || rsStr("AUDIT_SH_CONTENT") !== auditWrapper) {
+    fail(`capture AUDIT_SH_CONTENT: core=${JSON.stringify(rsStr("AUDIT_SH_CONTENT"))}, extension=${JSON.stringify(auditWrapper)}`);
+  }
+  if (rsStr("POST_TOOL_MATCHER") !== hi.POST_TOOL_MATCHER) fail(`capture POST_TOOL_MATCHER: core=${rsStr("POST_TOOL_MATCHER")}, extension=${hi.POST_TOOL_MATCHER}`);
+  const events = rs.match(/pub const AUDIT_EVENTS: \[&str; \d+\] = \[([^\]]*)\];/)?.[1];
+  const rsEvents = events ? JSON.parse(`[${events}]`) : undefined;
+  if (JSON.stringify(rsEvents) !== JSON.stringify(hi.AUDIT_EVENTS)) fail(`capture AUDIT_EVENTS: core=${JSON.stringify(rsEvents)}, extension=${JSON.stringify(hi.AUDIT_EVENTS)}`);
 }
 
 if (failures) {

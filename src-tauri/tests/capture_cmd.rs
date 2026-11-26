@@ -4,7 +4,7 @@
 use claudegate_core::capture::{bundled_hook_version, version_newer, CaptureStatus, HookUpdate, InstallError};
 use claudegate_desktop_lib::capture::{
     capture_view_for, install_error_text, pick_python3, python3_available_with, read_status, set_up_capture_with, status_key,
-    update_capture_hook_with, update_hook_with, CaptureView, HookView, BUNDLED_HOOK,
+    update_capture_hook_with, update_hook_with, CaptureView, HookView, BUNDLED_AUDIT, BUNDLED_HOOK,
 };
 use claudegate_desktop_lib::config::{config_path_in, save_read_only};
 use std::fs;
@@ -222,6 +222,8 @@ fn set_up_from_not_set_up_reports_backup_and_new_status() {
     assert!(backup.contains("settings.json.claudegate-"), "{backup}");
     assert_eq!(fs::read_to_string(f.cg("hook.py")).unwrap(), BUNDLED_HOOK);
     assert!(f.cg("hook.sh").is_file());
+    assert_eq!(fs::read_to_string(f.cg("audit.py")).unwrap(), BUNDLED_AUDIT);
+    assert!(f.cg("audit.sh").is_file());
     assert_eq!(fs::read_to_string(f.cg(".installed-by-desktop")).unwrap(), bundled());
     let s = fs::read_to_string(f.settings()).unwrap();
     assert!(s.contains("\"model\": \"opus\"") && s.contains(".claudegate/hook.sh"), "{s}");
@@ -318,22 +320,26 @@ fn update_rewrites_the_apps_older_hook_and_the_marker_only() {
     fs::write(f.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\nold\n").unwrap();
     let settings = fs::read(f.settings()).unwrap();
     let sh = fs::read(f.cg("hook.sh")).unwrap();
+    let audit_sh = fs::read(f.cg("audit.sh")).unwrap();
+    fs::write(f.cg("audit.py"), "print('older audit')\n").unwrap();
     let r = update_hook_with(&f.home, &f.cfg, true).unwrap();
     assert_eq!(r, HookUpdate::Updated { from: "v1.0.0".into(), to: bundled() });
     assert_eq!(fs::read_to_string(f.cg("hook.py")).unwrap(), BUNDLED_HOOK);
     assert_eq!(fs::read_to_string(f.cg(".installed-by-desktop")).unwrap(), bundled());
     assert_eq!(fs::read(f.settings()).unwrap(), settings, "settings.json is never touched");
     assert_eq!(fs::read(f.cg("hook.sh")).unwrap(), sh);
+    assert_eq!(fs::read_to_string(f.cg("audit.py")).unwrap(), BUNDLED_AUDIT, "audit.py refreshed alongside");
+    assert_eq!(fs::read(f.cg("audit.sh")).unwrap(), audit_sh, "the audit wrapper is never the update's to write");
     // Once done, it is done.
     assert!(matches!(update_hook_with(&f.home, &f.cfg, true).unwrap(), HookUpdate::Skipped(_)));
 }
 
 fn assert_untouched(f: &Fx, run: impl FnOnce() -> Result<HookUpdate, String>) {
     let snap = |p: PathBuf| fs::read(p).ok();
-    let before = (snap(f.cg("hook.py")), snap(f.cg(".installed-by-desktop")), snap(f.settings()));
+    let before = (snap(f.cg("hook.py")), snap(f.cg("audit.py")), snap(f.cg(".installed-by-desktop")), snap(f.settings()));
     let r = run();
     assert!(matches!(r, Ok(HookUpdate::Skipped(_))), "{r:?}");
-    let after = (snap(f.cg("hook.py")), snap(f.cg(".installed-by-desktop")), snap(f.settings()));
+    let after = (snap(f.cg("hook.py")), snap(f.cg("audit.py")), snap(f.cg(".installed-by-desktop")), snap(f.settings()));
     assert_eq!(before, after);
 }
 
@@ -646,4 +652,17 @@ fn update_hook_refuses_a_newer_hook() {
     let e = update_capture_hook_with(&f.home, &f.cfg, true).unwrap_err();
     assert!(e.contains("newer"), "{e}");
     assert_eq!(fs::read_to_string(f.cg("hook.py")).unwrap(), newer);
+}
+
+#[test]
+fn update_refreshes_a_stale_audit_py_only_alongside_hook_py() {
+    let f = fx();
+    f.as_app("v1.0.0");
+    f.old_hook();
+    fs::write(f.cg("audit.py"), "print('older audit')\n").unwrap();
+    update_hook_with(&f.home, &f.cfg, true).unwrap();
+    assert_eq!(fs::read_to_string(f.cg("audit.py")).unwrap(), BUNDLED_AUDIT);
+    // hook.py current: nothing is written, a stale audit.py included.
+    fs::write(f.cg("audit.py"), "print('older audit')\n").unwrap();
+    assert_untouched(&f, || update_hook_with(&f.home, &f.cfg, true));
 }

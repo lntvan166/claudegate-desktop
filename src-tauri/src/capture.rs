@@ -22,6 +22,9 @@ use std::time::{Duration, Instant};
 
 /// The hook this build ships, stamped `# CLAUDEGATE_HOOK_VERSION=…` by the repo.
 pub const BUNDLED_HOOK: &str = include_str!("../resources/hook.py");
+/// The capture-audit hook (`hooks/audit.py` at the same extension ref), installed and refreshed
+/// beside hook.py.
+pub const BUNDLED_AUDIT: &str = include_str!("../resources/audit.py");
 
 /// `capture_status` for the UI. `status` is one of `vscode`, `app`, `not-set-up`,
 /// `settings-unreadable`, `python-missing`.
@@ -294,7 +297,7 @@ pub fn install_view(r: &InstallReport, capture: CaptureView) -> InstallView {
 /// refuses anything but `NotSetUp`. The status is read again right after a success.
 pub fn set_up_capture_with(home: &Path, config_path: &Path, python3: bool) -> Result<InstallView, String> {
     check_writable_for(config_path, "set up capture")?;
-    let report = claudegate_core::capture::set_up_capture(home, BUNDLED_HOOK, python3, false)
+    let report = claudegate_core::capture::set_up_capture(home, BUNDLED_HOOK, BUNDLED_AUDIT, python3, false)
         .map_err(|e| install_error_text(&e))?;
     Ok(install_view(&report, capture_view_for(home, python3)))
 }
@@ -317,7 +320,7 @@ pub fn hook_replaced_view(r: &HookReplaced, capture: CaptureView) -> HookReplace
 pub fn update_capture_hook_with(home: &Path, config_path: &Path, python3: bool) -> Result<HookReplacedView, String> {
     check_writable_for(config_path, "update the hook")?;
     let desktop_home = crate::commands::desktop_home_for(config_path, &home.join(".claudegate"))?;
-    let r = claudegate_core::capture::replace_hook(home, &desktop_home, BUNDLED_HOOK, false).map_err(|e| e.to_string())?;
+    let r = claudegate_core::capture::replace_hook(home, &desktop_home, BUNDLED_HOOK, BUNDLED_AUDIT, false).map_err(|e| e.to_string())?;
     Ok(hook_replaced_view(&r, capture_view_for(home, python3)))
 }
 
@@ -325,7 +328,7 @@ pub fn update_capture_hook_with(home: &Path, config_path: &Path, python3: bool) 
 /// it; `claudegate_core::capture::update_app_hook` checks the rest.
 pub fn update_hook_with(home: &Path, config_path: &Path, python3: bool) -> Result<HookUpdate, String> {
     let read_only = !matches!(crate::config::read_only_strict(config_path), Ok(false));
-    claudegate_core::capture::update_app_hook(home, BUNDLED_HOOK, python3, read_only)
+    claudegate_core::capture::update_app_hook(home, BUNDLED_HOOK, BUNDLED_AUDIT, python3, read_only)
 }
 
 /// Run once at startup, off the main thread. Logs, never raises.

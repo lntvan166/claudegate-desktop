@@ -9,6 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 const HOOK: &str = "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.17.0\nprint('new hook')\n";
+const AUDIT: &str = "#!/usr/bin/env python3\nprint('audit')\n";
 const EXT_HOOK: &str = "#!/usr/bin/env python3\nprint('the extension hook, older')\n";
 const MARKER: &str = "v1.16.1";
 
@@ -53,7 +54,7 @@ impl Home {
         v
     }
     fn run(&self) -> Result<crate::capture::HookReplaced, HookReplaceError> {
-        replace_hook(&self.home, &self.desk, HOOK, false)
+        replace_hook(&self.home, &self.desk, HOOK, AUDIT, false)
     }
 }
 
@@ -192,7 +193,7 @@ fn a_folder_named_hook_py_refuses() {
 fn read_only_refuses() {
     let h = Home::new();
     h.as_extension();
-    assert_eq!(replace_hook(&h.home, &h.desk, HOOK, true).unwrap_err(), HookReplaceError::ReadOnly);
+    assert_eq!(replace_hook(&h.home, &h.desk, HOOK, AUDIT, true).unwrap_err(), HookReplaceError::ReadOnly);
     assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), EXT_HOOK);
     assert!(h.backups().is_empty());
 }
@@ -227,7 +228,7 @@ fn an_up_to_date_hook_is_not_rewritten() {
 fn an_unstamped_bundled_hook_refuses() {
     let h = Home::new();
     h.as_extension();
-    assert_eq!(replace_hook(&h.home, &h.desk, "print('x')\n", false).unwrap_err(), HookReplaceError::BundledHook);
+    assert_eq!(replace_hook(&h.home, &h.desk, "print('x')\n", AUDIT, false).unwrap_err(), HookReplaceError::BundledHook);
 }
 
 #[test]
@@ -245,7 +246,7 @@ fn a_backup_folder_inside_claudegate_refuses() {
     let h = Home::new();
     h.as_extension();
     let inside = h.home.join(".claudegate/desk");
-    assert!(matches!(replace_hook(&h.home, &inside, HOOK, false).unwrap_err(), HookReplaceError::Failed(_)));
+    assert!(matches!(replace_hook(&h.home, &inside, HOOK, AUDIT, false).unwrap_err(), HookReplaceError::Failed(_)));
     assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), EXT_HOOK);
 }
 
@@ -358,4 +359,129 @@ fn a_failed_write_removes_the_backup_it_made() {
     set_install_fault(None);
     assert!(matches!(err, HookReplaceError::Failed(_)), "{err:?}");
     assert_eq!(h.backups(), before, "still the same ten");
+}
+
+// ---- audit.py, refreshed alongside ----
+
+#[test]
+fn a_stale_audit_py_is_replaced_with_a_backup_and_its_mode_kept() {
+    let h = Home::new();
+    let settings = h.as_extension();
+    fs::write(h.cg("audit.py"), "print('older audit')\n").unwrap();
+    fs::set_permissions(h.cg("audit.py"), fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(h.cg("audit.sh"), crate::capture::AUDIT_SH_CONTENT).unwrap();
+
+    h.run().unwrap();
+
+    assert_eq!(fs::read_to_string(h.cg("audit.py")).unwrap(), AUDIT);
+    assert_eq!(fs::metadata(h.cg("audit.py")).unwrap().permissions().mode() & 0o777, 0o600, "mode kept");
+    let audit_backups: Vec<PathBuf> = h
+        .backups()
+        .into_iter()
+        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("audit-"))
+        .collect();
+    assert_eq!(audit_backups.len(), 1);
+    assert_eq!(fs::read_to_string(&audit_backups[0]).unwrap(), "print('older audit')\n");
+    assert_eq!(fs::read_to_string(h.cg("audit.sh")).unwrap(), crate::capture::AUDIT_SH_CONTENT, "never written");
+    assert_eq!(fs::read_to_string(h.settings()).unwrap(), settings, "never written");
+}
+
+#[test]
+fn a_missing_audit_py_is_created_and_a_current_one_left_alone() {
+    let h = Home::new();
+    h.as_extension();
+    h.run().unwrap();
+    assert_eq!(fs::read_to_string(h.cg("audit.py")).unwrap(), AUDIT);
+    assert!(!h.cg("audit.sh").exists(), "the wrapper is setup's, not Update hook's");
+    assert_eq!(h.backups().len(), 1, "only hook.py's");
+
+    let g = Home::new();
+    g.as_extension();
+    fs::write(g.cg("audit.py"), AUDIT).unwrap();
+    let before = fs::metadata(g.cg("audit.py")).unwrap().modified().unwrap();
+    g.run().unwrap();
+    assert_eq!(fs::metadata(g.cg("audit.py")).unwrap().modified().unwrap(), before, "not rewritten");
+    assert_eq!(g.backups().len(), 1);
+}
+
+#[test]
+fn a_symlinked_audit_py_is_left_alone() {
+    let h = Home::new();
+    h.as_extension();
+    let elsewhere = h.home.join("mine.py");
+    fs::write(&elsewhere, "mine\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, h.cg("audit.py")).unwrap();
+    h.run().unwrap();
+    assert!(fs::symlink_metadata(h.cg("audit.py")).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "mine\n");
+    assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), HOOK, "hook.py still updated");
+}
+
+#[test]
+fn a_failed_hook_py_write_puts_audit_py_back() {
+    for stale in [true, false] {
+        let h = Home::new();
+        h.as_extension();
+        if stale {
+            fs::write(h.cg("audit.py"), "print('older audit')\n").unwrap();
+        }
+        let py = h.cg("hook.py");
+        set_install_fault(Some(Box::new(move |stage| {
+            if stage == "after_audit_replace" {
+                fs::write(&py, "the extension synced in between\n").unwrap();
+            }
+            Ok(())
+        })));
+        let err = h.run().unwrap_err();
+        set_install_fault(None);
+        assert_eq!(err, HookReplaceError::Changed);
+        if stale {
+            assert_eq!(fs::read_to_string(h.cg("audit.py")).unwrap(), "print('older audit')\n", "put back");
+        } else {
+            assert!(!h.cg("audit.py").exists(), "the one it created is gone");
+        }
+        assert!(h.backups().is_empty(), "the backups it made go too");
+    }
+}
+
+#[test]
+fn the_startup_update_puts_audit_py_back_when_hook_py_changed_under_it() {
+    for stale in [true, false] {
+        let h = Home::new();
+        h.as_extension();
+        fs::write(h.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\nold\n").unwrap();
+        if stale {
+            fs::write(h.cg("audit.py"), "print('older audit')\n").unwrap();
+        }
+        let py = h.cg("hook.py");
+        set_install_fault(Some(Box::new(move |stage| {
+            if stage == "after_audit_update" {
+                fs::write(&py, "the extension synced in between\n").unwrap();
+            }
+            Ok(())
+        })));
+        let r = crate::store::update_app_hook(&h.home, HOOK, AUDIT, true, false);
+        set_install_fault(None);
+        assert!(r.is_err(), "{r:?}");
+        assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), "the extension synced in between\n");
+        if stale {
+            assert_eq!(fs::read_to_string(h.cg("audit.py")).unwrap(), "print('older audit')\n", "put back");
+        } else {
+            assert!(!h.cg("audit.py").exists(), "the one it created is gone");
+        }
+    }
+}
+
+#[test]
+fn the_startup_update_refreshes_audit_py_with_hook_py() {
+    let h = Home::new();
+    let settings = h.as_extension();
+    fs::write(h.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\nold\n").unwrap();
+    fs::write(h.cg("audit.py"), "print('older audit')\n").unwrap();
+    let r = crate::store::update_app_hook(&h.home, HOOK, AUDIT, true, false).unwrap();
+    assert!(matches!(r, crate::capture::HookUpdate::Updated { .. }), "{r:?}");
+    assert_eq!(fs::read_to_string(h.cg("audit.py")).unwrap(), AUDIT);
+    assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), HOOK);
+    assert!(!h.cg("audit.sh").exists());
+    assert_eq!(fs::read_to_string(h.settings()).unwrap(), settings);
 }
