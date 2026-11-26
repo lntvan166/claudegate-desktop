@@ -114,14 +114,23 @@ pub fn normalize_path(raw: &str) -> Option<String> {
     Some(p.to_string())
 }
 
-/// The pathspec for a normalized path, under git's glob magic. A glob without a folder
-/// (`*.sql`) matches at any depth, as plain `git log -- '*.sql'` and .gitignore do.
+/// The pathspec for a normalized path: literal, or git's glob magic when it has a glob
+/// character (`*`, `?`, `[`). A glob without a folder (`*.sql`) matches at any depth, as plain
+/// `git log -- '*.sql'` and .gitignore do; under `:(glob)` alone it would match only at the root.
 pub fn pathspec_of(path: &str) -> String {
-    if !path.contains('/') && path.contains(['*', '?', '[']) {
-        format!(":(glob)**/{path}")
-    } else {
+    if !path.contains(['*', '?', '[']) {
+        format!(":(literal){path}")
+    } else if path.contains('/') {
         format!(":(glob){path}")
+    } else {
+        format!(":(glob)**/{path}")
     }
+}
+
+/// Control characters become spaces: under `-F` a newline splits the pattern into "any of"
+/// several, and a NUL cannot pass through argv at all.
+fn clean_text(s: &str) -> String {
+    s.chars().map(|c| if (c as u32) < 0x20 { ' ' } else { c }).collect()
 }
 
 /// Every author pattern for one repository: the chips, and Me (that repository's
@@ -133,9 +142,8 @@ pub fn author_patterns(f: &Filter, me: Option<&str>) -> Vec<String> {
         .iter()
         .map(String::as_str)
         .chain(mine)
-        .map(str::trim)
+        .map(|a| clean_text(a).trim().to_string())
         .filter(|a| !a.is_empty() && seen.insert(a.to_lowercase()))
-        .map(str::to_string)
         .collect()
 }
 
@@ -150,8 +158,8 @@ pub fn repo_searched(f: &Filter, me: Option<&str>) -> bool {
 /// git's walk. `me` is that repository's `user.email`.
 pub fn log_args(f: &Filter, heads: &[String], me: Option<&str>, page: usize, skip: usize) -> Vec<String> {
     let mut a = vec!["log".to_string(), LOG_FORMAT.to_string(), format!("--max-count={page}")];
-    let search = f.search.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    if let Some(t) = search {
+    let search = f.search.as_deref().map(|t| clean_text(t).trim().to_string()).filter(|t| !t.is_empty());
+    if let Some(t) = &search {
         a.push(format!("--grep={t}"));
     }
     let authors = author_patterns(f, me);

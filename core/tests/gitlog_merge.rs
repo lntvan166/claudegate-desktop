@@ -126,7 +126,7 @@ fn horizon_no_dup_no_gap() {
         }
         assert!(pages < 10, "paging terminates");
     }
-    assert_eq!(pages, 3, "three pages of four");
+    assert_eq!(pages, 3, "three pages");
 
     let mut expected: Vec<Commit> = walks.values().flatten().cloned().collect();
     expected.sort_by(compare_commits);

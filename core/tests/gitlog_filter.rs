@@ -132,7 +132,10 @@ fn normalize_and_pathspec() {
     for bad in ["/etc", "C:\\x", "../x", "a/../../b", ":(top)x", ":!secret", "a\nb", "", "  "] {
         assert_eq!(normalize_path(bad), None, "rejected: {bad:?}");
     }
-    assert_eq!(pathspec_of("src/checkout"), ":(glob)src/checkout");
+    assert_eq!(pathspec_of("src/checkout"), ":(literal)src/checkout", "no glob character: literal, and a folder matches everything inside");
+    assert_eq!(pathspec_of("app/id/page.tsx"), ":(literal)app/id/page.tsx");
+    assert_eq!(pathspec_of("*.sql"), ":(glob)**/*.sql", "a glob without a folder matches at any depth");
+    assert_eq!(pathspec_of("app/[id]"), ":(glob)app/[id]", "as in Polylog, [ is a glob character");
     assert_eq!(pathspec_of("**/*.sql"), ":(glob)**/*.sql");
     assert_eq!(pathspec_of("docs/[ab].md"), ":(glob)docs/[ab].md");
 }
@@ -146,5 +149,15 @@ fn path_glob_argv() {
     let c = args(&Filter { path: Some(":(top)evil".into()), ..Default::default() });
     assert_eq!(c.last().map(String::as_str), Some("--"), "an unsafe path adds nothing");
     let d = log_args(&Filter { path: Some("src".into()), ..Default::default() }, &s(&["main"]), None, 5, 0);
-    assert_eq!(d[d.len() - 4..].to_vec(), s(&["--end-of-options", "main", "--", ":(glob)src"]), "heads before --, path after");
+    assert_eq!(d[d.len() - 4..].to_vec(), s(&["--end-of-options", "main", "--", ":(literal)src"]), "heads before --, path after");
+}
+
+#[test]
+fn control_characters_become_spaces() {
+    let a = args(&Filter { search: Some("fix\nfeat\0x\t".into()), authors: s(&["dana\nrin", "\n"]), ..Default::default() });
+    assert!(a.contains(&"--grep=fix feat x".to_string()), "a newline under -F would be an OR: {a:?}");
+    assert_eq!(authors_of(&a), s(&["--author=dana rin"]), "only spaces left: dropped");
+    assert!(a.iter().all(|x| !x.chars().any(|c| (c as u32) < 0x20)), "no control character reaches argv");
+    let me = log_args(&Filter { mine: true, ..Default::default() }, &[], Some("dana@example.com\n"), 5, 0);
+    assert_eq!(authors_of(&me), s(&["--author=dana@example.com"]));
 }
