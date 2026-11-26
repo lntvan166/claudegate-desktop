@@ -8,7 +8,6 @@
     settings,
     config,
     project,
-    hidden,
     onset,
     onhooklog,
     onextrahide,
@@ -17,7 +16,6 @@
     ontakeback,
     oneditor,
     onreadonly,
-    onshow,
     onclose,
     full = false,
   }: {
@@ -25,8 +23,6 @@
     config: EditorConfig;
     /** The selected project, whose exclude list and hide patterns are shown; null when none. */
     project: { root: string; name: string } | null;
-    /** Hidden projects: they can be shown again from here. */
-    hidden: { root: string; name: string }[];
     /** Saves one app override; `null` drops it. Resolves false when it failed (the app says why). */
     onset: (key: SettingKey, value: unknown) => Promise<boolean>;
     onhooklog: (on: boolean) => Promise<boolean>;
@@ -40,7 +36,6 @@
     /** Resolves false when it failed (the app says why). */
     oneditor: (template: string) => Promise<boolean>;
     onreadonly: (on: boolean) => void;
-    onshow: (root: string) => void;
     onclose: () => void;
     /** Narrow window: the screen is the whole sheet, so its title is the page's h1. */
     full?: boolean;
@@ -449,7 +444,7 @@
       </div>
     </div>
 
-    <div class="row">
+    <div class="row last">
       <div class="label">
         <p class="title">Read-only mode</p>
         <p class="desc">Block every accept, reject, revert and reapply until it is turned off.</p>
@@ -459,26 +454,6 @@
       </div>
     </div>
 
-    <div class="row wide last">
-      <div class="label">
-        <p class="title">Hidden projects</p>
-        <p class="desc">Left out of the project list, the total and the tray.</p>
-      </div>
-      <div class="control">
-        {#if hidden.length === 0}
-          <p class="none">None hidden.</p>
-        {:else}
-          <ul class="hidden-list">
-            {#each hidden as h (h.root)}
-              <li>
-                <span class="hname" title={h.root}>{h.name}</span>
-                <button class="btn" onclick={() => onshow(h.root)}>Show</button>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </div>
-    </div>
   </div>
 </section>
 
@@ -798,29 +773,5 @@
   .segmented button.on {
     color: var(--text);
     background: var(--active);
-  }
-
-  .hidden-list {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    width: 100%;
-    max-width: 340px;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
-  .hidden-list li {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-  .hname {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: var(--fs-body);
   }
 </style>

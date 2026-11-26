@@ -27,8 +27,9 @@ const NOTES = "/home/dev/src/field-notes";
 /** An umbrella repo with a registered repo nested inside it, shown as one of its scopes. */
 const UMBRELLA = "/home/dev/src/umbrella";
 const UMB_NESTED = `${UMBRELLA}/umbrella-orders`;
-/** Hidden an hour ago, after its captures: it stays hidden, its pending shown in the disclosure. */
+/** Known projects outside the workspace with pending work: the rail's elsewhere line counts them. */
 const LAB = "/home/dev/src/scratch-lab";
+const LEDGER = "/home/dev/src/ledger-sync";
 /** Added in the app (a Zed-only project), so it is marked and removable. */
 const TIDE = "/home/dev/src/tide-sim";
 
@@ -141,6 +142,22 @@ const views: Record<string, ProjectView> = {
     rejected: [],
     nextRecheckAt: null,
   },
+  [LEDGER]: {
+    root: LEDGER,
+    missing: false,
+    scopes: [{ root: LEDGER, isWorktree: false, shapeUnknown: [], error: null }],
+    pending: [
+      pendingIn(LEDGER, "src/reconcile.ts", 18, 6),
+      pendingIn(LEDGER, "src/reconcile.test.ts", 33, 0),
+      pendingIn(LEDGER, "README.md", 4, 1),
+      pendingIn(LEDGER, "package.json", 1, 1),
+      // Not landed yet: counted on its own rail row, never in the elsewhere line.
+      { ...pendingIn(LEDGER, "src/types.ts", 0, 0), capturedAt: ago(0), waiting: true },
+    ],
+    accepted: [],
+    rejected: [],
+    nextRecheckAt: null,
+  },
   [BILLING]: { root: BILLING, missing: true, scopes: [], pending: [], accepted: [], rejected: [], nextRecheckAt: null },
   [TIDE]: {
     root: TIDE,
@@ -155,13 +172,7 @@ const views: Record<string, ProjectView> = {
 };
 
 /** workspace-roots.json, in order. */
-const rootsList = [SHOP, UMBRELLA, NOTES, BILLING, HERDR, TIDE, LAB];
-
-/** `ProjectSummary.newestCaptureMs`. */
-const newest = (v: ProjectView): number | null => {
-  const ms = v.pending.map((p) => (p.capturedAt ? Date.parse(p.capturedAt) : NaN)).filter((n) => !Number.isNaN(n));
-  return ms.length ? Math.max(...ms) : null;
-};
+const rootsList = [SHOP, UMBRELLA, NOTES, BILLING, HERDR, TIDE, LAB, LEDGER];
 
 const emptyView = (root: string): ProjectView => ({
   root,
@@ -193,6 +204,12 @@ function mockAdd(raw: string): { root: string; already: boolean } {
   views[root] ??= emptyView(root);
   config = { ...config, appRoots: [...(config.appRoots ?? []), root] };
   return { root, already: false };
+}
+
+/** config.rs `add_to_workspace`: add-only, at the end. `?workspace=empty` starts with none. */
+function joinWorkspace(root: string) {
+  const ws = config.workspace ?? [];
+  if (!ws.includes(root)) config = { ...config, workspace: [...ws, root] };
 }
 
 // Per-file before/after text, so the diff preview shows real-looking changes in several languages.
@@ -387,8 +404,8 @@ let config: EditorConfig = {
   customEditor: "nvim +{line} {path}",
   readOnly: false,
   appRoots: [TIDE],
-  hiddenProjects: [LAB],
-  hiddenAt: { [LAB]: ago(60) },
+  // herdr-pokemon, scratch-lab and ledger-sync are known projects outside it.
+  workspace: new URLSearchParams(location.search).get("workspace") === "empty" ? [] : [SHOP, UMBRELLA, NOTES, BILLING, TIDE],
 };
 
 /** What the extension would supply: a VS Code user setting and a project exclude list. */
@@ -518,14 +535,15 @@ export const mockApi: Api = {
       rootsList.map((root) => {
         // The sidebar count leaves out what the app-only hide patterns hide, like the tabs do.
         const hidden = globMatcher(root, extraHide[root] ?? []);
+        const counted = filtered(views[root]).pending.filter((p) => !hidden(p.path));
         return {
           root,
           name: root.split("/").pop()!,
           missing: views[root].missing,
-          pending: filtered(views[root]).pending.filter((p) => !hidden(p.path)).length,
+          pending: counted.length,
+          ready: counted.filter((p) => !p.waiting).length,
           nextRecheckAt: null,
           nested: views[root].scopes.filter((s) => s.nested).map((s) => s.root),
-          newestCaptureMs: newest(views[root]),
         };
       }),
     ),
@@ -575,23 +593,15 @@ export const mockApi: Api = {
     config = { ...config, readOnly: on };
     return delay(config);
   },
-  setHiddenProjects: (roots) => {
-    const hidden = [...new Set(roots.map((r) => r.trim()).filter(Boolean))];
-    // core config.rs: a root that stays hidden keeps its stamp, a newly hidden one is stamped now.
-    const hiddenAt = Object.fromEntries(hidden.map((r) => [r, config.hiddenAt?.[r] ?? new Date().toISOString()]));
-    config = { ...config, hiddenProjects: hidden, hiddenAt };
+  addToWorkspace: (root) => {
+    joinWorkspace(root);
     return delay(config);
   },
-  hideProject: (root) => {
-    const hidden = (config.hiddenProjects ?? []).includes(root) ? config.hiddenProjects! : [...(config.hiddenProjects ?? []), root];
-    config = { ...config, hiddenProjects: hidden, hiddenAt: { [root]: new Date().toISOString(), ...(config.hiddenAt ?? {}) } };
-    return delay(config);
-  },
-  showProject: (root) => {
-    const hiddenAt = { ...(config.hiddenAt ?? {}) };
-    delete hiddenAt[root];
-    config = { ...config, hiddenProjects: (config.hiddenProjects ?? []).filter((r) => r !== root), hiddenAt };
-    return delay(config);
+  removeFromWorkspace: async (root, stopCapture) => {
+    // commands.rs: the Remove flow first; when it fails the workspace is left alone.
+    const removed = stopCapture ? await mockApi.removeProject(root) : null;
+    config = { ...config, workspace: (config.workspace ?? []).filter((r) => r !== root && !r.startsWith(`${root}/`)) };
+    return { config, removed };
   },
   getSettings: (root) => delay(mockSettings(root)),
   setSetting: (key, value, root) => {
@@ -636,7 +646,7 @@ export const mockApi: Api = {
     await delay(null);
     if (config.readOnly) throw "Read-only mode is on. Turn it off in Settings to add or remove projects.";
     const r = mockAdd(path);
-    config = { ...config, hiddenProjects: (config.hiddenProjects ?? []).filter((h) => h !== r.root) };
+    joinWorkspace(r.root);
     return r;
   },
   removeProject: async (root) => {
@@ -649,7 +659,6 @@ export const mockApi: Api = {
     config = {
       ...config,
       appRoots: (config.appRoots ?? []).filter((r) => r !== root),
-      hiddenProjects: (config.hiddenProjects ?? []).filter((r) => r !== root),
     };
     return { root, unregistered: !vs };
   },

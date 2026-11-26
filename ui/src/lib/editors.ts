@@ -10,10 +10,8 @@ export type EditorConfig = {
   editor: string;
   customEditor?: string | null;
   readOnly?: boolean;
-  /** Project roots hidden from the rail, the header total and the tray. */
-  hiddenProjects?: string[];
-  /** When each hidden root was hidden (ISO time); a newer capture brings it back. */
-  hiddenAt?: Record<string, string>;
+  /** The roots on the rail, in the user's order; only they count in the header total and the tray. */
+  workspace?: string[];
   /** Roots the app added (`projects[root].addedByApp`): marked "Added here" and removable. */
   appRoots?: string[];
 };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bulkLabel, headerTotal, hiddenLabel, hiddenSuffix, projectLine } from "./counts";
+import { bulkLabel, headerTotal, projectLine } from "./counts";
 
 const p = (pending: number) => ({ pending });
 
@@ -62,17 +62,5 @@ describe("projectLine (UX wave 5)", () => {
 
   it("says when nothing is pending", () => {
     expect(projectLine([], [{ root: "/w", label: "w" }], now)).toEqual({ text: "Nothing pending", detail: null });
-  });
-});
-
-describe("hidden projects keep their pending in sight", () => {
-  it("the disclosure says how many are hidden and what they hold", () => {
-    expect(hiddenLabel([{ pending: 3 }, { pending: 1 }])).toBe("Hidden projects (2) · 4 pending");
-    expect(hiddenLabel([{ pending: 0 }])).toBe("Hidden projects (1)");
-  });
-  it("the header adds the hidden pending after the visible total, shorter when narrow", () => {
-    expect(hiddenSuffix(4)).toBe(" · +4 in hidden projects");
-    expect(hiddenSuffix(4, true)).toBe(" · +4 hidden");
-    expect(hiddenSuffix(0)).toBe("");
   });
 });

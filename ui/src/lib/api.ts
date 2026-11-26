@@ -25,8 +25,8 @@ export type ProjectSummary = {
   nextRecheckAt: number | null;
   /** Registered roots nested inside this one, shown as its scopes instead of as projects. */
   nested?: string[];
-  /** Epoch ms of the newest pending capture; null when none. A hidden project comes back on a newer one. */
-  newestCaptureMs?: number | null;
+  /** `pending` without the rows still waiting for their write: what counts outside the workspace. */
+  ready?: number;
 };
 
 export type PendingItem = {
@@ -77,8 +77,9 @@ export type ProjectView = {
   rejected: RecordItem[];
   /** Epoch ms when a waiting row may settle; re-fetch the project then. Null when none waits. */
   nextRecheckAt: number | null;
-  /** Epoch ms of the newest pending capture; null when none. */
-  newestCaptureMs?: number | null;
+  /** The summary's `pending` and `ready` as of this load (without the app-only hidden rows). */
+  countedPending?: number;
+  countedReady?: number;
 };
 
 export type DiffKind = "pending" | "accepted" | "rejected";
@@ -97,6 +98,8 @@ export const LAUNCH_EVENT = "claudegate://launch";
 export type AddedProject = { root: string; already: boolean };
 /** core `projects::Removed`: `unregistered` false when VS Code also uses the folder (capture stays on). */
 export type RemovedProject = { root: string; unregistered: boolean };
+/** commands.rs `WorkspaceRemoved`: the config now, and the capture side when it was stopped too. */
+export type WorkspaceRemoved = { config: EditorConfig; removed: RemovedProject | null };
 
 export interface Api {
   listProjects(): Promise<ProjectSummary[]>;
@@ -112,8 +115,8 @@ export interface Api {
   setEditor(template: string): Promise<EditorConfig>;
   /** Opens `path` at `line`:`col`; `template` null means the remembered editor. */
   openInEditor(path: string, line: number, col: number, template: string | null): Promise<void>;
-  /** The tray tooltip's total. */
-  setPendingCount(count: number): Promise<void>;
+  /** The tray's total: the workspace's pending, plus what waits in known projects outside it. */
+  setPendingCount(count: number, elsewhere: number): Promise<void>;
   /**
    * Accepts, rejects, reverts, reapplies or clears. Rejects with a JSON string (see
    * `parseDecideError`). Emits no change event: the caller reloads the project afterwards.
@@ -121,12 +124,13 @@ export interface Api {
   decide(root: string, action: DecideAction, target: DecideTarget): Promise<DecideReport>;
   /** The global read-only switch in ~/.claudegate-desktop/config.json. */
   setReadOnly(on: boolean): Promise<EditorConfig>;
-  /** The hidden project roots in ~/.claudegate-desktop/config.json (never workspace-roots.json). */
-  setHiddenProjects(roots: string[]): Promise<EditorConfig>;
-  /** Shows one hidden project again, removing only it from the hidden list (never a full rewrite). */
-  showProject(root: string): Promise<EditorConfig>;
-  /** Hides one project, adding only it to the hidden list and stamping when (never a full rewrite). */
-  hideProject(root: string): Promise<EditorConfig>;
+  /** Adds one known project to the workspace in config.json (add-only; never workspace-roots.json). */
+  addToWorkspace(root: string): Promise<EditorConfig>;
+  /**
+   * Takes one project off the rail (remove-only, view only). `stopCapture` (an app-added root)
+   * first runs the Remove flow; when that fails nothing changes.
+   */
+  removeFromWorkspace(root: string, stopCapture: boolean): Promise<WorkspaceRemoved>;
   /** Every setting as it resolves for `root` (app, then the extension, then the default). */
   getSettings(root: string | null): Promise<SettingsView>;
   /** One app override; `null` drops it. Resolves to the settings as they now stand for `root`. */
@@ -179,12 +183,11 @@ const tauriApi: Api = {
   getConfig: () => invoke<EditorConfig>("get_config"),
   setEditor: (template) => invoke<EditorConfig>("set_editor", { template }),
   openInEditor: (path, line, col, template) => invoke<void>("open_in_editor", { path, line, col, template }),
-  setPendingCount: (count) => invoke<void>("set_pending_count", { count }),
+  setPendingCount: (count, elsewhere) => invoke<void>("set_pending_count", { count, elsewhere }),
   decide: (root, action, target) => invoke<DecideReport>("decide", { root, action, target }),
   setReadOnly: (on) => invoke<EditorConfig>("set_read_only", { on }),
-  setHiddenProjects: (roots) => invoke<EditorConfig>("set_hidden_projects", { roots }),
-  showProject: (root) => invoke<EditorConfig>("show_project", { root }),
-  hideProject: (root) => invoke<EditorConfig>("hide_project_cmd", { root }),
+  addToWorkspace: (root) => invoke<EditorConfig>("add_to_workspace_cmd", { root }),
+  removeFromWorkspace: (root, stopCapture) => invoke<WorkspaceRemoved>("remove_from_workspace", { root, stopCapture }),
   getSettings: (root) => invoke<SettingsView>("get_settings", { root }),
   setSetting: (key, value, root) => invoke<SettingsView>("set_setting", { key, value, root }),
   setHookLog: (on, root) => invoke<SettingsView>("set_hook_log", { on, root }),
@@ -229,13 +232,12 @@ export const getConfig = async () => (await api()).getConfig();
 export const setEditor = async (template: string) => (await api()).setEditor(template);
 export const openInEditor = async (path: string, line: number, col = 1, template: string | null = null) =>
   (await api()).openInEditor(path, line, col, template);
-export const setPendingCount = async (count: number) => (await api()).setPendingCount(count);
+export const setPendingCount = async (count: number, elsewhere = 0) => (await api()).setPendingCount(count, elsewhere);
 export const decide = async (root: string, action: DecideAction, target: DecideTarget) =>
   (await api()).decide(root, action, target);
 export const setReadOnly = async (on: boolean) => (await api()).setReadOnly(on);
-export const setHiddenProjects = async (roots: string[]) => (await api()).setHiddenProjects(roots);
-export const showProject = async (root: string) => (await api()).showProject(root);
-export const hideProject = async (root: string) => (await api()).hideProject(root);
+export const addToWorkspace = async (root: string) => (await api()).addToWorkspace(root);
+export const removeFromWorkspace = async (root: string, stopCapture: boolean) => (await api()).removeFromWorkspace(root, stopCapture);
 export const getSettings = async (root: string | null) => (await api()).getSettings(root);
 export const setSetting = async (key: SettingKey, value: unknown, root: string | null) =>
   (await api()).setSetting(key, value, root);

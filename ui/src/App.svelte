@@ -22,7 +22,6 @@
     onLaunch,
     pickFolder,
     projectInVsCode,
-    removeProject,
     getSettings,
     setExtraHide,
     setProjectExclude,
@@ -35,8 +34,8 @@
     openInEditor,
     setEditor,
     setPendingCount,
-    showProject,
-    hideProject,
+    addToWorkspace,
+    removeFromWorkspace,
     setReadOnly,
     usingMock,
     type DiffKind,
@@ -68,7 +67,8 @@
   import { writeClipboard } from "./lib/clipboard";
   import { clipboardText, formatRef, pasteHint, refRange, type LineRange } from "./lib/ref";
   import type { RowRef } from "./lib/rows";
-  import { basename, groupsFor, restoreSelection, resurfacing, rowsOf, sameRow, scopeKind, scopeLabel, selectionAfterList, sortProjects, splitHidden, type Row } from "./lib/rows";
+  import { basename, groupsFor, restoreSelection, rowsOf, sameRow, scopeKind, scopeLabel, selectionAfterList, sortProjects, type Row } from "./lib/rows";
+  import { elsewhereOf, elsewhereSuffix, inWorkspace, launchOwnership, splitWorkspace } from "./lib/workspace";
   import { Rechecks } from "./lib/recheck";
   import {
     MIN,
@@ -85,7 +85,7 @@
     type Pane,
     type Widths,
   } from "./lib/panes";
-  import { headerTotal, hiddenSuffix, projectLine } from "./lib/counts";
+  import { headerTotal, projectLine } from "./lib/counts";
   import {
     COLLAPSED_KEY,
     MODE_KEY,
@@ -98,7 +98,7 @@
   } from "./lib/uiState";
   import { collapseKeysToReveal, fileOrder, firstVisibleRow, visibleItems } from "./lib/visible";
   import { filterBulk, filterGroups, normalizeFilter, stillShown } from "./lib/filter";
-  import { addFolderFor, addLabel, findPendingRow, launchNotice, ownerOf, type LaunchTarget } from "./lib/launch";
+  import { addFolderFor, addLabel, findPendingRow, knownNotice, launchNotice, type LaunchTarget } from "./lib/launch";
   import { alreadyExcluded, excludedNotice, extensionGlob, folderGlob, hidePrompt } from "./lib/excludeSuggest";
   import {
     DEFAULT_SETTINGS,
@@ -286,13 +286,11 @@
   }
 
   const current = $derived(projects.find((p) => p.root === selected) ?? null);
-  /** Hidden projects are out of the way: off the rail, out of the header total and the tray. */
-  const split = $derived(splitHidden(projects, config.hiddenProjects));
-  const totalPending = $derived(split.visible.reduce((s, p) => s + p.pending, 0));
-  /** Pending work in hidden projects: never counted in the total, but never out of sight either. */
-  const hiddenPending = $derived(split.hidden.reduce((s, p) => s + p.pending, 0));
-  /** Projects that came back from hidden on a new capture: marked "New" until selected once. */
-  let fresh = $state<string[]>([]);
+  /** The rail lists the workspace only; the other listed projects wait in the picker. */
+  const split = $derived(splitWorkspace(projects, config.workspace));
+  const totalPending = $derived(split.workspace.reduce((s, p) => s + p.pending, 0));
+  /** Pending work in known projects outside the workspace: never in the total, never out of sight. */
+  const elsewhere = $derived(elsewhereOf(split.known));
   const counts = $derived({
     pending: view?.pending.length ?? 0,
     accepted: view?.accepted.length ?? 0,
@@ -402,27 +400,22 @@
     projects = sortProjects(
       projects.map((p) =>
         p.root === v.root
-          ? { ...p, missing: v.missing, pending: shownPending(v, p.pending), nextRecheckAt: v.nextRecheckAt, newestCaptureMs: v.newestCaptureMs ?? null }
+          ? {
+              ...p,
+              missing: v.missing,
+              pending: shownPending(v, v.countedPending ?? p.pending),
+              ready: v.root === settingsFor ? shownReady(v) : (v.countedReady ?? p.ready),
+              nextRecheckAt: v.nextRecheckAt,
+            }
           : p,
       ),
     );
     rechecks.schedule(v.root, v.nextRecheckAt);
-    void resurface();
   }
 
-  /** Brings back each hidden project with a capture newer than when it was hidden (`resurfacing`). */
-  async function resurface() {
-    const back = resurfacing(projects, config.hiddenProjects, config.hiddenAt);
-    if (back.length === 0) return;
-    try {
-      // One root at a time, remove-only: a stale `config` here must never rewrite the whole list.
-      for (const r of back) config = await showProject(r);
-      fresh = [...new Set([...fresh, ...back])];
-      const names = back.map((r) => projects.find((p) => p.root === r)?.name ?? basename(r));
-      announce(`${names.join(", ")} ${names.length === 1 ? "is" : "are"} back: Claude edited ${names.length === 1 ? "it" : "them"} after you hid ${names.length === 1 ? "it" : "them"}`);
-    } catch {
-      // The next list tries again.
-    }
+  /** `shownPending` without the rows still waiting for their write. */
+  function shownReady(v: ProjectView): number {
+    return hideExtra(v, settings.extraHide, settings.nestedExtraHide ?? []).pending.filter((p) => !p.waiting).length;
   }
 
   async function loadProjects() {
@@ -431,7 +424,6 @@
       listError = null;
       rechecks.clear();
       for (const p of projects) rechecks.schedule(p.root, p.nextRecheckAt);
-      await resurface();
     } catch (e) {
       listError = String(e);
     } finally {
@@ -441,9 +433,9 @@
     try {
       remembered = localStorage.getItem(STORE_KEY);
     } catch {}
-    // A hidden project stays open while it is the one on screen; otherwise pick among the shown.
-    const shown = splitHidden(projects, config.hiddenProjects).visible;
-    const keep = selected && projects.some((p) => p.root === selected) ? selected : null;
+    // Only a project on the rail stays selected; otherwise pick among the workspace.
+    const shown = splitWorkspace(projects, config.workspace).workspace;
+    const keep = selected && shown.some((p) => p.root === selected) ? selected : null;
     const next = keep ? ({ kind: "keep", root: keep } as const) : selectionAfterList(shown, null, remembered);
     switch (next.kind) {
       case "keep":
@@ -464,7 +456,6 @@
 
   function select(root: string) {
     viewError = null;
-    if (fresh.includes(root)) fresh = fresh.filter((r) => r !== root);
     if (root !== selected) {
       selected = root;
       filterText = "";
@@ -717,18 +708,52 @@
     void runDecide(action, all);
   }
 
-  async function setHidden(root: string, hide: boolean) {
+  /** Adds a known project to the rail and selects it. Never changes what is captured. */
+  async function addToWorkspaceAt(root: string): Promise<string | null> {
     try {
-      // One root, add-only or remove-only: the UI's copy of the list may be stale.
-      config = hide ? await hideProject(root) : await showProject(root);
+      // One root, add-only: the UI's copy of the list may be stale.
+      config = await addToWorkspace(root);
+      select(root);
       const name = projects.find((p) => p.root === root)?.name ?? basename(root);
-      announce(hide ? `${name} hidden` : `${name} shown`);
+      announce(`${name} added to your workspace`);
+      return null;
     } catch (e) {
-      show({ text: `Couldn't ${hide ? "hide" : "show"} the project: ${e}`, tone: "error" });
+      return String(e);
     }
   }
 
-  /** Registers `path` in workspace-roots.json, then selects it. Resolves to an error message. */
+  /**
+   * Takes a project off the rail (view only); `stopCapture` also runs the Remove flow first. The
+   * selection moves to the next project on the rail, or the one before, or nothing.
+   */
+  async function removeFromWorkspaceAt(root: string, stopCapture: boolean) {
+    const name = projects.find((p) => p.root === root)?.name ?? basename(root);
+    const rail = split.workspace;
+    const i = rail.findIndex((p) => p.root === root);
+    const next = rail[i + 1] ?? rail[i - 1] ?? null;
+    try {
+      // One root, remove-only: the UI's copy of the list may be stale.
+      const r = await removeFromWorkspace(root, stopCapture);
+      config = r.config;
+      if (selected === root) {
+        if (next) select(next.root);
+        else {
+          selected = null;
+          rawView = null;
+        }
+      }
+      if (r.removed) {
+        await loadProjects();
+        announce(removedMessage(name, r.removed.unregistered));
+      } else {
+        announce(`${name} removed from your workspace; it is still captured`);
+      }
+    } catch (e) {
+      show({ text: `Couldn't remove ${name}: ${e}`, tone: "error" });
+    }
+  }
+
+  /** Registers `path` in workspace-roots.json and the workspace, then selects it. Resolves to an error message. */
   async function addProjectAt(path: string): Promise<string | null> {
     try {
       const r = await addProject(path);
@@ -743,8 +768,11 @@
     }
   }
 
-  /** `claudegate [PATH]` asked for a path that no listed project owns; the answer is the user's. */
-  let launchAsk = $state<LaunchTarget | null>(null);
+  /**
+   * `claudegate [PATH]` asked for a path no workspace project owns; the answer is the user's.
+   * `known` is the known project outside the workspace that owns it, if one does.
+   */
+  let launchAsk = $state<(LaunchTarget & { known?: { root: string; name: string } }) | null>(null);
 
   /** Selects the project owning `t.path` (and the pending row, for a file); otherwise asks. */
   async function openLaunchTarget(t: LaunchTarget) {
@@ -753,15 +781,18 @@
     // A worktree scope can live anywhere, even inside another project's root; only a project's
     // view lists them, so roots and scopes are matched together, longest prefix wins.
     const views = await Promise.all(projects.map((p) => getProject(p.root).catch(() => null)));
-    const owner = ownerOf(
+    const own = launchOwnership(
       t.path,
       projects.map((p, i) => ({ root: p.root, scopes: views[i]?.scopes.map((s) => s.root) ?? [] })),
+      (root) => projects.some((p) => p.root === root && inWorkspace(p, config.workspace)),
       t.canonical,
     );
-    if (!owner) {
-      launchAsk = t;
+    if (own.kind !== "workspace") {
+      const p = own.kind === "known" ? projects.find((x) => x.root === own.root) : undefined;
+      launchAsk = p ? { ...t, known: { root: p.root, name: p.name } } : t;
       return;
     }
+    const owner = own.root;
     tab = "pending";
     select(owner);
     if (t.isDir) return;
@@ -776,20 +807,14 @@
     const t = launchAsk;
     launchAsk = null;
     if (!t) return;
+    if (t.known) {
+      const err = await addToWorkspaceAt(t.known.root);
+      if (err) show({ text: `Couldn't add ${t.known.name} to your workspace: ${err}`, tone: "error" });
+      else await openLaunchTarget(t);
+      return;
+    }
     const err = await addProjectAt(addFolderFor(t));
     if (err) show({ text: `Couldn't add the project: ${err}`, tone: "error" });
-  }
-
-  async function removeProjectAt(root: string) {
-    const name = projects.find((p) => p.root === root)?.name ?? basename(root);
-    try {
-      const r = await removeProject(root);
-      config = await getConfig();
-      await loadProjects();
-      announce(removedMessage(name, r.unregistered));
-    } catch (e) {
-      show({ text: `Couldn't remove ${name}: ${e}`, tone: "error" });
-    }
   }
 
   async function changeReadOnly(on: boolean) {
@@ -1112,7 +1137,7 @@
 
   // The tray tooltip shows the same total as the toolbar.
   $effect(() => {
-    void setPendingCount(totalPending).catch(() => {});
+    void setPendingCount(totalPending, elsewhere.pending).catch(() => {});
   });
 
   /**
@@ -1137,7 +1162,7 @@
     sync();
     mq.addEventListener("change", sync);
 
-    // The config first: it says which projects are hidden, so the first pick is a shown one.
+    // The config first: it says which projects are on the rail, so the first pick is one of them.
     const listLoaded = getConfig()
       .then(
         (c) => (config = c),
@@ -1224,10 +1249,15 @@
 </div>
 
 {#if launchAsk}
-  <div class="launch-ask" role="alertdialog" aria-label="Not a ClaudeGate project">
-    <p class="path">{launchNotice(launchAsk)}</p>
-    {#if launchAsk.exists}
-      <button class="protect-btn go" onclick={() => void addLaunchFolder()}>{addLabel(launchAsk)}</button>
+  <div class="launch-ask" role="alertdialog" aria-label={launchAsk.known ? "Not in your workspace" : "Not a ClaudeGate project"}>
+    {#if launchAsk.known}
+      <p class="path">{knownNotice(launchAsk, launchAsk.known.name)}</p>
+      <button class="protect-btn go" onclick={() => void addLaunchFolder()}>Add to workspace</button>
+    {:else}
+      <p class="path">{launchNotice(launchAsk)}</p>
+      {#if launchAsk.exists}
+        <button class="protect-btn go" onclick={() => void addLaunchFolder()}>{addLabel(launchAsk)}</button>
+      {/if}
     {/if}
     <button class="protect-btn" onclick={() => (launchAsk = null)}>Dismiss</button>
   </div>
@@ -1260,10 +1290,10 @@
         </svg>
         <span class="chip-label">Read-only</span>
       </button>
-      <span class="total" class:none={totalPending === 0} title={headerTotal(split.visible) + hiddenSuffix(hiddenPending)}>
-        <span class="total-long">{headerTotal(split.visible)}{hiddenSuffix(hiddenPending)}</span>
+      <span class="total" class:none={totalPending === 0} title={headerTotal(split.workspace) + elsewhereSuffix(elsewhere.pending)}>
+        <span class="total-long">{headerTotal(split.workspace)}{elsewhereSuffix(elsewhere.pending)}</span>
         <!-- A narrow window: the count alone; the list right below says where. -->
-        <span class="total-short" aria-hidden="true">{totalPending === 0 ? "Nothing pending" : `${totalPending} pending`}{hiddenSuffix(hiddenPending, true)}</span>
+        <span class="total-short" aria-hidden="true">{totalPending === 0 ? "Nothing pending" : `${totalPending} pending`}{elsewhereSuffix(elsewhere.pending)}</span>
       </span>
       <button
         class="chip gear"
@@ -1290,15 +1320,14 @@
   </header>
 
   <ProjectList
-    projects={split.visible}
-    hidden={split.hidden}
-    {fresh}
-    onhide={(r) => void setHidden(r, true)}
-    onshow={(r) => void setHidden(r, false)}
+    projects={split.workspace}
+    known={split.known}
+    {elsewhere}
     appRoots={config.appRoots ?? []}
     onpick={pickFolder}
     onadd={addProjectAt}
-    onremove={removeProjectAt}
+    onaddknown={addToWorkspaceAt}
+    onremove={removeFromWorkspaceAt}
     oninvscode={projectInVsCode}
     {readOnly}
     {selected}
@@ -1454,7 +1483,6 @@
       {settings}
       {config}
       project={current ? { root: current.root, name: current.name } : null}
-      hidden={split.hidden.map((p) => ({ root: p.root, name: p.name }))}
       onset={changeSetting}
       onhooklog={changeHookLog}
       onextrahide={changeExtraHide}
@@ -1473,7 +1501,6 @@
           },
         )}
       onreadonly={(on) => void changeReadOnly(on)}
-      onshow={(r) => void setHidden(r, false)}
       onclose={() => void closeSettings()}
       full={narrow}
     />

@@ -6,24 +6,12 @@ import { relTime } from "./time";
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
 
-/** The toolbar: "15 pending in 2 projects" over the shown (not hidden) projects. */
+/** The toolbar: "15 pending in 2 projects" over the workspace's projects. */
 export function headerTotal(projects: { pending: number }[]): string {
   const withPending = projects.filter((p) => p.pending > 0);
   const n = withPending.reduce((s, p) => s + p.pending, 0);
   if (n === 0) return "Nothing pending";
   return `${n} pending in ${plural(withPending.length, "project", "projects")}`;
-}
-
-/** What the header adds for pending work in hidden projects: " · +4 in hidden projects", or "". */
-export function hiddenSuffix(hiddenPending: number, short = false): string {
-  if (hiddenPending <= 0) return "";
-  return short ? ` · +${hiddenPending} hidden` : ` · +${hiddenPending} in hidden projects`;
-}
-
-/** The hidden-projects disclosure: "Hidden projects (2) · 4 pending". */
-export function hiddenLabel(hidden: { pending: number }[]): string {
-  const n = hidden.reduce((s, p) => s + p.pending, 0);
-  return `Hidden projects (${hidden.length})${n > 0 ? ` · ${n} pending` : ""}`;
 }
 
 /** The bulk bar's count: the files (records) it acts on, or "N to review" when not the whole tab. */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addFolderFor, addLabel, launchNotice, findPendingRow, ownerOf } from "./launch";
+import { addFolderFor, addLabel, knownNotice, launchNotice, findPendingRow, ownerOf } from "./launch";
 
 const owners = [
   { root: "/w/app", scopes: ["/w/app", "/w/app-wt/feat"] },
@@ -61,6 +61,9 @@ describe("launch notice", () => {
     expect(launchNotice({ ...file, exists: false })).toBe("/w/n/a.ts doesn't exist.");
     expect(addLabel(file)).toBe("Add /w/n");
     expect(addLabel({ ...file, isDir: true })).toBe("Add project");
+  });
+  it("names the known project a path is in when it is outside the workspace", () => {
+    expect(knownNotice({ ...file, path: "/w/umbrella/go.mod" }, "umbrella")).toBe("/w/umbrella/go.mod is in umbrella, which isn't in your workspace.");
   });
 });
 

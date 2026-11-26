@@ -42,6 +42,11 @@ export function addLabel(t: LaunchTarget): string {
   return t.isDir ? "Add project" : `Add ${addFolderFor(t)}`;
 }
 
+/** The launch notice for a path in a known project outside the workspace. */
+export function knownNotice(t: LaunchTarget, name: string): string {
+  return `${t.path} is in ${name}, which isn't in your workspace.`;
+}
+
 /** What the launch notice says. */
 export function launchNotice(t: LaunchTarget): string {
   return t.exists ? `${t.path} isn't a ClaudeGate project.` : `${t.path} doesn't exist.`;
