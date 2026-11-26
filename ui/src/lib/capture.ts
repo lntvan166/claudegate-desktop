@@ -21,7 +21,7 @@ export type CaptureView = {
 
 /** capture.rs `HookView`. */
 export type HookView = {
-  state: "upToDate" | "older" | "different" | "missing";
+  state: "upToDate" | "older" | "newer" | "different" | "missing";
   /** The installed hook.py's stamp; null when unstamped (the extension's copy), up to date or missing. */
   installed: string | null;
   /** The bundled hook's version, e.g. `v1.16.1`. */
@@ -35,6 +35,8 @@ export type HookReplacedView = {
   backup: string | null;
   from: HookView;
   to: string;
+  /** The marker was beside the extension's unstamped hook: this app now keeps the hook up to date. */
+  appOwnsNow: boolean;
   /** The status read right after the update. */
   capture: CaptureView;
 };
@@ -156,15 +158,18 @@ function baseSetupResult(r: InstallView, projectCount: number | null): SetupResu
   return { tone: "success", text: `Capture is set up. ${backup}${noProjects(projectCount)}` };
 }
 
-/** Whether the installed hook.py is anything but the bundled one (capturing states only). */
+/** Whether Update hook has something to bring up to the bundled version (capturing states only).
+ *  A newer stamped hook is not outdated: replacing it would be a downgrade. */
 export function hookOutdated(v: CaptureView | null): boolean {
-  return capturing(v) && !!v?.hook && v.hook.state !== "upToDate";
+  const s = capturing(v) ? v?.hook?.state : undefined;
+  return s === "older" || s === "different" || s === "missing";
 }
 
 /** Which hook.py is installed, in words. */
 function installedHook(h: HookView): string {
   if (h.state === "missing") return "hook.py is missing";
   if (h.state === "upToDate") return h.bundled;
+  if (h.state === "different" && h.installed === h.bundled) return `a modified copy of ${h.bundled}`;
   return h.installed ?? "VS Code extension's version";
 }
 
@@ -173,6 +178,7 @@ export function hookLine(v: CaptureView | null): string | null {
   if (!capturing(v) || !v?.hook) return null;
   const h = v.hook;
   if (h.state === "upToDate") return `Hook: ${h.bundled}, the version bundled in this app`;
+  if (h.state === "newer") return `Hook: ${h.installed} is newer than this app's ${h.bundled}`;
   return `Hook: ${installedHook(h)} · this app has ${h.bundled}`;
 }
 
@@ -190,8 +196,17 @@ export function updateHookConfirm(h: HookView): string {
   if (h.state === "missing") {
     return `Write ~/.claudegate/hook.py with the version bundled in this app (${h.bundled})? hook.sh and ~/.claude/settings.json are not changed. There is no current file to back up.`;
   }
-  return `Replace ~/.claudegate/hook.py with the version bundled in this app (${h.bundled})? hook.sh and ~/.claude/settings.json are not changed. The current file is backed up.`;
+  const tail = `with the version bundled in this app (${h.bundled})? hook.sh and ~/.claude/settings.json are not changed. The current file is backed up.`;
+  if (h.state === "different" && h.installed === null) {
+    return `Replace ~/.claudegate/hook.py (the VS Code extension's version, which may be newer than ${h.bundled}) ${tail}`;
+  }
+  if (h.state === "different" && h.installed === h.bundled) {
+    return `Replace ~/.claudegate/hook.py, a modified copy of ${h.bundled}, ${tail}`;
+  }
+  return `Replace ~/.claudegate/hook.py ${tail}`;
 }
+
+const APP_OWNS_NOW = "This app will keep this hook up to date until the VS Code extension replaces it.";
 
 export function hookUpdateResult(r: HookReplacedView): SetupResult {
   const prev = r.backup ? `The previous file is in ${r.backup}.` : "There was no previous file.";
@@ -199,5 +214,5 @@ export function hookUpdateResult(r: HookReplacedView): SetupResult {
     const now = hookLine(r.capture) ?? `“${chipLabel(r.capture)}”`;
     return { tone: "warning", text: `hook.py was written, but it now reads: ${now}. ${prev}` };
   }
-  return { tone: "success", text: `hook.py is now ${r.to}. ${prev}` };
+  return { tone: "success", text: `hook.py is now ${r.to}. ${prev}${r.appOwnsNow ? ` ${APP_OWNS_NOW}` : ""}` };
 }

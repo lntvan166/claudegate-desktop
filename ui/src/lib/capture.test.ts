@@ -239,6 +239,12 @@ describe("the hook line and Update hook", () => {
   });
   it("confirms with the brief's copy, naming the bundled version", () => {
     expect(updateHookConfirm(hk("different"))).toBe(
+      "Replace ~/.claudegate/hook.py (the VS Code extension's version, which may be newer than v1.17.0) with the version bundled in this app (v1.17.0)? hook.sh and ~/.claude/settings.json are not changed. The current file is backed up.",
+    );
+    expect(updateHookConfirm(hk("different", "v1.17.0"))).toBe(
+      "Replace ~/.claudegate/hook.py, a modified copy of v1.17.0, with the version bundled in this app (v1.17.0)? hook.sh and ~/.claude/settings.json are not changed. The current file is backed up.",
+    );
+    expect(updateHookConfirm(hk("older", "v1.16.1"))).toBe(
       "Replace ~/.claudegate/hook.py with the version bundled in this app (v1.17.0)? hook.sh and ~/.claude/settings.json are not changed. The current file is backed up.",
     );
     expect(updateHookConfirm(hk("missing"))).toContain("There is no current file to back up.");
@@ -249,6 +255,7 @@ describe("the hook line and Update hook", () => {
       backup,
       from: hk("different"),
       to: "v1.17.0",
+      appOwnsNow: false,
       capture: v("vscode", { hook: hk(after) }),
     });
     expect(hookUpdateResult(r("/h/.claudegate-desktop/backups/hook/hook-x.py", "upToDate"))).toEqual({
@@ -267,5 +274,34 @@ describe("detail with an outdated hook", () => {
   it("does not claim the extension keeps an outdated hook up to date", () => {
     expect(detail(v("vscode", { hook: hk("different") }))).not.toContain("keeps it up to date");
     expect(detail(v("vscode", { hook: hk("upToDate") }))).toContain("The extension keeps it up to date.");
+  });
+});
+
+describe("a newer hook, a modified copy, and taking the hook back", () => {
+  it("says a newer hook is newer and offers no Update", () => {
+    const n = v("vscode", { hook: hk("newer", "v1.18.0") });
+    expect(hookLine(n)).toBe("Hook: v1.18.0 is newer than this app's v1.17.0");
+    expect(hookOutdated(n)).toBe(false);
+    expect(canUpdateHook(n, false)).toBe(false);
+    expect(hookUpdateBlocked(n, true)).toBeNull();
+    expect(detail(n)).toContain("The extension keeps it up to date.");
+  });
+  it("keeps the button for a modified copy of the bundled version", () => {
+    const m = v("app", { hook: hk("different", "v1.17.0") });
+    expect(hookLine(m)).toBe("Hook: a modified copy of v1.17.0 · this app has v1.17.0");
+    expect(canUpdateHook(m, false)).toBe(true);
+  });
+  it("says plainly when the app takes a taken-over hook back", () => {
+    const r: HookReplacedView = {
+      hook: "/h/.claudegate/hook.py",
+      backup: "/b.py",
+      from: hk("different"),
+      to: "v1.17.0",
+      appOwnsNow: true,
+      capture: v("app", { hook: hk("upToDate") }),
+    };
+    expect(hookUpdateResult(r).text).toBe(
+      "hook.py is now v1.17.0. The previous file is in /b.py. This app will keep this hook up to date until the VS Code extension replaces it.",
+    );
   });
 });
