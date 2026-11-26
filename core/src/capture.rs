@@ -85,11 +85,14 @@ pub const MARKER_FILE: &str = ".installed-by-desktop";
 
 const STAMP_PREFIX: &str = "# CLAUDEGATE_HOOK_VERSION=";
 
-/// The version the build stamped into the bundled hook.py, e.g. `v1.16.1`.
+/// The version the build stamped into a hook.py, e.g. `v1.16.1`. Only line 2 (after the shebang)
+/// counts, the line `adoptable_hook` removes: the same text anywhere else (say, quoted in a
+/// docstring of the extension's hook) is not a stamp.
 pub fn bundled_hook_version(hook_py: &str) -> Option<String> {
     hook_py
         .lines()
-        .find_map(|l| l.strip_prefix(STAMP_PREFIX))
+        .nth(1)
+        .and_then(|l| l.strip_prefix(STAMP_PREFIX))
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(str::to_owned)
@@ -383,8 +386,12 @@ pub enum HookVersion {
     UpToDate,
     /// Stamped with a version older than the bundled one.
     Older { installed: String },
-    /// Anything else: stamped with the same, a newer or an unparseable version but different bytes,
-    /// or unstamped (`installed: None`, the extension's copy, whose version is not guessed).
+    /// Stamped with a version newer than the bundled one: replacing it would be a downgrade, so
+    /// Update hook refuses it.
+    Newer { installed: String },
+    /// Anything else: stamped with the bundled version (or an unparseable one) but different bytes,
+    /// i.e. a modified copy, or unstamped (`installed: None`, the extension's copy, whose version
+    /// is not guessed and may be newer).
     Different { installed: Option<String> },
     /// There is no hook.py.
     Missing,
@@ -399,6 +406,7 @@ pub fn hook_version(installed: Option<&[u8]>, bundled_hook: &str) -> HookVersion
     let stamp = bundled_hook_version(&String::from_utf8_lossy(bytes));
     match (stamp, bundled_hook_version(bundled_hook)) {
         (Some(have), Some(ship)) if version_newer(&ship, &have) => HookVersion::Older { installed: have },
+        (Some(have), Some(ship)) if version_newer(&have, &ship) => HookVersion::Newer { installed: have },
         (stamp, _) => HookVersion::Different { installed: stamp },
     }
 }
@@ -414,6 +422,10 @@ pub struct HookReplaced {
     pub from: HookVersion,
     /// The bundled version now installed.
     pub to: String,
+    /// The marker is there and the replaced hook.py was unstamped (the extension had taken the
+    /// hook over): now stamped again, the app counts it as its own and its startup update keeps it
+    /// current, until the extension replaces it again. The marker itself is not written.
+    pub app_owns_now: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -428,6 +440,8 @@ pub enum HookReplaceError {
     NotRegularFile,
     /// It already is the bundled hook; nothing was written.
     UpToDate,
+    /// It is stamped newer than the bundled hook; replacing it would downgrade it.
+    Newer(String),
     /// hook.py changed between our read and our write; nothing was written.
     Changed,
     Failed(String),
@@ -446,6 +460,9 @@ impl std::fmt::Display for HookReplaceError {
                 write!(f, "~/.claudegate/hook.py is not a regular file (a symlink, say), so it was left alone.")
             }
             HookReplaceError::UpToDate => write!(f, "hook.py is already the bundled version; nothing was changed."),
+            HookReplaceError::Newer(v) => {
+                write!(f, "hook.py is {v}, newer than the version bundled in this app, so it was left as is.")
+            }
             HookReplaceError::Changed => {
                 write!(f, "hook.py changed while it was being updated (VS Code, most likely), so it was left as is. Check again.")
             }

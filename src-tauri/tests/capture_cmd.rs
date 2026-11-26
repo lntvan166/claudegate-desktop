@@ -352,7 +352,7 @@ fn update_skips_when_not_newer() {
     for stamp in ["v99.0.0", "not a version"] {
         let k = fx();
         k.as_app("v1.0.0");
-        fs::write(k.cg("hook.py"), format!("# CLAUDEGATE_HOOK_VERSION={stamp}\n")).unwrap();
+        fs::write(k.cg("hook.py"), format!("#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION={stamp}\n")).unwrap();
         assert_untouched(&k, || update_hook_with(&k.home, &k.cfg, true));
     }
 }
@@ -370,7 +370,7 @@ fn update_refuses_without_the_marker_even_if_the_hook_is_stamped() {
     let f = fx();
     f.as_app("v1.0.0");
     fs::remove_file(f.cg(".installed-by-desktop")).unwrap();
-    fs::write(f.cg("hook.py"), "# CLAUDEGATE_HOOK_VERSION=v1.0.0\n").unwrap();
+    fs::write(f.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\n").unwrap();
     assert_untouched(&f, || update_hook_with(&f.home, &f.cfg, true));
 }
 
@@ -393,7 +393,7 @@ fn update_compares_with_the_installed_stamp_not_the_marker() {
     // Marker says current, but hook.py is stamped older: update it.
     let g = fx();
     g.as_app(&bundled());
-    fs::write(g.cg("hook.py"), "# CLAUDEGATE_HOOK_VERSION=v1.2.0\n").unwrap();
+    fs::write(g.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.2.0\n").unwrap();
     let r = update_hook_with(&g.home, &g.cfg, true).unwrap();
     assert_eq!(r, HookUpdate::Updated { from: "v1.2.0".into(), to: bundled() });
     assert_eq!(fs::read_to_string(g.cg("hook.py")).unwrap(), BUNDLED_HOOK);
@@ -437,7 +437,7 @@ fn update_is_blocked_by_read_only_and_an_unreadable_config() {
 fn update_skips_when_python_is_missing() {
     let f = fx();
     f.as_app("v1.0.0");
-    fs::write(f.cg("hook.py"), "# CLAUDEGATE_HOOK_VERSION=v1.0.0\n").unwrap();
+    fs::write(f.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\n").unwrap();
     assert_untouched(&f, || update_hook_with(&f.home, &f.cfg, false));
 }
 
@@ -446,7 +446,7 @@ fn update_keeps_hook_py_mode() {
     use std::os::unix::fs::PermissionsExt;
     let f = fx();
     f.as_app("v1.0.0");
-    fs::write(f.cg("hook.py"), "# CLAUDEGATE_HOOK_VERSION=v1.0.0\n").unwrap();
+    fs::write(f.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\n").unwrap();
     fs::set_permissions(f.cg("hook.py"), fs::Permissions::from_mode(0o640)).unwrap();
     assert!(matches!(update_hook_with(&f.home, &f.cfg, true).unwrap(), HookUpdate::Updated { .. }));
     assert_eq!(fs::metadata(f.cg("hook.py")).unwrap().permissions().mode() & 0o777, 0o640);
@@ -523,6 +523,8 @@ fn the_view_reports_the_hooks_version_state() {
     assert_eq!(hook_state(&f), Some(HookView { state: "older".into(), installed: Some("v1.0.0".into()), bundled: bundled() }));
     fs::write(f.cg("hook.py"), BUNDLED_HOOK).unwrap();
     assert_eq!(hook_state(&f).unwrap().state, "upToDate");
+    fs::write(f.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v99.0.0\nnewer\n").unwrap();
+    assert_eq!(hook_state(&f), Some(HookView { state: "newer".into(), installed: Some("v99.0.0".into()), bundled: bundled() }));
     fs::remove_file(f.cg("hook.py")).unwrap();
     assert_eq!(hook_state(&f).unwrap().state, "missing");
     let json = serde_json::to_value(capture_view_for(&f.home, true)).unwrap();
@@ -549,6 +551,7 @@ fn update_hook_replaces_the_extensions_hook_and_backs_it_up_beside_the_config() 
     assert_eq!(fs::read(f.settings()).unwrap(), settings);
     assert_eq!(fs::read(f.cg("hook.sh")).unwrap(), sh);
     assert!(!f.cg(".installed-by-desktop").exists(), "no marker written");
+    assert!(!r.app_owns_now);
     // Done once: a second press refuses rather than backing up again.
     assert!(update_capture_hook_with(&f.home, &f.cfg, true).unwrap_err().contains("already"));
 }
@@ -574,4 +577,29 @@ fn update_hook_refuses_when_capture_is_not_set_up() {
     let e = update_capture_hook_with(&f.home, &f.cfg, true).unwrap_err();
     assert!(e.contains("not set up"), "{e}");
     assert_eq!(fs::read_to_string(f.cg("hook.py")).unwrap(), "leftover\n");
+}
+
+#[test]
+fn update_hook_says_when_it_takes_a_taken_over_hook_back() {
+    let f = fx();
+    f.as_extension();
+    fs::write(f.cg(".installed-by-desktop"), "v1.0.0").unwrap();
+    assert!(capture_view_for(&f.home, true).taken_over);
+    let r = update_capture_hook_with(&f.home, &f.cfg, true).unwrap();
+    assert!(r.app_owns_now);
+    assert_eq!(r.capture.status, "app");
+    assert_eq!(fs::read_to_string(f.cg(".installed-by-desktop")).unwrap(), "v1.0.0", "marker untouched");
+    let json = serde_json::to_value(&r).unwrap();
+    assert_eq!(json["appOwnsNow"], serde_json::Value::Bool(true));
+}
+
+#[test]
+fn update_hook_refuses_a_newer_hook() {
+    let f = fx();
+    f.as_extension();
+    let newer = "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v99.0.0\nnewer\n";
+    fs::write(f.cg("hook.py"), newer).unwrap();
+    let e = update_capture_hook_with(&f.home, &f.cfg, true).unwrap_err();
+    assert!(e.contains("newer"), "{e}");
+    assert_eq!(fs::read_to_string(f.cg("hook.py")).unwrap(), newer);
 }

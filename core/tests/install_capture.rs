@@ -86,6 +86,10 @@ fn bundled_version_comes_from_the_stamp() {
     assert!(bundled_hook_version(&real).is_some_and(|v| v.starts_with('v')));
     assert_eq!(bundled_hook_version("print(1)\n"), None);
     assert_eq!(bundled_hook_version("# CLAUDEGATE_HOOK_VERSION=\n"), None);
+    // Only line 2 is the stamp, the line `adoptable_hook` removes.
+    assert_eq!(bundled_hook_version("# CLAUDEGATE_HOOK_VERSION=v1.0.0\nx\n"), None);
+    assert_eq!(bundled_hook_version("#!/usr/bin/env python3\nx\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\n"), None);
+    assert_eq!(bundled_hook_version("#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0"), Some("v1.0.0".into()));
 }
 
 // ---- the installer, in a temp HOME ----

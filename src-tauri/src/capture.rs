@@ -45,13 +45,13 @@ pub struct CaptureView {
     pub hook: Option<HookView>,
 }
 
-/// `HookVersion` for the UI. `state` is one of `upToDate`, `older`, `different`, `missing`.
+/// `HookVersion` for the UI. `state` is one of `upToDate`, `older`, `newer`, `different`, `missing`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HookView {
     pub state: String,
-    /// The installed hook.py's `CLAUDEGATE_HOOK_VERSION` stamp; `None` for an unstamped file (the
-    /// extension's, version unknown), and for `upToDate`/`missing`.
+    /// The installed hook.py's `CLAUDEGATE_HOOK_VERSION` stamp (line 2); `None` for an unstamped
+    /// file (the extension's, version unknown), and for `upToDate`/`missing`.
     pub installed: Option<String>,
     /// The bundled hook's version, e.g. `v1.16.1`.
     pub bundled: String,
@@ -61,6 +61,7 @@ pub fn hook_view_of(v: &HookVersion) -> HookView {
     let (state, installed) = match v {
         HookVersion::UpToDate => ("upToDate", None),
         HookVersion::Older { installed } => ("older", Some(installed.clone())),
+        HookVersion::Newer { installed } => ("newer", Some(installed.clone())),
         HookVersion::Different { installed } => ("different", installed.clone()),
         HookVersion::Missing => ("missing", None),
     };
@@ -77,6 +78,9 @@ pub struct HookReplacedView {
     /// What was there before.
     pub from: HookView,
     pub to: String,
+    /// The marker was there beside the extension's unstamped hook: now stamped, this app keeps the
+    /// hook up to date (its startup update) until the extension replaces it.
+    pub app_owns_now: bool,
     pub capture: CaptureView,
 }
 
@@ -293,6 +297,7 @@ pub fn hook_replaced_view(r: &HookReplaced, capture: CaptureView) -> HookReplace
         backup: r.backup.as_deref().map(show),
         from: hook_view_of(&r.from),
         to: r.to.clone(),
+        app_owns_now: r.app_owns_now,
         capture,
     }
 }

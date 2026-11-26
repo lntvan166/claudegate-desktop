@@ -163,13 +163,25 @@ mod hook_version_states {
     }
 
     #[test]
-    fn a_same_or_newer_stamp_with_other_bytes_is_different() {
+    fn the_same_stamp_with_other_bytes_is_a_modified_copy() {
         let same = b"#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.17.0\nedited\n";
         assert_eq!(hook_version(Some(same), BUNDLED), HookVersion::Different { installed: Some("v1.17.0".into()) });
-        let newer = b"#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v2.0.0\nx\n";
-        assert_eq!(hook_version(Some(newer), BUNDLED), HookVersion::Different { installed: Some("v2.0.0".into()) });
-        let odd = b"# CLAUDEGATE_HOOK_VERSION=nightly\nx\n";
+        let odd = b"#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=nightly\nx\n";
         assert_eq!(hook_version(Some(odd), BUNDLED), HookVersion::Different { installed: Some("nightly".into()) });
+    }
+
+    #[test]
+    fn a_newer_stamp_is_newer_never_outdated() {
+        let newer = b"#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v2.0.0\nx\n";
+        assert_eq!(hook_version(Some(newer), BUNDLED), HookVersion::Newer { installed: "v2.0.0".into() });
+    }
+
+    #[test]
+    fn a_stamp_off_line_two_is_not_a_stamp() {
+        let first = b"# CLAUDEGATE_HOOK_VERSION=v1.0.0\n#!/usr/bin/env python3\nx\n";
+        assert_eq!(hook_version(Some(first), BUNDLED), HookVersion::Different { installed: None });
+        let later = b"#!/usr/bin/env python3\nx\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\n";
+        assert_eq!(hook_version(Some(later), BUNDLED), HookVersion::Different { installed: None });
     }
 
     #[test]

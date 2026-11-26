@@ -1545,9 +1545,14 @@ fn replace_hook_unix(
         other => return Err(E::NotRegistered(other)),
     }
     let from = hook_version(installed.as_deref(), bundled_hook);
-    if from == HookVersion::UpToDate {
-        return Err(E::UpToDate);
+    match &from {
+        HookVersion::UpToDate => return Err(E::UpToDate),
+        HookVersion::Newer { installed } => return Err(E::Newer(installed.clone())),
+        _ => {}
     }
+    // The marker beside an unstamped hook.py: the extension had taken the hook over. The stamped
+    // bundled hook makes it this app's again (`app_owns_hook`); say so rather than leave it silent.
+    let app_owns_now = !ours && fs::symlink_metadata(&marker).is_ok();
     guard_hook_file(&cg, &py).map_err(|e| E::Failed(e.to_string()))?;
 
     let backup = match &installed {
@@ -1560,7 +1565,15 @@ fn replace_hook_unix(
             )
         }
     };
-    install_fault("before_hook_replace").map_err(|e| E::Failed(e.to_string()))?;
+    // From here a failure leaves hook.py as it was, so the backup just made is a duplicate: it goes,
+    // and the folder never grows past `HOOK_BACKUPS_KEPT` from refused updates.
+    let drop_backup = |e: E| {
+        if let Some(b) = &backup {
+            let _ = fs::remove_file(b);
+        }
+        e
+    };
+    install_fault("before_hook_replace").map_err(|e| drop_backup(E::Failed(e.to_string())))?;
 
     let changed = std::cell::Cell::new(false);
     let res = match &installed {
@@ -1576,7 +1589,7 @@ fn replace_hook_unix(
         }
         None => {
             if !cg.is_dir() {
-                return Err(E::Failed(format!("{} is not a folder", cg.display())));
+                return Err(drop_backup(E::Failed(format!("{} is not a folder", cg.display()))));
             }
             create_file_exclusive(&py, bundled_hook.as_bytes(), None).inspect_err(|e| {
                 if e.kind() == io::ErrorKind::AlreadyExists {
@@ -1587,12 +1600,12 @@ fn replace_hook_unix(
     };
     match res {
         Ok(()) => {}
-        Err(_) if changed.get() => return Err(E::Changed),
-        Err(e) => return Err(E::Failed(format!("could not write {}: {e}", py.display()))),
+        Err(_) if changed.get() => return Err(drop_backup(E::Changed)),
+        Err(e) => return Err(drop_backup(E::Failed(format!("could not write {}: {e}", py.display())))),
     }
     // Prune only once the write succeeded: a failed update never costs an older copy.
     prune_hook_backups(&desktop_home.join("backups").join("hook"));
-    Ok(HookReplaced { hook: py, backup, from, to })
+    Ok(HookReplaced { hook: py, backup, from, to, app_owns_now })
 }
 
 /// `hook-<stamp>[-N].py`'s `(stamp, N)`.

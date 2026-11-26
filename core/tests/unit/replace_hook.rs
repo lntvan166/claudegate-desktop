@@ -67,6 +67,7 @@ fn updates_the_extensions_unstamped_hook_and_nothing_else() {
 
     assert_eq!(r.from, HookVersion::Different { installed: None });
     assert_eq!(r.to, "v1.17.0");
+    assert!(r.app_owns_now, "marker beside the extension's hook: stamped again, the app's now");
     assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), HOOK, "the stamped bundled hook");
     let mode = fs::metadata(h.cg("hook.py")).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o640, "mode kept");
@@ -92,6 +93,7 @@ fn updates_an_older_stamped_hook() {
     fs::write(h.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.16.1\nold\n").unwrap();
     let r = h.run().unwrap();
     assert_eq!(r.from, HookVersion::Older { installed: "v1.16.1".into() });
+    assert!(!r.app_owns_now, "no marker");
     assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), HOOK);
 }
 
@@ -281,4 +283,79 @@ fn an_injected_fault_before_the_write_leaves_hook_py_alone() {
     set_install_fault(None);
     assert!(matches!(err, HookReplaceError::Failed(_)), "{err:?}");
     assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), EXT_HOOK);
+}
+
+#[test]
+fn a_newer_stamped_hook_is_never_downgraded() {
+    let h = Home::new();
+    h.as_extension();
+    let newer = "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v9.0.0\nnewer\n";
+    fs::write(h.cg("hook.py"), newer).unwrap();
+    assert_eq!(h.run().unwrap_err(), HookReplaceError::Newer("v9.0.0".into()));
+    assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), newer);
+    assert!(h.backups().is_empty());
+}
+
+#[test]
+fn a_modified_copy_of_the_bundled_version_is_replaced() {
+    let h = Home::new();
+    h.as_extension();
+    fs::write(h.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.17.0\nhand edited\n").unwrap();
+    let r = h.run().unwrap();
+    assert_eq!(r.from, HookVersion::Different { installed: Some("v1.17.0".into()) });
+    assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), HOOK);
+}
+
+#[test]
+fn an_app_owned_older_hook_is_not_reported_as_taken_back() {
+    let h = Home::new();
+    h.as_extension();
+    fs::write(h.cg(".installed-by-desktop"), MARKER).unwrap();
+    fs::write(h.cg("hook.py"), "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.16.1\nold\n").unwrap();
+    assert!(!h.run().unwrap().app_owns_now);
+}
+
+fn ten_old_backups(h: &Home) {
+    let dir = h.desk.join("backups/hook");
+    fs::create_dir_all(&dir).unwrap();
+    for d in 1..=10 {
+        fs::write(dir.join(format!("hook-200001{d:02}T000000.000Z.py")), "old").unwrap();
+    }
+}
+
+#[test]
+fn a_refused_write_removes_the_backup_it_made() {
+    let h = Home::new();
+    h.as_extension();
+    ten_old_backups(&h);
+    let before = h.backups();
+    let py = h.cg("hook.py");
+    set_install_fault(Some(Box::new(move |stage| {
+        if stage == "before_hook_replace" {
+            fs::write(&py, "changed\n").unwrap();
+        }
+        Ok(())
+    })));
+    let err = h.run().unwrap_err();
+    set_install_fault(None);
+    assert_eq!(err, HookReplaceError::Changed);
+    assert_eq!(h.backups(), before, "still the same ten");
+}
+
+#[test]
+fn a_failed_write_removes_the_backup_it_made() {
+    let h = Home::new();
+    h.as_extension();
+    ten_old_backups(&h);
+    let before = h.backups();
+    set_install_fault(Some(Box::new(|stage| {
+        if stage == "before_hook_replace" {
+            return Err(io::Error::other("boom"));
+        }
+        Ok(())
+    })));
+    let err = h.run().unwrap_err();
+    set_install_fault(None);
+    assert!(matches!(err, HookReplaceError::Failed(_)), "{err:?}");
+    assert_eq!(h.backups(), before, "still the same ten");
 }
