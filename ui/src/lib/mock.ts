@@ -18,6 +18,7 @@ import type {
   SettingKey,
   SettingsView,
 } from "./api";
+import type { FilterView, PageView, RowView } from "../gitlog/log";
 import { DEFAULT_GITLOG_CONFIG, SCAN_DEPTH_MAX, type GitLogConfig, type RepoView } from "../gitlog/repos";
 import { DEFAULT_PROTECTED, globMatcher, type ExcludeOwner, type Resolved } from "./settings";
 
@@ -581,6 +582,74 @@ function glName(n: string): string {
   return t;
 }
 
+// The merged log of the mock: a few hundred deterministic commits per repository.
+const GL_PAGE = 100;
+const GL_AUTHORS = [
+  ["Rin", "rin@acme.test"],
+  ["Sam", "sam@acme.test"],
+  ["Ada", "ada@acme.test"],
+] as const;
+const GL_SUBJECTS = [
+  "fix: keep the retry count across reconnects",
+  "feat: add the audit export",
+  "refactor: split the order totals out of the handler",
+  "chore: bump dependencies",
+  "test: cover the empty cart",
+  "docs: explain the release steps",
+  "fix: stop logging the session token",
+  "perf: cache the price lookup",
+];
+const glSubject = (sha: string) => GL_SUBJECTS[parseInt(sha.slice(-4), 16) % GL_SUBJECTS.length];
+let glNewest = 0;
+let glQuery: { id: number; rows: RowView[]; at: number; failures: { repo: string; reason: string }[]; branchUse: PageView["branchUse"] } | null = null;
+const glAll: RowView[] = (() => {
+  const now = Date.now() / 1000;
+  const out: RowView[] = [];
+  gitRepos.forEach((r, ri) => {
+    const wt = r.checkouts.filter((c) => !c.isMain);
+    for (let k = 0; k < 400; k++) {
+      const sha = ((((ri + 1) * 2_654_435_761 + k * 40_503) >>> 0).toString(16).padStart(8, "0")).repeat(5);
+      const [author, email] = GL_AUTHORS[(k + ri) % 3];
+      // Every 9th commit of a repository with worktrees lives only on one of them.
+      const only = wt.length && k % 9 === 0 ? wt[k % wt.length] : null;
+      out.push({
+        repo: r.id,
+        sha,
+        time: Math.floor(now - ri * 600 - k * (1500 + ri * 700)),
+        author,
+        email,
+        subject: GL_SUBJECTS[(k * 3 + ri) % GL_SUBJECTS.length] + (k % 5 === 0 ? ` (#${1000 + k})` : ""),
+        parents: [],
+        source: only ? (only.branch ? `refs/heads/${only.branch}` : only.head) : "HEAD",
+      });
+    }
+  });
+  return out.sort((a, b) => b.time - a.time);
+})();
+function glStart(id: number, repos: string[], f: FilterView) {
+  const now = Date.now() / 1000;
+  const since = f.since ?? (f.within ? now - f.within : null);
+  const search = f.search?.toLowerCase();
+  const authors = (f.authors ?? []).map((a) => a.toLowerCase());
+  const branch = f.branch?.trim();
+  const has = (id2: string) => !!branch && !!gitRepos.find((r) => r.id === id2)?.checkouts.some((c) => c.branch === branch);
+  const rows = glAll
+    .filter((r) => repos.includes(r.repo))
+    .filter((r) => (since === null ? true : r.time >= since) && (f.until === undefined || r.time <= f.until))
+    .filter((r) => !search || r.subject.toLowerCase().includes(search) || r.sha.startsWith(search))
+    .filter((r) => !f.mine || r.author === "Rin")
+    .filter((r) => !authors.length || authors.some((a) => r.author.toLowerCase().includes(a) || r.email.includes(a)))
+    .map((r) => (branch ? { ...r, source: has(r.repo) ? branch : "HEAD" } : r));
+  const failing = new URLSearchParams(location.search).get("gitlog") === "fail" ? gitRepos.find((r) => r.name === "legacy-billing") : undefined;
+  return {
+    id,
+    rows: failing ? rows.filter((r) => r.repo !== failing.id) : rows,
+    at: 0,
+    failures: failing && repos.includes(failing.id) ? [{ repo: failing.id, reason: "fatal: detected dubious ownership in repository" }] : [],
+    branchUse: branch ? { branch, found: repos.filter(has).length, fallback: repos.filter((x) => !has(x)).length } : null,
+  };
+}
+
 const gitlogMock: Pick<
   Api,
   | "gitlogRepos"
@@ -598,6 +667,10 @@ const gitlogMock: Pick<
   | "gitlogInclude"
   | "gitlogPane"
   | "gitlogLastFilter"
+  | "gitlogPage"
+  | "gitlogMessage"
+  | "gitlogWebUrl"
+  | "openUrl"
 > = {
   gitlogRepos: async () => {
     await new Promise((r) => setTimeout(r, 300));
@@ -663,6 +736,25 @@ const gitlogMock: Pick<
   gitlogLastFilter: (filter) => {
     gitLog = { ...gitLog, lastFilter: filter };
     return gl();
+  },
+  gitlogPage: async (queryId, repos, filter, more) => {
+    await new Promise((r) => setTimeout(r, 120));
+    if (queryId < glNewest) throw "stale query";
+    if (more) {
+      if (!glQuery || glQuery.id !== queryId) throw "stale query";
+    } else {
+      glNewest = queryId;
+      glQuery = glStart(queryId, repos, filter);
+    }
+    const q = glQuery!;
+    const rows = q.rows.slice(q.at, q.at + GL_PAGE);
+    q.at += rows.length;
+    return { queryId, rows, failures: q.failures, branchUse: q.branchUse, done: q.at >= q.rows.length };
+  },
+  gitlogMessage: async (_repo, sha) => `${glSubject(sha)}\n\nThe longer explanation of this change goes here, wrapped the way git stores it.\n\nCo-authored-by: Sam <sam@acme.test>`,
+  gitlogWebUrl: async (repo, sha) => (repo.includes("legacy-billing") ? null : `https://github.com/acme/${repo.split("/").slice(-2, -1)[0]}/commit/${sha}`),
+  openUrl: async (url) => {
+    console.info("open", url);
   },
 };
 

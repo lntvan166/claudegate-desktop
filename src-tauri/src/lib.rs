@@ -91,6 +91,7 @@ pub fn run() {
             gitlog::gitlog_file,
             gitlog::gitlog_web_url,
             gitlog::gitlog_message,
+            gitlog::gitlog_open_url,
             tray::set_pending_count,
             update::check_update,
             update::install_update

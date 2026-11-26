@@ -13,6 +13,7 @@ import type { EditorConfig } from "./editors";
 import type { SettingKey, SettingsView } from "./settings";
 import type { UpdateView } from "./update";
 import type { GitLogConfig, RepoView } from "../gitlog/repos";
+import type { FilterView, PageView } from "../gitlog/log";
 
 export type { CaptureView, HookReplacedView, HookView, InstallView, UpdateView };
 export type { GitLogConfig, RepoView };
@@ -210,6 +211,14 @@ export interface Api {
   gitlogPane(pane: string, width: number): Promise<GitLogConfig>;
   /** The filter bar as last left; null drops it. */
   gitlogLastFilter(filter: Record<string, unknown> | null): Promise<GitLogConfig>;
+  /** One page of the merged log. `more: false` starts query `queryId`; `more: true` continues it. */
+  gitlogPage(queryId: number, repos: string[], filter: FilterView, more: boolean): Promise<PageView>;
+  /** A commit's full message. */
+  gitlogMessage(repo: string, sha: string): Promise<string>;
+  /** The commit's page on its remote, or null when the host is not one we can build a link for. */
+  gitlogWebUrl(repo: string, sha: string): Promise<string | null>;
+  /** Opens an http(s) link in the system browser. */
+  openUrl(url: string): Promise<void>;
 }
 
 const tauriApi: Api = {
@@ -257,6 +266,10 @@ const tauriApi: Api = {
   gitlogInclude: (glob) => invoke<GitLogConfig>("gitlog_include", { glob }),
   gitlogPane: (pane, width) => invoke<GitLogConfig>("gitlog_pane", { pane, width }),
   gitlogLastFilter: (filter) => invoke<GitLogConfig>("gitlog_last_filter", { filter }),
+  gitlogPage: (queryId, repos, filter, more) => invoke<PageView>("gitlog_page", { queryId, repos, filter, more }),
+  gitlogMessage: (repo, sha) => invoke<string>("gitlog_message", { repo, sha }),
+  gitlogWebUrl: (repo, sha) => invoke<string | null>("gitlog_web_url", { repo, sha }),
+  openUrl: (url) => invoke<void>("gitlog_open_url", { url }),
 };
 
 let chosen: Promise<Api> | undefined;
@@ -328,3 +341,8 @@ export const gitlogExclude = async (glob: string) => (await api()).gitlogExclude
 export const gitlogInclude = async (glob: string) => (await api()).gitlogInclude(glob);
 export const gitlogPane = async (pane: string, width: number) => (await api()).gitlogPane(pane, width);
 export const gitlogLastFilter = async (filter: Record<string, unknown> | null) => (await api()).gitlogLastFilter(filter);
+export const gitlogPage = async (queryId: number, repos: string[], filter: FilterView, more: boolean) =>
+  (await api()).gitlogPage(queryId, repos, filter, more);
+export const gitlogMessage = async (repo: string, sha: string) => (await api()).gitlogMessage(repo, sha);
+export const gitlogWebUrl = async (repo: string, sha: string) => (await api()).gitlogWebUrl(repo, sha);
+export const openUrl = async (url: string) => (await api()).openUrl(url);

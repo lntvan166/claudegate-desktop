@@ -984,9 +984,59 @@ pub async fn gitlog_message(repo: String, sha: String, state: tauri::State<'_, G
     crate::commands::blocking(move || gl.message(&repo, &sha)).await?
 }
 
+/// A link the app may hand to the system: http(s) only, one line, no credentials, no control
+/// characters. The remote link is built from a repository's `origin`, which is outside input.
+pub fn check_open_url(url: &str) -> Result<(), String> {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).ok_or("Only http and https links can be opened.")?;
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if host.is_empty() || host.contains('@') || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("That link can't be opened.".into());
+    }
+    Ok(())
+}
+
+/// Opens `url` in the system browser. The one place the app opens a link.
+#[tauri::command]
+pub async fn gitlog_open_url(url: String) -> Result<(), String> {
+    crate::commands::blocking(move || {
+        check_open_url(&url)?;
+        #[cfg(target_os = "macos")]
+        let mut cmd = Command::new("open");
+        #[cfg(target_os = "windows")]
+        let mut cmd = {
+            let mut c = Command::new("rundll32");
+            c.arg("url.dll,FileProtocolHandler");
+            c
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let mut cmd = Command::new("xdg-open");
+        let mut child = cmd
+            .arg(&url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Couldn't open the browser: {e}"))?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
+    })
+    .await?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_plain_web_links_are_opened() {
+        assert!(check_open_url("https://github.com/acme/acme-api/commit/abc").is_ok());
+        assert!(check_open_url("http://git.acme.test/x").is_ok());
+        for bad in ["file:///etc/passwd", "javascript:alert(1)", "-flag", "https://", "https://u:p@github.com/x", "https://a.test/x y", "https://a.test/\nx", "ssh://git@a.test/x"] {
+            assert!(check_open_url(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn binary_sniff() {

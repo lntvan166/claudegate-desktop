@@ -1,13 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import Splitter from "../components/Splitter.svelte";
-  import { gitlogConfig, gitlogPane, gitlogRepos } from "../lib/api";
+  import { gitlogConfig, gitlogLastFilter, gitlogPane, gitlogRepos } from "../lib/api";
+  import Filters from "./Filters.svelte";
+  import LogList from "./LogList.svelte";
   import RepoPane from "./RepoPane.svelte";
+  import { DEFAULT_FILTER, debounce, parseFilter, type FilterState, type RowView } from "./log";
   import {
     DEFAULT_GITLOG_CONFIG,
     PANE_DEFAULTS,
     PANE_MIN,
-    colorVar,
     fitPanes,
     isTicked,
     paneMax,
@@ -46,6 +48,24 @@
   let innerWidth = $state(typeof window === "undefined" ? 1200 : window.innerWidth);
   const panes = $derived(fitPanes(preferred, innerWidth, collapsed));
   const shown = $derived((repos ?? []).filter((r) => isTicked(cfg.ticked, r.id)));
+  const queryRepos = $derived(shown.map((r) => r.id));
+
+  // The filters. They start from the stored ones and are written back (only that key) once the
+  // stored ones were read, so the defaults never overwrite them.
+  let filter = $state<FilterState>({ ...DEFAULT_FILTER });
+  let filtersRead = false;
+  let filters: Filters | undefined = $state();
+  let logList: LogList | undefined = $state();
+  let logBusy = $state(false);
+  let selected = $state<RowView | null>(null);
+  const saveFilter = debounce(() => void gitlogLastFilter($state.snapshot(filter)).catch(() => {}), 500);
+  $effect(() => {
+    JSON.stringify(filter);
+    if (filtersRead) saveFilter();
+  });
+
+  /** Enter on a commit: Task 7 opens its first changed file in the diff here. */
+  function openCommit(_row: RowView) {}
 
   function readCollapsed(): boolean {
     try {
@@ -82,6 +102,8 @@
     try {
       cfg = await gitlogConfig();
       preferred = panesFrom(cfg.panes);
+      filter = parseFilter(cfg.lastFilter);
+      filtersRead = true;
     } catch (e) {
       onnotice(`Couldn't read the Git log settings: ${e}`);
     }
@@ -146,23 +168,27 @@
   {/if}
 
   <div class="sheet">
-    <section class="log" aria-label="Commits">
-      <div class="bar" aria-hidden="true"></div>
-      <div class="state">
-        {#if repos && shown.length === 0}
-          <p class="state-title">No repository is shown</p>
-          <p class="state-body">Tick one or more in Repositories, or right-click one and choose Show all.</p>
-        {:else if repos}
-          <p class="state-title">Commits</p>
-          <p class="state-body">The newest commits across {shown.length === 1 ? "this repository" : `these ${shown.length} repositories`} will list here.</p>
-          <ul class="chips">
-            {#each shown as r (r.id)}
-              <li class="chip" style:--c={colorVar(r.color)}><span class="dot"></span>{r.name}</li>
-            {/each}
-          </ul>
-        {/if}
-      </div>
-    </section>
+    <div class="log">
+      <Filters bind:this={filters} bind:filter loading={logBusy} onrefresh={() => logList?.refresh()} onexit={() => logList?.focusList()} />
+      {#if repos === null && !reposError}
+        <div class="state" aria-hidden="true">
+          {#each [82, 64, 74] as w, i (i)}<div class="skeleton" style:width="{w}%"></div>{/each}
+        </div>
+      {:else}
+        <LogList
+          bind:this={logList}
+          repos={repos ?? []}
+          {queryRepos}
+          {filter}
+          {active}
+          onopen={openCommit}
+          onselect={(r) => (selected = r)}
+          onfocussearch={() => filters?.focusSearch()}
+          onloading={(b) => (logBusy = b)}
+          {onnotice}
+        />
+      {/if}
+    </div>
     <div class="bottom">
       <section class="changes" aria-label="Changes">
         <p class="pane-title">Changes</p>
@@ -231,11 +257,6 @@
     min-height: 0;
     border-bottom: 1px solid var(--rule);
   }
-  .bar {
-    height: 44px;
-    flex: none;
-    border-bottom: 1px solid var(--rule);
-  }
   .bottom {
     position: relative;
     display: grid;
@@ -267,45 +288,20 @@
   .state {
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
     gap: 4px;
     padding: 24px var(--pad);
-    overflow: auto;
   }
-  .state-title {
-    font-weight: 600;
+  .skeleton {
+    height: 12px;
+    margin: 8px 0;
+    border-radius: 4px;
+    background: var(--hover);
   }
   .state-body {
     max-width: 420px;
     font-size: var(--fs-small);
     line-height: 1.5;
     color: var(--muted);
-  }
-  .chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin: 10px 0 0;
-    padding: 0;
-    list-style: none;
-  }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 22px;
-    padding: 0 8px;
-    border-radius: var(--radius-chip);
-    font-size: var(--fs-small);
-    font-weight: 500;
-    color: var(--c);
-    background: color-mix(in srgb, var(--c) 12%, transparent);
-  }
-  .dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--c);
   }
 
   /* A narrow window: repositories on top, the commit list below; no Changes or diff yet. */
