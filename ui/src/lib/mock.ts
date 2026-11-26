@@ -670,7 +670,7 @@ const gitlogMock: Pick<
   | "gitlogPage"
   | "gitlogMessage"
   | "gitlogWebUrl"
-  | "openUrl"
+  | "gitlogOpenRemote"
 > = {
   gitlogRepos: async () => {
     await new Promise((r) => setTimeout(r, 300));
@@ -753,8 +753,10 @@ const gitlogMock: Pick<
   },
   gitlogMessage: async (_repo, sha) => `${glSubject(sha)}\n\nThe longer explanation of this change goes here, wrapped the way git stores it.\n\nCo-authored-by: Sam <sam@acme.test>`,
   gitlogWebUrl: async (repo, sha) => (repo.includes("legacy-billing") ? null : `https://github.com/acme/${repo.split("/").slice(-2, -1)[0]}/commit/${sha}`),
-  openUrl: async (url) => {
-    console.info("open", url);
+  gitlogOpenRemote: async (repo, sha) => {
+    if (repo.includes("legacy-billing")) return false;
+    console.info("open", `https://github.com/acme/${repo.split("/").slice(-2, -1)[0]}/commit/${sha}`);
+    return true;
   },
 };
 

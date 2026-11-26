@@ -26,7 +26,12 @@
   }
 
   function searchKey(e: KeyboardEvent) {
-    if (e.key === "Escape" || e.key === "ArrowDown" || e.key === "Enter") {
+    // Esc clears the search first; Esc on an empty box returns to the list.
+    if (e.key === "Escape" && filter.search) {
+      e.preventDefault();
+      e.stopPropagation();
+      filter.search = "";
+    } else if (e.key === "Escape" || e.key === "ArrowDown" || e.key === "Enter") {
       e.preventDefault();
       e.stopPropagation();
       onexit();

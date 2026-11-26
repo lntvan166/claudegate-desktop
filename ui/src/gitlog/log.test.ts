@@ -5,7 +5,10 @@ import {
   LogQuery,
   QueryGate,
   ROW_H,
+  MAX_IDLE_PAGES,
   STALE,
+  autoMoreAllowed,
+  slashTarget,
   addAuthor,
   badgeLabel,
   commitAge,
@@ -78,10 +81,31 @@ describe("query ids", () => {
     expect(ids[2][0]).toBeGreaterThan(ids[0][0]);
   });
 
-  it("a stale error from the backend changes nothing", async () => {
+  it("a stale error for the current query is surfaced, not left loading", async () => {
     const q = new LogQuery(async () => Promise.reject(STALE), () => {}, new QueryGate(1));
     await q.start({ repos: [], filter: {} });
+    expect(q.state.loading).toBe(false);
+    expect(q.state.error).toContain(STALE);
+  });
+
+  it("a stale error for a superseded query changes nothing", async () => {
+    const first = deferred<PageView>();
+    let n = 0;
+    const q = new LogQuery(() => (n++ === 0 ? first.promise : Promise.resolve(page(0, rows(0, 1), true))), () => {}, new QueryGate(1));
+    const p1 = q.start({ repos: [], filter: {} });
+    await q.start({ repos: [], filter: {} });
+    first.reject(STALE);
+    await p1;
     expect(q.state.error).toBeNull();
+    expect(q.state.rows).toHaveLength(1);
+  });
+
+  it("clear() forgets the old rows for good", async () => {
+    const q = new LogQuery(async (id) => page(id, rows(0, 3)), () => {}, new QueryGate(1));
+    await q.start({ repos: [], filter: {} });
+    q.clear();
+    expect(q.state.rows).toEqual([]);
+    expect(q.state.loading).toBe(false);
   });
 });
 
@@ -147,6 +171,32 @@ describe("Load more", () => {
     await q.start({ repos: [], filter: {} });
     await q.more();
     expect(q.state.rows).toHaveLength(5);
+  });
+});
+
+describe("auto Load more", () => {
+  it("stops after a few pages with no scrolling", () => {
+    expect(MAX_IDLE_PAGES).toBe(3);
+    expect(autoMoreAllowed(0)).toBe(true);
+    expect(autoMoreAllowed(MAX_IDLE_PAGES - 1)).toBe(true);
+    expect(autoMoreAllowed(MAX_IDLE_PAGES)).toBe(false);
+  });
+});
+
+describe("the / key", () => {
+  const el = (tagName: string, o: { role?: string; list?: boolean } = {}) => ({
+    tagName,
+    closest: (sel: string) => (o.role === "listbox" && sel.includes("listbox") ? {} : null),
+    hasAttribute: (n: string) => !!o.list && n === "data-loglist",
+  });
+  it("acts on the page and on the commit list", () => {
+    expect(slashTarget(null)).toBe(true);
+    expect(slashTarget(el("BUTTON"))).toBe(true);
+    expect(slashTarget(el("DIV", { role: "listbox", list: true }))).toBe(true);
+  });
+  it("does not act while typing, or in another listbox", () => {
+    expect(slashTarget(el("INPUT"))).toBe(false);
+    expect(slashTarget(el("DIV", { role: "listbox" }))).toBe(false);
   });
 });
 

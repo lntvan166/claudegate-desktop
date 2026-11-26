@@ -1,6 +1,7 @@
 // The Git log list's pure parts: the filter state and what the backend is sent, the query-id
 // gate, the paging state machine, the keyboard selection model, the row badge and the windowing.
 // gitlog.rs `PageView`/`RowView` are the wire shapes.
+import { isTypingTarget } from "../lib/keys";
 import { relTime } from "../lib/time";
 
 /** gitlog.rs `RowView`. `time` is the committer time in epoch seconds. */
@@ -227,7 +228,9 @@ export class LogQuery {
       this.state = { ...EMPTY_QUERY, rows: dedupe([], page.rows), failures: page.failures, branchUse: page.branchUse, done: page.done };
       this.emit(this.state);
     } catch (e) {
-      if (id !== this.id || isStale(e)) return;
+      // Only an answer for a superseded query is dropped; a "stale query" for the current one is a
+      // real failure and must end the loading state.
+      if (id !== this.id) return;
       this.set({ rows: [], failures: [], branchUse: null, done: true, loading: false, error: String(e) });
     }
   }
@@ -243,11 +246,18 @@ export class LogQuery {
       if (id !== this.id) return;
       this.set({ rows: dedupe(this.state.rows, page.rows), failures: page.failures, branchUse: page.branchUse, done: page.done, loadingMore: false });
     } catch (e) {
-      if (id !== this.id || isStale(e)) return;
+      if (id !== this.id) return;
       this.set({ loadingMore: false, error: String(e) });
     } finally {
       if (id === this.id) this.moreBusy = false;
     }
+  }
+
+  /** Forgets the rows too (no repository to log): nothing of the old list can come back. */
+  clear() {
+    this.cancel();
+    this.state = EMPTY_QUERY;
+    this.emit(this.state);
   }
 
   /** Drops whatever is in flight: its answer will be ignored. */
@@ -255,6 +265,15 @@ export class LogQuery {
     this.id = 0;
     this.moreBusy = false;
   }
+}
+
+/** Pages the list fetches by itself, with no scrolling in between, before it waits for the user. */
+export const MAX_IDLE_PAGES = 3;
+export const autoMoreAllowed = (idlePages: number) => idlePages < MAX_IDLE_PAGES;
+
+/** What `/` may act on: anything that is not typing, and the commit list itself (a listbox). */
+export function slashTarget(el: (Parameters<typeof isTypingTarget>[0] & { hasAttribute?: (n: string) => boolean }) | null | undefined): boolean {
+  return !isTypingTarget(el) || !!el?.hasAttribute?.("data-loglist");
 }
 
 /** `base` followed by the rows of `next` it does not already hold. */

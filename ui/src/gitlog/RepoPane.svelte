@@ -43,6 +43,7 @@
     ontoggle,
     onrefresh,
     onnotice,
+    onslash,
   }: {
     /** null while the first discovery runs. */
     repos: RepoView[] | null;
@@ -53,6 +54,8 @@
     ontoggle: () => void;
     onrefresh: () => void;
     onnotice: (text: string) => void;
+    /** `/` in the empty filter: the Git log search takes it. */
+    onslash?: () => void;
   } = $props();
 
   let query = $state("");
@@ -251,6 +254,9 @@
       query = "";
       e.preventDefault();
       e.stopPropagation();
+    } else if (e.key === "/" && !query && onslash) {
+      e.preventDefault();
+      onslash();
     } else if (e.key === "ArrowDown" || e.key === "Enter") {
       const first = order[0];
       if (!first) return;

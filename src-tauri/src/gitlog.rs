@@ -984,21 +984,43 @@ pub async fn gitlog_message(repo: String, sha: String, state: tauri::State<'_, G
     crate::commands::blocking(move || gl.message(&repo, &sha)).await?
 }
 
-/// A link the app may hand to the system: http(s) only, one line, no credentials, no control
-/// characters. The remote link is built from a repository's `origin`, which is outside input.
+/// A link the app may hand to the system: http(s) only, a plain host (`[A-Za-z0-9.-]`, optional
+/// `:port`), and none of the characters a Windows command-line tail or a shell could read as
+/// syntax. `%` is only allowed as a valid percent-escape. `rundll32 url.dll,FileProtocolHandler`
+/// takes the raw tail, so this is checked even though the link is built here from `origin`.
 pub fn check_open_url(url: &str) -> Result<(), String> {
+    let bad = || Err::<(), String>("That link can't be opened.".into());
     let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).ok_or("Only http and https links can be opened.")?;
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if host.is_empty() || host.contains('@') || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return Err("That link can't be opened.".into());
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let (host, port) = match authority.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (authority, None),
+    };
+    if host.is_empty() || !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
+        return bad();
+    }
+    if port.is_some_and(|p| p.is_empty() || p.len() > 5 || !p.chars().all(|c| c.is_ascii_digit())) {
+        return bad();
+    }
+    let b = url.as_bytes();
+    for (i, c) in url.char_indices() {
+        let hex2 = |at: usize| b.get(at + 1).is_some_and(u8::is_ascii_hexdigit) && b.get(at + 2).is_some_and(u8::is_ascii_hexdigit);
+        let ok = !(c.is_control() || c.is_whitespace() || !c.is_ascii() || matches!(c, '"' | '<' | '>' | '^' | '|' | '`' | '\\' | '\'' | '{' | '}'))
+            && (c != '%' || hex2(i));
+        if !ok {
+            return bad();
+        }
     }
     Ok(())
 }
 
-/// Opens `url` in the system browser. The one place the app opens a link.
+/// Opens the commit's page on its remote in the system browser. The webview names the commit,
+/// never the URL: the link is built here, from the repository's own `origin`.
 #[tauri::command]
-pub async fn gitlog_open_url(url: String) -> Result<(), String> {
+pub async fn gitlog_open_remote(repo: String, sha: String, state: tauri::State<'_, GitLogState>) -> Result<bool, String> {
+    let gl = state.inner().0.clone();
     crate::commands::blocking(move || {
+        let Some(url) = gl.web_url(&repo, &sha)? else { return Ok(false) };
         check_open_url(&url)?;
         #[cfg(target_os = "macos")]
         let mut cmd = Command::new("open");
@@ -1020,7 +1042,7 @@ pub async fn gitlog_open_url(url: String) -> Result<(), String> {
         std::thread::spawn(move || {
             let _ = child.wait();
         });
-        Ok(())
+        Ok(true)
     })
     .await?
 }
@@ -1030,10 +1052,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_hostile_origin_never_reaches_the_opener() {
+        let sha = "a".repeat(40);
+        for remote in ["https://github.x\"&y.com/acme/r.git", "https://github.com/acme/r\"&calc.git", "git@github.com:acme/r^|x.git"] {
+            if let Some(url) = web_url(remote, &sha) {
+                assert!(check_open_url(&url).is_err(), "{remote} -> {url}");
+            }
+        }
+        let ok = web_url("git@github.com:acme/acme-api.git", &sha).expect("github link");
+        assert!(check_open_url(&ok).is_ok(), "{ok}");
+    }
+
+    #[test]
     fn only_plain_web_links_are_opened() {
         assert!(check_open_url("https://github.com/acme/acme-api/commit/abc").is_ok());
         assert!(check_open_url("http://git.acme.test/x").is_ok());
-        for bad in ["file:///etc/passwd", "javascript:alert(1)", "-flag", "https://", "https://u:p@github.com/x", "https://a.test/x y", "https://a.test/\nx", "ssh://git@a.test/x"] {
+        assert!(check_open_url("https://git.acme.test:8443/a/b/commit/abc?x=1#y%20z").is_ok());
+        for bad in ["file:///etc/passwd", "javascript:alert(1)", "-flag", "https://", "https://u:p@github.com/x", "https://a.test/x y", "https://a.test/\nx", "ssh://git@a.test/x", "https://github.x\"&y.com/a", "https://a.test/x\"y", "https://a.test/x^y", "https://a.test/x|y", "https://a.test/x`y", "https://a.test/x\\y", "https://a.test/x<y>", "https://a.test/100%", "https://a.test/%zz", "https://a.test:80a/x", "https://a_b.test/x", "https://a.test%2f.evil/x"] {
             assert!(check_open_url(bad).is_err(), "{bad}");
         }
     }

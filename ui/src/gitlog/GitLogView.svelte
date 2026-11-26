@@ -34,7 +34,9 @@
   let repoPane: RepoPane | undefined = $state();
   /** Puts the keyboard in the Repositories pane (App calls it after switching to this view). */
   export function focusStart() {
-    void repoPane?.focusStart();
+    // The commit list when there is one to read; the Repositories pane when nothing is ticked yet.
+    if (logList && queryRepos.length > 0) logList.focusList();
+    else void repoPane?.focusStart();
   }
 
   const COLLAPSED_KEY = "claudegate.gitlog.reposCollapsed";
@@ -150,6 +152,7 @@
     ontoggle={toggleCollapsed}
     onrefresh={() => void load(true)}
     {onnotice}
+    onslash={() => filters?.focusSearch()}
   />
 
   {#if !collapsed}

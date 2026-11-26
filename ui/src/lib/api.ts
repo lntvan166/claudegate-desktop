@@ -217,8 +217,8 @@ export interface Api {
   gitlogMessage(repo: string, sha: string): Promise<string>;
   /** The commit's page on its remote, or null when the host is not one we can build a link for. */
   gitlogWebUrl(repo: string, sha: string): Promise<string | null>;
-  /** Opens an http(s) link in the system browser. */
-  openUrl(url: string): Promise<void>;
+  /** Opens the commit's page on its remote in the system browser; false when the remote has no link. */
+  gitlogOpenRemote(repo: string, sha: string): Promise<boolean>;
 }
 
 const tauriApi: Api = {
@@ -269,7 +269,7 @@ const tauriApi: Api = {
   gitlogPage: (queryId, repos, filter, more) => invoke<PageView>("gitlog_page", { queryId, repos, filter, more }),
   gitlogMessage: (repo, sha) => invoke<string>("gitlog_message", { repo, sha }),
   gitlogWebUrl: (repo, sha) => invoke<string | null>("gitlog_web_url", { repo, sha }),
-  openUrl: (url) => invoke<void>("gitlog_open_url", { url }),
+  gitlogOpenRemote: (repo, sha) => invoke<boolean>("gitlog_open_remote", { repo, sha }),
 };
 
 let chosen: Promise<Api> | undefined;
@@ -345,4 +345,4 @@ export const gitlogPage = async (queryId: number, repos: string[], filter: Filte
   (await api()).gitlogPage(queryId, repos, filter, more);
 export const gitlogMessage = async (repo: string, sha: string) => (await api()).gitlogMessage(repo, sha);
 export const gitlogWebUrl = async (repo: string, sha: string) => (await api()).gitlogWebUrl(repo, sha);
-export const openUrl = async (url: string) => (await api()).openUrl(url);
+export const gitlogOpenRemote = async (repo: string, sha: string) => (await api()).gitlogOpenRemote(repo, sha);

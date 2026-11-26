@@ -1,14 +1,15 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from "svelte";
   import ContextMenu from "../components/ContextMenu.svelte";
-  import { gitlogMessage, gitlogPage, gitlogWebUrl, openUrl } from "../lib/api";
+  import { gitlogMessage, gitlogOpenRemote, gitlogPage } from "../lib/api";
   import { writeClipboard } from "../lib/clipboard";
-  import { isTypingTarget } from "../lib/keys";
-  import { OVERLAY_SELECTOR, overlayShown } from "../lib/viewSwitch";
+    import { OVERLAY_SELECTOR, overlayShown } from "../lib/viewSwitch";
   import {
     EMPTY_QUERY,
     LogQuery,
     NAV_KEYS,
+    autoMoreAllowed,
+    slashTarget,
     ROW_H,
     badgeLabel,
     commitAge,
@@ -74,6 +75,8 @@
   // ---- running the query ----
   const requestKey = $derived(JSON.stringify([queryRepos, toFilterView(filter)]));
   let ran: string | null = null;
+  /** Pages fetched by the scroll trigger since the user last scrolled. */
+  let idle = 0;
   let wasActive = false;
   const later = debounce(() => run());
 
@@ -81,9 +84,9 @@
     later.cancel();
     ran = untrack(() => requestKey);
     dismissed = new Set();
+    idle = 0;
     if (queryRepos.length === 0) {
-      query.cancel();
-      q = EMPTY_QUERY;
+      query.clear();
       return;
     }
     void query.start({ repos: queryRepos.slice(), filter: toFilterView(filter) });
@@ -102,6 +105,8 @@
       if (!wasActive) {
         wasActive = true;
         run();
+        // The list was display:none: its scroll position and height are not what we hold.
+        void tick().then(resync);
       } else if (key !== ran) later();
     });
   });
@@ -140,10 +145,22 @@
   function onscroll() {
     if (!scroller) return;
     scrollTop = scroller.scrollTop;
+    idle = 0;
+  }
+  /** Re-reads the scroller after it was hidden, and brings the selection back into view. */
+  function resync() {
+    if (!scroller || !active) return;
+    scrollTop = scroller.scrollTop;
+    viewH = scroller.clientHeight;
+    revealIndex(selIndex);
   }
   // Fetch the next page before the end is reached; `more()` itself refuses a second in flight.
   $effect(() => {
-    if (!q.done && !q.loading && !q.loadingMore && !q.error && nearEnd(range.end, rows.length)) void query.more();
+    if (!active || q.done || q.loading || q.loadingMore || q.error || !nearEnd(range.end, rows.length)) return;
+    // Bounded: a sparse filter must not page through all of history while nobody scrolls.
+    if (!autoMoreAllowed(untrack(() => idle))) return;
+    idle++;
+    void query.more();
   });
 
   /** Runs the query again now (the Refresh button). */
@@ -184,7 +201,7 @@
   // `/` from anywhere in the Git log that is not a field or a menu.
   function onwindowkey(e: KeyboardEvent) {
     if (!active || e.defaultPrevented || e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
-    if (isTypingTarget(e.target as HTMLElement | null)) return;
+    if (!slashTarget(e.target as HTMLElement | null)) return;
     if (overlayShown(document.querySelectorAll<HTMLElement>(OVERLAY_SELECTOR))) return;
     e.preventDefault();
     onfocussearch();
@@ -216,9 +233,7 @@
         await writeClipboard(await gitlogMessage(repo, sha));
         onnotice("Copied the commit message");
       } else if (id === "remote") {
-        const url = await gitlogWebUrl(repo, sha);
-        if (!url) onnotice("This repository's remote is not one ClaudeGate can link to");
-        else await openUrl(url);
+        if (!(await gitlogOpenRemote(repo, sha))) onnotice("This repository's remote is not one ClaudeGate can link to");
       }
     } catch (e) {
       onnotice(`Couldn't do that: ${e}`);
@@ -261,6 +276,7 @@
     {onscroll}
     {onkeydown}
     tabindex="0"
+    data-loglist
     role="listbox"
     aria-label="Commits, newest first"
     aria-busy={q.loading}
