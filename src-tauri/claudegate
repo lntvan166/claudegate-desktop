@@ -13,6 +13,7 @@ case $target in
   /*) ;;
   *) target=$PWD/$target ;;
 esac
+# CLAUDEGATE_DESKTOP_BIN is a test seam (scripts/claudegate-wrapper-test.sh points it at a fake app).
 bin=${CLAUDEGATE_DESKTOP_BIN:-/usr/bin/claudegate-desktop}
 if [ ! -x "$bin" ]; then
   echo "claudegate: $bin is not installed or not executable" >&2

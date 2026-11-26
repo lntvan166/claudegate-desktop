@@ -24,26 +24,27 @@ pub trait GitRun: Sync {
     fn run(&self, cwd: &Path, args: &[&str]) -> Option<String>;
 }
 
+/// The environment every `git` this feature runs gets: no inherited repository override (any
+/// `GIT_*` variable is removed, since one would point every call at one repository), no prompt,
+/// and no optional locks (a read must never take `index.lock` from the user's own git).
+pub fn sanitize_git_env(cmd: &mut Command) {
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with("GIT_") {
+            cmd.env_remove(&k);
+        }
+    }
+    cmd.env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0");
+}
+
 /// The real `git` binary: no pager, no colour, unquoted paths, never prompts.
 pub struct RealGit;
 
 impl GitRun for RealGit {
     fn run(&self, cwd: &Path, args: &[&str]) -> Option<String> {
-        let out = Command::new("git")
-            .args(["--no-pager", "-c", "color.ui=never", "-c", "core.quotepath=off"])
-            .args(args)
-            .current_dir(cwd)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            // An inherited repository override would make every candidate resolve to one repo.
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .env_remove("GIT_COMMON_DIR")
-            .env_remove("GIT_OBJECT_DIRECTORY")
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()?;
+        let mut cmd = Command::new("git");
+        cmd.args(["--no-pager", "-c", "color.ui=never", "-c", "core.quotepath=off"]).args(args).current_dir(cwd);
+        sanitize_git_env(&mut cmd);
+        let out = cmd.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
         if !out.status.success() {
             return None;
         }

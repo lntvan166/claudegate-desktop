@@ -696,7 +696,7 @@ pub fn read_gitlog(path: &Path) -> GitLogConfig {
 }
 
 fn gitlog_entry(obj: &mut serde_json::Map<String, serde_json::Value>) -> Result<&mut serde_json::Map<String, serde_json::Value>, String> {
-    obj.entry("gitLog").or_insert_with(|| serde_json::json!({})).as_object_mut().ok_or_else(|| "The gitLog entry in config.json is not an object.".to_string())
+    obj.entry("gitLog").or_insert_with(|| serde_json::json!({})).as_object_mut().ok_or_else(|| "The gitLog entry in config.json is not an object. Remove the gitLog key from config.json (the app writes it again).".to_string())
 }
 
 /// `update_config_if` over the `gitLog` object, answering with the whole block as it now stands.

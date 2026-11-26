@@ -25,6 +25,7 @@
     changesTitle,
     createGate,
     diffPane,
+    type FileView,
     paneMessage,
     pickFile,
     statusText,
@@ -88,7 +89,7 @@
     if (ids.length === 0) return false;
     launchTicks = ids;
     cfg = { ...cfg, ticked: ids };
-    // Filters and selection from before the launch would point at repos no longer shown.
+    // Only the selection is cleared: it may point at a repo no longer shown. The filters stay.
     selected = null;
     return true;
   }
@@ -116,14 +117,21 @@
   // stored ones were read, so the defaults never overwrite them.
   let filter = $state<FilterState>({ ...DEFAULT_FILTER });
   let filtersRead = false;
+  /** The settings were read (or failed to be): the log's first query waits for it, so it never runs with the defaults. */
+  let configReady = $state(false);
+  /** The filter as last stored or loaded; an unchanged filter is not written again. */
+  let lastStored = "";
   let filters: Filters | undefined = $state();
   let logList: LogList | undefined = $state();
   let logBusy = $state(false);
   let selected = $state<RowView | null>(null);
-  const saveFilter = debounce(() => void gitlogLastFilter($state.snapshot(filter)).catch(() => {}), 500);
+  const saveFilter = debounce(() => {
+    lastStored = JSON.stringify(filter);
+    void gitlogLastFilter($state.snapshot(filter)).catch(() => {});
+  }, 500);
   $effect(() => {
-    JSON.stringify(filter);
-    if (filtersRead) saveFilter();
+    const now = JSON.stringify(filter);
+    if (filtersRead && now !== lastStored) saveFilter();
   });
 
   // ---- the selected commit's changes and diff -------------------------------------------------
@@ -146,7 +154,7 @@
   const changesCache = new ChangesCache();
   const commitGate = createGate();
   const fileGate = createGate();
-    /** The commit whose files are being fetched now. */
+  /** The commit whose files are being fetched now. */
   let inflightFor: string | null = null;
   const fetchChanges = leadingDebounce(() => void loadChanges(), CHANGES_DEBOUNCE_MS);
 
@@ -244,7 +252,10 @@
     openError = null;
     try {
       const [before, after] = await Promise.all([
-        gitlogFile(r.repo, r.sha, f.path, "before"),
+        // An added file has no before; a rename's old path is already known, so no lookup runs.
+        f.status === "added"
+          ? Promise.resolve<FileView>({ kind: "missing" })
+          : gitlogFile(r.repo, r.sha, f.path, "before", f.from ?? undefined),
         gitlogFile(r.repo, r.sha, f.path, "after"),
       ]);
       if (!fileGate.isCurrent(g)) return;
@@ -388,9 +399,12 @@
       if (launchTicks) cfg = { ...cfg, ticked: launchTicks };
       preferred = panesFrom(cfg.panes);
       filter = parseFilter(cfg.lastFilter);
+      lastStored = JSON.stringify(filter);
       filtersRead = true;
     } catch (e) {
       onnotice(`Couldn't read the Git log settings: ${e}`);
+    } finally {
+      configReady = true;
     }
   }
 
@@ -458,7 +472,7 @@
   <div class="sheet">
     <div class="log">
       <Filters bind:this={filters} bind:filter loading={logBusy} onrefresh={() => logList?.refresh()} onexit={() => logList?.focusList()} />
-      {#if repos === null && !reposError}
+      {#if (repos === null && !reposError) || !configReady}
         <div class="state" aria-hidden="true">
           {#each [82, 64, 74] as w, i (i)}<div class="skeleton" style:width="{w}%"></div>{/each}
         </div>

@@ -264,6 +264,8 @@ describe("badgeLabel", () => {
   it("strips refs/heads/ and shortens a sha to 7", () => {
     expect(badgeLabel("refs/heads/checkout-v2", "")).toBe("checkout-v2");
     expect(badgeLabel(SHA, "")).toBe("aaaaaaa");
+    expect(badgeLabel("b".repeat(64), "")).toBe("bbbbbbb");
+    expect(badgeLabel("b".repeat(50), "")).toBe("b".repeat(50));
   });
   it("is suppressed when the source is the active branch filter", () => {
     expect(badgeLabel("release", "release")).toBeNull();

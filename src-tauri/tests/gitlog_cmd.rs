@@ -167,6 +167,40 @@ fn pages_cover_every_commit_once_in_order() {
     assert!(all.windows(2).all(|w| w[0].time >= w[1].time), "newest first across pages: {times:?}");
 }
 
+/// A 0x1e byte in a subject or an author name must neither drop the commit nor skew the `--skip`
+/// of the next page.
+#[test]
+fn rs_bytes_in_subjects_and_authors_keep_paging_exact() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    init(&d);
+    let mut want = Vec::new();
+    for i in 0..11usize {
+        let t = BASE + i as i64 * 60;
+        let sha = match i % 3 {
+            0 => commit(&d, &[("a.txt", Some(format!("{i}").as_bytes()))], &format!("evil\x1etail {i}"), t),
+            1 => commit_by(&d, &format!("Ev\x1eil {i}"), &format!("plain {i}"), t),
+            _ => commit(&d, &[("b.txt", Some(format!("{i}").as_bytes()))], &format!("\x1e{i}\x1e"), t),
+        };
+        want.push(sha);
+    }
+    let g = gl().with_page_size(3);
+    let ids = ids_of(&g, &[root]);
+    let mut all = Vec::new();
+    let mut p = first_page(&g, 9, &ids, &FilterView::default());
+    loop {
+        all.extend(p.rows.clone());
+        if p.done {
+            break;
+        }
+        p = g.page("main", 9, &ids, &FilterView::default(), true).unwrap();
+        assert!(all.len() < 50);
+    }
+    want.reverse();
+    let got: Vec<String> = all.iter().map(|r| r.sha.clone()).collect();
+    assert_eq!(got, want);
+}
+
 #[test]
 fn branch_filter_falls_back_and_counts() {
     let (_t, root) = tmp();
@@ -235,7 +269,7 @@ fn file_before_after() {
     );
     let g = gl();
     let id = ids_of(&g, &[root])[0].clone();
-    let f = |path: &str, side| g.file(&id, &sha, path, side).unwrap();
+    let f = |path: &str, side| g.file(&id, &sha, path, side, None).unwrap();
     assert_eq!(f("new.txt", Side::Before), FileView::Missing);
     assert_eq!(f("new.txt", Side::After), FileView::Text("hello\n".into()));
     assert_eq!(f("del.txt", Side::Before), FileView::Text("bye\n".into()));
@@ -247,10 +281,12 @@ fn file_before_after() {
     assert_eq!(f("bin.dat", Side::After), FileView::Binary);
     assert_eq!(f("latin.txt", Side::After), FileView::Binary, "not UTF-8");
     assert_eq!(f("big.txt", Side::After), FileView::TooLarge(big.len() as u64));
-    assert_eq!(g.file(&id, &root_sha, "keep.txt", Side::Before).unwrap(), FileView::Missing, "a root commit has no before");
-    assert_eq!(g.file(&id, &root_sha, "keep.txt", Side::After).unwrap(), FileView::Text("v1\n".into()));
-    assert!(g.file(&id, &sha, "../outside", Side::After).is_err());
-    assert!(g.file(&id, "HEAD", "keep.txt", Side::After).is_err());
+    assert_eq!(g.file(&id, &root_sha, "keep.txt", Side::Before, None).unwrap(), FileView::Missing, "a root commit has no before");
+    assert_eq!(g.file(&id, &root_sha, "keep.txt", Side::After, None).unwrap(), FileView::Text("v1\n".into()));
+    assert!(g.file(&id, &sha, "../outside", Side::After, None).is_err());
+    assert!(g.file(&id, "HEAD", "keep.txt", Side::After, None).is_err());
+    assert_eq!(g.file(&id, &sha, "renamed.txt", Side::Before, Some("old.txt")).unwrap(), FileView::Text(moved.clone()), "a given rename source skips the lookup");
+    assert!(g.file(&id, &sha, "renamed.txt", Side::Before, Some("../x")).is_err());
 
     let ch = g.changes(&id, &sha).unwrap();
     let by: std::collections::HashMap<&str, _> = ch.iter().map(|c| (c.path.as_str(), c)).collect();

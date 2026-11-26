@@ -2,8 +2,21 @@
 
 use std::collections::HashMap;
 
-/// Fields separated by NUL, records terminated by RS (0x1e).
-pub const LOG_FORMAT: &str = "--format=%H%x00%ct%x00%an%x00%ae%x00%s%x00%P%x1e";
+/// Six fields, each ended by NUL. There is no record separator: git cannot put a NUL in any of
+/// these fields, so every NUL is a field end and a record is exactly `LOG_FIELDS` of them. A
+/// separator byte (RS, even NUL+RS) can be forged by a field that begins or ends with it: `\0`
+/// then a subject starting with RS reads as "\0RS". git adds a newline after each record.
+pub const LOG_FORMAT: &str = "--format=%H%x00%ct%x00%an%x00%ae%x00%s%x00%P%x00";
+
+/// Fields per record in `LOG_FORMAT` output.
+pub const LOG_FIELDS: usize = 6;
+
+/// The complete records in `git log` output with `LOG_FORMAT`. Counted on the raw bytes, not on
+/// parsed commits, so a record the parser drops still advances `--skip`; a record cut off by a
+/// killed process is not counted.
+pub fn count_records(out: &[u8]) -> usize {
+    out.iter().filter(|b| **b == 0).count() / LOG_FIELDS
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commit {
@@ -22,24 +35,19 @@ pub fn is_sha(s: &str) -> bool {
 }
 
 pub fn parse_log(out: &str) -> Vec<Commit> {
-    let mut records: Vec<&str> = out.split('\x1e').collect();
-    // What follows the last RS is git's trailing newline or a record cut off
-    // by a killed process; neither is a commit.
-    records.pop();
+    let mut fields: Vec<&str> = out.split('\0').collect();
+    // What follows the last NUL is git's trailing newline or a field cut off by a killed process.
+    fields.pop();
     let mut commits = Vec::new();
-    for rec in records {
-        let rec = rec.strip_prefix('\n').unwrap_or(rec);
-        let f: Vec<&str> = rec.split('\0').collect();
-        if f.len() != 6 {
-            continue;
-        }
+    for f in fields.chunks_exact(LOG_FIELDS) {
+        let sha = f[0].strip_prefix('\n').unwrap_or(f[0]);
         let Ok(time) = f[1].parse::<i64>() else { continue };
-        if !is_sha(f[0]) {
+        if !is_sha(sha) {
             continue;
         }
         commits.push(Commit {
             repo: String::new(),
-            sha: f[0].to_string(),
+            sha: sha.to_string(),
             time,
             author: f[2].to_string(),
             email: f[3].to_string(),

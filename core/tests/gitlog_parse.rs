@@ -1,11 +1,11 @@
-use claudegate_core::gitlog::{parse_changes, parse_log, web_url, FileStatus};
+use claudegate_core::gitlog::{count_records, parse_changes, parse_log, web_url, FileStatus};
 
 const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const C: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
 fn rec(sha: &str, ct: &str, an: &str, ae: &str, s: &str, p: &str) -> String {
-    format!("{sha}\0{ct}\0{an}\0{ae}\0{s}\0{p}\x1e")
+    format!("{sha}\0{ct}\0{an}\0{ae}\0{s}\0{p}\0")
 }
 
 #[test]
@@ -18,6 +18,40 @@ fn parses_tricky_fields() {
     assert_eq!(c[0].author, "Zoë Müller 李");
     assert_eq!(c[0].time, 1700000000);
     assert_eq!(c[0].parents, vec![B.to_string()]);
+}
+
+#[test]
+fn rs_inside_a_field_does_not_split_a_record() {
+    let out = format!(
+        "{}\n{}\n",
+        rec(A, "2", "Evil\x1eName", "e@x.test", "evil\x1etail", B),
+        rec(B, "1", "a", "a@x.test", "next", "")
+    );
+    let c = parse_log(&out);
+    assert_eq!(c.len(), 2);
+    assert_eq!(c[0].subject, "evil\x1etail");
+    assert_eq!(c[0].author, "Evil\x1eName");
+    assert_eq!(c[1].subject, "next");
+    assert_eq!(count_records(out.as_bytes()), 2);
+}
+
+#[test]
+fn a_field_that_starts_or_ends_with_rs_is_not_a_terminator() {
+    let out = format!(
+        "{}\n{}\n{}\n",
+        rec(A, "3", "\x1e", "e@x.test", "\x1e", ""),
+        rec(B, "2", "", "", "", ""),
+        rec(C, "1", "a\x1e", "\x1ea@x.test", "\x1ex\x1e", A)
+    );
+    let c = parse_log(&out);
+    assert_eq!(c.len(), 3);
+    assert_eq!((c[0].author.as_str(), c[0].subject.as_str()), ("\x1e", "\x1e"));
+    assert_eq!(c[1].subject, "");
+    assert_eq!((c[2].email.as_str(), c[2].subject.as_str()), ("\x1ea@x.test", "\x1ex\x1e"));
+    assert_eq!(count_records(out.as_bytes()), 3);
+    // A record cut off mid-way is neither parsed nor counted.
+    let cut = format!("{}{A}\0123\0a", rec(A, "1", "a", "e", "ok", ""));
+    assert_eq!(count_records(cut.as_bytes()), 1);
 }
 
 #[test]

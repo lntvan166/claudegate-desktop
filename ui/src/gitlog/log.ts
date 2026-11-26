@@ -305,7 +305,8 @@ export function commitDate(time: number): string {
 
 export const shortSha = (sha: string) => sha.slice(0, 7);
 
-const SHA = /^[0-9a-f]{40}$/i;
+/** A full object id: 40 hex characters (SHA-1) or 64 (SHA-256). */
+const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/i;
 const stripHeads = (s: string) => (s.startsWith("refs/heads/") ? s.slice("refs/heads/".length) : s);
 
 /**

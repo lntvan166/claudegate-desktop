@@ -17,11 +17,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use claudegate_core::gitlog::{
-    ahead_behind, discover, heads_for, is_sha, is_valid_ref, log_args, par_map, parse_changes, parse_log, repo_searched, take_ready, web_url,
+    ahead_behind, count_records, discover, heads_for, is_sha, is_valid_ref, log_args, par_map, parse_changes, parse_log, repo_searched, take_ready, web_url,
     BranchUse, ChangedFile, Commit, FileStatus, Filter, GitRun, Repo, RepoProgress, DEFAULT_SCAN_DEPTH, PARALLEL,
 };
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,8 @@ pub const PAGE_SIZE: usize = 200;
 /// Refill rounds per page at most (Polylog's MAX_ROUNDS): a repository left empty holds the
 /// horizon, so the loop needs a bound.
 pub const MAX_ROUNDS: usize = 64;
+/// Pool slots only untagged calls (changes, file, message, discovery) may use.
+pub const RESERVED: usize = 2;
 /// A file side larger than this is not loaded: `FileView::TooLarge`.
 pub const MAX_FILE: u64 = 2 * 1024 * 1024;
 /// The error a superseded query's call returns. The UI also gates on `query_id`.
@@ -90,7 +92,8 @@ fn kill(slot: &Slot) {
 
 /// Runs `git` with at most `PARALLEL` children alive, each tracked by its query.
 pub struct Runner {
-    git: PathBuf,
+    /// The git binary; resolved on the first run, so nothing is probed at app start.
+    git: OnceLock<PathBuf>,
     running: Mutex<usize>,
     freed: Condvar,
     reg: Mutex<Registry>,
@@ -120,7 +123,12 @@ pub fn resolve_git() -> PathBuf {
 
 impl Runner {
     pub fn new(git: PathBuf) -> Self {
-        Runner { git, running: Mutex::new(0), freed: Condvar::new(), reg: Mutex::new(Registry::default()) }
+        Runner { git: OnceLock::from(git), running: Mutex::new(0), freed: Condvar::new(), reg: Mutex::new(Registry::default()) }
+    }
+
+    /// A runner that looks for git (`resolve_git`) the first time it runs one.
+    pub fn lazy() -> Self {
+        Runner { git: OnceLock::new(), running: Mutex::new(0), freed: Condvar::new(), reg: Mutex::new(Registry::default()) }
     }
 
     /// Makes `query` the window's latest. Every child of the window's other queries is killed
@@ -174,7 +182,10 @@ impl Runner {
             if tag.is_some_and(|t| !self.is_current(t)) {
                 return Err(RunError::Cancelled);
             }
-            if *n < PARALLEL {
+            // Paging (tagged) leaves `RESERVED` slots free, so a click on a changed file or a
+            // message never waits behind a page of dozens of repositories.
+            let limit = if tag.is_some() { PARALLEL - RESERVED } else { PARALLEL };
+            if *n < limit {
                 *n += 1;
                 return Ok(Permit(self));
             }
@@ -189,16 +200,9 @@ impl Runner {
             return Err(RunError::Spawn(format!("The folder {} is missing", cwd.display())));
         }
         let _permit = self.acquire(tag)?;
-        let mut cmd = Command::new(&self.git);
+        let mut cmd = Command::new(self.git.get_or_init(resolve_git));
         cmd.args(["--no-pager", "-c", "color.ui=never", "-c", "core.quotepath=off"]).args(args).current_dir(cwd);
-        // An inherited repository override (GIT_DIR and friends) would point every call at one
-        // repository; none of git's own variables is passed on.
-        for (k, _) in std::env::vars_os() {
-            if k.to_string_lossy().starts_with("GIT_") {
-                cmd.env_remove(&k);
-            }
-        }
-        cmd.env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0");
+        claudegate_core::gitlog::sanitize_git_env(&mut cmd);
         cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| RunError::Spawn(format!("Couldn't run git: {e}")))?;
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
@@ -496,12 +500,6 @@ fn now_secs() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
-/// `git log` records in `out`: one RS each. Counted on the raw output, not on parsed commits,
-/// so a record the parser drops still advances `--skip`.
-fn count_records(out: &[u8]) -> usize {
-    out.iter().filter(|b| **b == 0x1e).count()
-}
-
 /// The refs that log one repository's current checkouts: `HEAD` for the main one (the logs run
 /// there), each worktree's branch by name, and a detached worktree's commit. Names resolve
 /// when the query runs, so a commit made since discovery still shows.
@@ -544,7 +542,7 @@ fn tree_path_ok(p: &str) -> bool {
 
 impl Default for GitLog {
     fn default() -> Self {
-        GitLog::new(Runner::new(resolve_git()))
+        GitLog::new(Runner::lazy())
     }
 }
 
@@ -814,11 +812,11 @@ impl GitLog {
 
     /// One side of a changed file. Before is `parents[0]:<renamed-from or path>` (Missing for a
     /// root commit or an added file); after is `sha:<path>` (Missing for a deleted file).
-    pub fn file(&self, repo: &str, sha: &str, path: &str, side: Side) -> Result<FileView, String> {
+    pub fn file(&self, repo: &str, sha: &str, path: &str, side: Side, from: Option<&str>) -> Result<FileView, String> {
         if !is_sha(sha) {
             return Err("Not a commit id".into());
         }
-        if !tree_path_ok(path) {
+        if !tree_path_ok(path) || from.is_some_and(|f| !tree_path_ok(f)) {
             return Err("Not a path in the repository".into());
         }
         let cwd = self.cwd_of(repo)?;
@@ -827,18 +825,23 @@ impl GitLog {
             Side::Before => {
                 let line = self.runner.text(None, &cwd, &["rev-list", "--parents", "-n", "1", sha]).map_err(|e| e.reason())?;
                 let Some(p0) = line.split_whitespace().nth(1).map(String::from) else { return Ok(FileView::Missing) };
-                let ns = self.runner.text(None, &cwd, &Self::show_args("--name-status", sha)).map_err(|e| e.reason())?;
                 let mut name = path.to_string();
-                for c in parse_changes(&ns, "") {
-                    if c.path != path {
-                        continue;
+                if let Some(f) = from {
+                    // The caller already knows the rename source; no lookup needed.
+                    name = f.to_string();
+                } else {
+                    let ns = self.runner.text(None, &cwd, &Self::show_args("--name-status", sha)).map_err(|e| e.reason())?;
+                    for c in parse_changes(&ns, "") {
+                        if c.path != path {
+                            continue;
+                        }
+                        match c.status {
+                            FileStatus::Added => return Ok(FileView::Missing),
+                            FileStatus::Renamed { from } | FileStatus::Copied { from } => name = from,
+                            _ => {}
+                        }
+                        break;
                     }
-                    match c.status {
-                        FileStatus::Added => return Ok(FileView::Missing),
-                        FileStatus::Renamed { from } | FileStatus::Copied { from } => name = from,
-                        _ => {}
-                    }
-                    break;
                 }
                 if !tree_path_ok(&name) {
                     return Ok(FileView::Missing);
@@ -974,9 +977,16 @@ pub async fn gitlog_changes(repo: String, sha: String, state: tauri::State<'_, G
 }
 
 #[tauri::command]
-pub async fn gitlog_file(repo: String, sha: String, path: String, side: Side, state: tauri::State<'_, GitLogState>) -> Result<FileView, String> {
+pub async fn gitlog_file(
+    repo: String,
+    sha: String,
+    path: String,
+    side: Side,
+    from: Option<String>,
+    state: tauri::State<'_, GitLogState>,
+) -> Result<FileView, String> {
     let gl = state.inner().0.clone();
-    crate::commands::blocking(move || gl.file(&repo, &sha, &path, side)).await?
+    crate::commands::blocking(move || gl.file(&repo, &sha, &path, side, from.as_deref())).await?
 }
 
 /// The working-tree file for a changed path, for "Open in editor": `path` is a path in the
@@ -1118,6 +1128,20 @@ mod tests {
         for bad in ["file:///etc/passwd", "javascript:alert(1)", "-flag", "https://", "https://u:p@github.com/x", "https://a.test/x y", "https://a.test/\nx", "ssh://git@a.test/x", "https://github.x\"&y.com/a", "https://a.test/x\"y", "https://a.test/x^y", "https://a.test/x|y", "https://a.test/x`y", "https://a.test/x\\y", "https://a.test/x<y>", "https://a.test/100%", "https://a.test/%zz", "https://a.test:80a/x", "https://a_b.test/x", "https://a.test%2f.evil/x"] {
             assert!(check_open_url(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn untagged_calls_keep_reserved_slots() {
+        let r = Runner::lazy();
+        assert!(r.set_current("w", 1));
+        let tag = Tag { window: "w".into(), query: 1 };
+        let held: Vec<_> = (0..PARALLEL - RESERVED).map(|_| r.acquire(Some(&tag)).ok().expect("a paging slot")).collect();
+        // Paging is out of slots, but an untagged call still gets one.
+        let extra: Vec<_> = (0..RESERVED).map(|_| r.acquire(None).ok().expect("a reserved slot")).collect();
+        assert_eq!(*lock(&r.running), PARALLEL);
+        drop(extra);
+        drop(held);
+        assert_eq!(*lock(&r.running), 0);
     }
 
     #[test]

@@ -33,6 +33,13 @@ pub fn init(dir: &Path) {
 
 /// Writes (`Some`) or deletes (`None`) each file, then commits everything at time `t`.
 /// Returns the new commit's sha.
+/// An empty commit by author `name` at time `t`.
+pub fn commit_by(dir: &Path, name: &str, msg: &str, t: i64) -> String {
+    let out = cmd(dir, t).env("GIT_AUTHOR_NAME", name).args(["commit", "-q", "--allow-empty", "-m", msg]).output().unwrap();
+    assert!(out.status.success(), "commit: {}", String::from_utf8_lossy(&out.stderr));
+    git(dir, &["rev-parse", "HEAD"])
+}
+
 pub fn commit(dir: &Path, files: &[(&str, Option<&[u8]>)], msg: &str, t: i64) -> String {
     for (p, content) in files {
         let f = dir.join(p);
