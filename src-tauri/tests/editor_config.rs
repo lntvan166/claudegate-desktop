@@ -1,7 +1,7 @@
 //! Config and editor tests. Every file touched lives in a temp dir; the real
 //! ~/.claudegate and ~/.claudegate-desktop are never read or written.
 use claudegate_desktop_lib::config::{
-    allowed_template, config_path_in, load_or_create, save_editor, save_hidden_projects, Config, DEFAULT_EDITOR, VSCODE, ZED,
+    allowed_template, config_path_in, load_or_create, save_editor, Config, DEFAULT_EDITOR, VSCODE, ZED,
 };
 use claudegate_desktop_lib::editor::{
     check_target, render_editor_command, resolve_program, resolve_with_bundles,
@@ -43,7 +43,7 @@ fn missing_config_gives_default_and_creates_it() {
     let p = config_path_in(home.path());
     assert_eq!(p, home.path().join(".claudegate-desktop").join("config.json"));
     let c = load_or_create(&p);
-    assert_eq!(c, Config { editor: DEFAULT_EDITOR.into(), custom_editor: None, read_only: false, hidden_projects: vec![], hidden_at: Default::default(), app_roots: vec![] });
+    assert_eq!(c, Config { editor: DEFAULT_EDITOR.into(), custom_editor: None, read_only: false, workspace: None, app_roots: vec![] });
     assert_eq!(DEFAULT_EDITOR, "zed {path}:{line}:{col}");
     assert!(p.is_file(), "defaults written to the app's own dir");
     assert_eq!(load_or_create(&p), c);
@@ -142,7 +142,7 @@ fn resolver_falls_back_to_an_app_bundled_cli() {
 
 #[test]
 fn only_presets_the_custom_editor_or_the_hand_set_editor_are_allowed() {
-    let c = Config { editor: "subl {path}:{line}".into(), custom_editor: Some("nvim +{line} {path}".into()), read_only: false, hidden_projects: vec![], hidden_at: Default::default(), app_roots: vec![] };
+    let c = Config { editor: "subl {path}:{line}".into(), custom_editor: Some("nvim +{line} {path}".into()), read_only: false, workspace: None, app_roots: vec![] };
     assert_eq!(allowed_template(ZED, &c).unwrap(), ZED);
     assert_eq!(allowed_template("  code   -g {path}:{line}:{col} ", &c).unwrap(), VSCODE);
     assert!(allowed_template("nvim +{line}  {path}", &c).is_ok());
@@ -221,53 +221,24 @@ fn an_old_preset_is_upgraded_on_load_and_only_the_new_one_is_allowed() {
     assert_eq!(load_or_create(&p).editor, "code {path}:{line}");
 }
 
-// UX wave 7: hidden projects live in the app's own config, written through the same guarded writer.
+// The workspace lives in the app's own config, written through the same guarded writer.
 
 #[test]
-fn hidden_projects_are_saved_keeping_every_other_key() {
-    let home = tempfile::tempdir().unwrap();
-    let p = config_path_in(home.path());
-    fs::create_dir_all(p.parent().unwrap()).unwrap();
-    fs::write(&p, r#"{"editor":"hx {path}:{line}","customEditor":"hx {path}:{line}","readOnly":true,"mine":{"k":1}}"#).unwrap();
-    let c = save_hidden_projects(&p, &["/w/b".into(), " /w/a ".into(), "/w/b".into(), "".into()], None).unwrap();
-    assert_eq!(c.hidden_projects, vec!["/w/b".to_string(), "/w/a".to_string()], "trimmed, deduplicated, no blanks");
-    assert_eq!(c.editor, "hx {path}:{line}");
-    assert!(c.read_only);
-    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["mine"], serde_json::json!({"k":1}));
-    assert_eq!(v["editor"], "hx {path}:{line}");
-    assert_eq!(v["readOnly"], true);
-    assert_eq!(v["hiddenProjects"], serde_json::json!(["/w/b", "/w/a"]));
-    assert_eq!(load_or_create(&p).hidden_projects, vec!["/w/b".to_string(), "/w/a".to_string()]);
-    // Showing them all again.
-    assert!(save_hidden_projects(&p, &[], None).unwrap().hidden_projects.is_empty());
-}
-
-#[test]
-fn hidden_projects_never_touch_the_claudegate_home() {
+fn the_workspace_ignores_a_malformed_value_and_a_bad_file_is_never_clobbered() {
+    use claudegate_desktop_lib::config::add_to_workspace;
     let home = tempfile::tempdir().unwrap();
     let cg = home.path().join(".claudegate");
-    fs::create_dir_all(&cg).unwrap();
-    let roots = cg.join("workspace-roots.json");
-    fs::write(&roots, r#"["/w/a"]"#).unwrap();
-    // A config path inside the ClaudeGate home is refused outright.
-    assert!(save_hidden_projects(&cg.join("config.json"), &["/w/a".into()], Some(&cg)).is_err());
-    let p = config_path_in(home.path());
-    save_hidden_projects(&p, &["/w/a".into()], Some(&cg)).unwrap();
-    assert_eq!(fs::read_to_string(&roots).unwrap(), r#"["/w/a"]"#);
-    assert!(!cg.join("config.json").exists());
-}
-
-#[test]
-fn hidden_projects_ignore_a_malformed_value_and_a_bad_file_is_never_clobbered() {
-    let home = tempfile::tempdir().unwrap();
     let p = config_path_in(home.path());
     fs::create_dir_all(p.parent().unwrap()).unwrap();
-    fs::write(&p, r#"{"hiddenProjects":"nope"}"#).unwrap();
-    assert!(load_or_create(&p).hidden_projects.is_empty());
+    fs::write(&p, r#"{"workspace":"nope"}"#).unwrap();
+    assert!(load_or_create(&p).workspace.is_none());
     fs::write(&p, "{not json").unwrap();
-    assert!(save_hidden_projects(&p, &["/w/a".into()], None).is_err());
+    assert!(add_to_workspace(&p, &cg, "/w/a", None).is_err());
     assert_eq!(fs::read_to_string(&p).unwrap(), "{not json");
+    // A config path inside the ClaudeGate home is refused outright.
+    fs::create_dir_all(&cg).unwrap();
+    assert!(add_to_workspace(&cg.join("config.json"), &cg, "/w/a", Some(&cg)).is_err());
+    assert!(!cg.join("config.json").exists());
 }
 
 /// M1: every config.json write is a read-modify-write of the whole file. Two threads writing
@@ -294,99 +265,4 @@ fn concurrent_writes_of_different_keys_both_survive() {
     let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
     assert_eq!(v["settings"]["pendingAge.minDays"], serde_json::json!(N - 1), "thread A's last write survives: {v}");
     assert_eq!(v["projects"]["/w/proj"]["extraHide"], serde_json::json!([format!("**/b{}/**", N - 1)]), "thread B's last write survives: {v}");
-}
-
-// Hidden projects never swallow pending work: `hiddenAt` records when each root was hidden.
-
-#[test]
-fn hiding_stamps_hidden_at_and_keeps_the_stamp_while_hidden() {
-    use claudegate_desktop_lib::config::save_hidden_projects_at;
-    let home = tempfile::tempdir().unwrap();
-    let p = config_path_in(home.path());
-    fs::create_dir_all(p.parent().unwrap()).unwrap();
-    fs::write(&p, r#"{"editor":"hx {path}:{line}","mine":1}"#).unwrap();
-    let t1 = "2026-11-20T10:00:00.000Z";
-    let t2 = "2026-11-21T10:00:00.000Z";
-    let c = save_hidden_projects_at(&p, &["/w/a".into()], None, t1).unwrap();
-    assert_eq!(c.hidden_at.get("/w/a").map(String::as_str), Some(t1));
-    // Hiding a second keeps the first's stamp.
-    let c = save_hidden_projects_at(&p, &["/w/a".into(), "/w/b".into()], None, t2).unwrap();
-    assert_eq!(c.hidden_at.get("/w/a").map(String::as_str), Some(t1));
-    assert_eq!(c.hidden_at.get("/w/b").map(String::as_str), Some(t2));
-    // Showing one drops its stamp; the rest of the file is kept.
-    save_hidden_projects_at(&p, &["/w/b".into()], None, t2).unwrap();
-    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["hiddenAt"], serde_json::json!({ "/w/b": t2 }));
-    assert_eq!(v["mine"], 1);
-}
-
-#[test]
-fn a_root_hidden_before_the_stamp_is_stamped_once_on_first_sight() {
-    use claudegate_desktop_lib::config::stamp_hidden_projects;
-    let home = tempfile::tempdir().unwrap();
-    let p = config_path_in(home.path());
-    fs::create_dir_all(p.parent().unwrap()).unwrap();
-    fs::write(&p, r#"{"editor":"hx {path}:{line}","hiddenProjects":["/w/a","/w/b"],"hiddenAt":{"/w/b":"2026-01-01T00:00:00.000Z"}}"#).unwrap();
-    let now = "2026-11-25T08:00:00.000Z";
-    let c = stamp_hidden_projects(&p, None, now).unwrap();
-    assert_eq!(c.hidden_at.get("/w/a").map(String::as_str), Some(now));
-    assert_eq!(c.hidden_at.get("/w/b").map(String::as_str), Some("2026-01-01T00:00:00.000Z"));
-    // Once every hidden root has a stamp, nothing is written.
-    let before = fs::read(&p).unwrap();
-    let mtime = fs::metadata(&p).unwrap().modified().unwrap();
-    stamp_hidden_projects(&p, None, "2026-12-01T00:00:00.000Z").unwrap();
-    assert_eq!(fs::read(&p).unwrap(), before);
-    assert_eq!(fs::metadata(&p).unwrap().modified().unwrap(), mtime);
-}
-
-#[test]
-fn unhiding_a_project_drops_its_stamp() {
-    use claudegate_desktop_lib::config::{save_hidden_projects_at, unhide_project};
-    let home = tempfile::tempdir().unwrap();
-    let p = config_path_in(home.path());
-    save_hidden_projects_at(&p, &["/w/a".into(), "/w/b".into()], None, "2026-11-20T10:00:00.000Z").unwrap();
-    unhide_project(&p, "/w/a", None).unwrap();
-    let c = load_or_create(&p);
-    assert_eq!(c.hidden_projects, vec!["/w/b".to_string()]);
-    assert!(!c.hidden_at.contains_key("/w/a"));
-    assert!(c.hidden_at.contains_key("/w/b"));
-}
-
-#[test]
-fn showing_one_project_never_touches_the_rest_of_the_list() {
-    use claudegate_desktop_lib::config::{save_hidden_projects_at, unhide_project};
-    let home = tempfile::tempdir().unwrap();
-    let p = config_path_in(home.path());
-    // Another window hid /w/c after this one read the list.
-    save_hidden_projects_at(&p, &["/w/a".into(), "/w/b".into(), "/w/c".into()], None, "2026-11-20T10:00:00.000Z").unwrap();
-    unhide_project(&p, "/w/a", None).unwrap();
-    assert_eq!(load_or_create(&p).hidden_projects, vec!["/w/b".to_string(), "/w/c".to_string()]);
-}
-
-#[test]
-fn hiding_one_project_adds_only_it_and_stamps_it() {
-    use claudegate_desktop_lib::config::{hide_project, save_hidden_projects_at};
-    let home = tempfile::tempdir().unwrap();
-    let p = config_path_in(home.path());
-    let t1 = "2026-11-20T10:00:00.000Z";
-    save_hidden_projects_at(&p, &["/w/a".into()], None, t1).unwrap();
-    let c = hide_project(&p, "/w/b", None, "2026-11-21T10:00:00.000Z").unwrap();
-    assert_eq!(c.hidden_projects, vec!["/w/a".to_string(), "/w/b".to_string()]);
-    assert_eq!(c.hidden_at.get("/w/a").map(String::as_str), Some(t1));
-    assert_eq!(c.hidden_at.get("/w/b").map(String::as_str), Some("2026-11-21T10:00:00.000Z"));
-    // Hiding it again keeps its stamp and writes nothing.
-    let before = fs::read(&p).unwrap();
-    hide_project(&p, "/w/b", None, "2026-12-01T00:00:00.000Z").unwrap();
-    assert_eq!(fs::read(&p).unwrap(), before);
-}
-
-#[test]
-fn hiding_matches_the_folder_not_its_spelling() {
-    use claudegate_desktop_lib::config::hide_project;
-    let home = tempfile::tempdir().unwrap();
-    let p = config_path_in(home.path());
-    hide_project(&p, "/w/a", None, "2026-11-20T10:00:00.000Z").unwrap();
-    let c = hide_project(&p, "/w/./a/", None, "2026-11-21T10:00:00.000Z").unwrap();
-    assert_eq!(c.hidden_projects, vec!["/w/a".to_string()]);
-    assert_eq!(c.hidden_at.get("/w/a").map(String::as_str), Some("2026-11-20T10:00:00.000Z"));
 }

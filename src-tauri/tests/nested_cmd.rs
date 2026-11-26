@@ -83,11 +83,13 @@ fn the_nested_scope_uses_the_apps_exclude_when_the_app_owns_that_root() {
 }
 
 #[test]
-fn the_summary_carries_the_newest_capture() {
+fn the_summary_counts_the_nested_roots_ready_rows_toward_the_parent() {
     let f = fx();
     let known: KnownMap = Default::default();
     let list = list_projects_with(&f.home, &known);
-    assert_eq!(list[0].newest_capture_ms, claudegate_core::time::parse_iso_ms("2026-01-01T00:00:00Z"));
+    assert_eq!(list.len(), 1, "the nested root is never a project of its own");
+    assert!(list[0].pending > 0);
+    assert_eq!(list[0].ready, list[0].pending, "settled captures, none waiting");
 }
 
 #[test]
@@ -123,20 +125,17 @@ fn ext_sources_in(base: &Path) -> claudegate_core::settings::ExtSources {
 }
 
 #[test]
-fn the_views_newest_capture_leaves_out_rows_the_hide_patterns_hide() {
+fn the_views_counts_leave_out_rows_the_hide_patterns_hide() {
     use claudegate_desktop_lib::commands::get_project_for;
     let f = fx();
     let base = f.home.parent().unwrap().to_path_buf();
-    // The parent's a.txt is the newest capture; its hide pattern hides it.
-    let newer = json!({ "originalContent": "old", "reviewStatus": "pending", "capturedAt": "2026-06-01T00:00:00Z" });
-    let v = json!({ "sessionId": "x", "status": "active", "files": { s(&f.parent.join("a.txt")): newer }, "accepted": [], "rejected": {} });
-    fs::write(session_file_for(&f.home, &f.parent), v.to_string()).unwrap();
     let cfg = base.join("cgd/config.json");
     fs::create_dir_all(cfg.parent().unwrap()).unwrap();
     fs::write(&cfg, json!({ "editor": "zed {path}:{line}:{col}", "projects": { s(&f.parent): { "extraHide": ["a.txt"] } } }).to_string()).unwrap();
     let known: KnownMap = Default::default();
     let view = get_project_for(&f.home, &known, &cfg, &s(&f.parent), &ext_sources_in(&base));
-    assert_eq!(view.newest_capture_ms, claudegate_core::time::parse_iso_ms("2026-01-01T00:00:00Z"));
+    assert_eq!(view.pending.len(), 3);
+    assert_eq!((view.counted_pending, view.counted_ready), (2, 2), "the parent's a.txt is hidden by its pattern");
 }
 
 #[test]

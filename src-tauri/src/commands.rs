@@ -344,7 +344,8 @@ pub fn get_project_for(home: &Path, known: &KnownMap, config_path: &Path, root: 
     let mut v = load_with_opts(home, Path::new(root), &o, &opts_for);
     // Counted like the summary: without the rows the app-only hide patterns hide.
     let hidden = ExtraHide::new(&v, &o.extra_hide, &opts_for);
-    v.newest_capture_ms = claudegate_core::project::newest_capture_ms(v.pending.iter().filter(|p| !hidden.hides(p)));
+    let counted: Vec<&claudegate_core::project::PendingItem> = v.pending.iter().filter(|p| !hidden.hides(p)).collect();
+    (v.counted_pending, v.counted_ready) = (counted.len(), counted.iter().filter(|p| !p.waiting).count());
     remember(known, home, &v);
     v
 }
@@ -675,17 +676,43 @@ fn check_writable(config_path: &Path) -> Result<(), String> {
 }
 
 /// `add_project` minus Tauri: registers `path` in `<cg_home>/workspace-roots.json`, records it in
-/// `config_path` as added by the app and unhides it. The error is a message for the user (it
-/// names the conflicting root for a nested or containing folder).
+/// `config_path` as added by the app and adds it to the workspace (an existing root too). The
+/// error is a message for the user (it names the conflicting root for a nested or containing
+/// folder).
 pub fn add_project_with(cg_home: &Path, config_path: &Path, path: &str) -> Result<claudegate_core::projects::Added, String> {
     check_writable(config_path)?;
     let _g = roots_guard();
     let mut cfg = crate::config::ConfigProjects { path: config_path, guard: Some(cg_home) };
     let added = claudegate_core::projects::add_project(cg_home, &mut cfg, path).map_err(|e| e.to_string())?;
-    if let Err(e) = crate::config::unhide_project(config_path, &added.root, Some(cg_home)) {
-        eprintln!("claudegate: couldn't unhide {}: {e}", added.root);
+    if let Err(e) = crate::config::add_to_workspace(config_path, cg_home, &added.root, Some(cg_home)) {
+        eprintln!("claudegate: couldn't add {} to the workspace: {e}", added.root);
     }
     Ok(added)
+}
+
+/// What "Remove from workspace" did: the config as it now stands, and the capture side when the
+/// user also asked to stop capturing.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRemoved {
+    pub config: crate::config::Config,
+    pub removed: Option<claudegate_core::projects::Removed>,
+}
+
+/// `remove_from_workspace` minus Tauri. Takes `root` off the rail (view only). With `stop_capture`
+/// it first runs the Remove flow (`remove_project_with`, every evidence rule included: only an
+/// app-added root, forget-only when VS Code or Cursor uses it, blocked in read-only mode); when
+/// that fails the workspace is left as it was.
+pub fn remove_from_workspace_with(
+    cg_home: &Path,
+    config_path: &Path,
+    root: &str,
+    stop_capture: bool,
+    storage: &[PathBuf],
+) -> Result<WorkspaceRemoved, String> {
+    let removed = if stop_capture { Some(remove_project_with(cg_home, config_path, root, storage)?) } else { None };
+    let config = crate::config::remove_from_workspace(config_path, cg_home, root, Some(cg_home))?;
+    Ok(WorkspaceRemoved { config, removed })
 }
 
 /// `remove_project` minus Tauri. Only roots the app added; the session file is kept. When VS Code
@@ -826,6 +853,15 @@ pub async fn remove_project(root: String) -> Result<claudegate_core::projects::R
     blocking(move || {
         let storage = claudegate_core::projects::storage_files(&ext_sources());
         remove_project_with(&claudegate_home(), &crate::config::config_path(), &root, &storage)
+    })
+    .await?
+}
+
+#[tauri::command]
+pub async fn remove_from_workspace(root: String, stop_capture: bool) -> Result<WorkspaceRemoved, String> {
+    blocking(move || {
+        let storage = claudegate_core::projects::storage_files(&ext_sources());
+        remove_from_workspace_with(&claudegate_home(), &crate::config::config_path(), &root, stop_capture, &storage)
     })
     .await?
 }

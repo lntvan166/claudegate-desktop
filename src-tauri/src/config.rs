@@ -28,14 +28,11 @@ pub struct Config {
     /// When true every decision is refused. Read from disk on each call, never cached.
     #[serde(default)]
     pub read_only: bool,
-    /// Project roots the user hid from the rail, the header total and the tray. Only this file
-    /// records it; `~/.claudegate/workspace-roots.json` is never touched.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub hidden_projects: Vec<String>,
-    /// When each hidden root was hidden (`hiddenAt`, ISO time as JS `toISOString()` writes it).
-    /// A capture newer than this brings the root back into the rail. Only hidden roots have one.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub hidden_at: std::collections::BTreeMap<String, String>,
+    /// The roots the user added to the rail, in their order. Only these count in the header total
+    /// and the tray; `~/.claudegate/workspace-roots.json` (what is captured) is never touched by
+    /// it. `None` until the first load derives it (`ensure_workspace`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<Vec<String>>,
     /// The roots the app added (`projects[root].addedByApp`), for the rail's marker and Remove.
     /// Derived on read; config.json never stores this list itself.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -48,8 +45,7 @@ impl Default for Config {
             editor: DEFAULT_EDITOR.into(),
             custom_editor: None,
             read_only: false,
-            hidden_projects: vec![],
-            hidden_at: Default::default(),
+            workspace: None,
             app_roots: vec![],
         }
     }
@@ -74,28 +70,21 @@ fn non_empty(s: Option<&str>) -> Option<String> {
     s.map(str::trim).filter(|s| !s.is_empty()).map(String::from)
 }
 
+/// `workspace` as stored: `None` when absent or not a list.
+fn workspace_in(v: &serde_json::Value) -> Option<Vec<String>> {
+    workspace_of(v.as_object()?)
+}
+
+fn workspace_of(obj: &serde_json::Map<String, serde_json::Value>) -> Option<Vec<String>> {
+    obj.get("workspace").and_then(|w| w.as_array()).map(|a| clean_roots(a.iter().filter_map(|r| r.as_str())))
+}
+
 fn from_value(v: &serde_json::Value) -> Config {
-    let hidden_projects: Vec<String> = v
-        .get("hiddenProjects")
-        .and_then(|h| h.as_array())
-        .map(|a| clean_roots(a.iter().filter_map(|r| r.as_str())))
-        .unwrap_or_default();
-    let hidden_at = v
-        .get("hiddenAt")
-        .and_then(|h| h.as_object())
-        .map(|m| {
-            m.iter()
-                .filter(|(r, _)| hidden_projects.iter().any(|h| h == *r))
-                .filter_map(|(r, t)| Some((r.clone(), non_empty(t.as_str())?)))
-                .collect()
-        })
-        .unwrap_or_default();
     Config {
         editor: upgraded(non_empty(v.get("editor").and_then(|e| e.as_str())).unwrap_or_else(|| DEFAULT_EDITOR.into())),
         custom_editor: non_empty(v.get("customEditor").and_then(|e| e.as_str())),
         read_only: v.get("readOnly").and_then(|e| e.as_bool()).unwrap_or(false),
-        hidden_projects,
-        hidden_at,
+        workspace: workspace_in(v),
         app_roots: app_roots_in(v),
     }
 }
@@ -216,12 +205,21 @@ fn config_guard() -> std::sync::MutexGuard<'static, ()> {
 
 /// Reads the config file as a JSON object (missing reads as `{}`), applies `f`, writes it back.
 /// Every other key is kept. `guard` is the ClaudeGate home: a config path under it is refused.
-/// Runs under `CONFIG_LOCK`, so `save_setting`, the hidden list, read-only, the editor,
+/// Runs under `CONFIG_LOCK`, so `save_setting`, the workspace, read-only, the editor,
 /// `mark_added` and the exclude-sync fields cannot lose each other's writes.
 fn update_config(
     path: &Path,
     guard: Option<&Path>,
     f: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>, &Config) -> Result<(), String>,
+) -> Result<Config, String> {
+    update_config_if(path, guard, |obj, cfg| f(obj, cfg).map(|()| true))
+}
+
+/// `update_config` where `f` says whether it changed anything: nothing is written when it did not.
+fn update_config_if(
+    path: &Path,
+    guard: Option<&Path>,
+    f: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>, &Config) -> Result<bool, String>,
 ) -> Result<Config, String> {
     if let Some(g) = guard {
         if path.starts_with(g) {
@@ -240,8 +238,9 @@ fn update_config(
         return Err(format!("{} is not a JSON object.", path.display()));
     }
     let cfg = from_value(&v);
-    f(v.as_object_mut().expect("checked above"), &cfg)?;
-    write_json(path, &v).map_err(|e| format!("Cannot save {}: {e}", path.display()))?;
+    if f(v.as_object_mut().expect("checked above"), &cfg)? {
+        write_json(path, &v).map_err(|e| format!("Cannot save {}: {e}", path.display()))?;
+    }
     Ok(from_value(&v))
 }
 
@@ -256,80 +255,6 @@ pub fn save_editor(path: &Path, template: &str, guard: Option<&Path>) -> Result<
         obj.insert("editor".into(), serde_json::Value::String(t));
         Ok(())
     })
-}
-
-/// Persists the hidden project roots, keeping every other key in the file, and `hiddenAt` with
-/// them: a root that stays hidden keeps its stamp, a newly hidden one (or one with no stamp yet)
-/// is stamped now, and a shown one loses its stamp.
-pub fn save_hidden_projects(path: &Path, roots: &[String], guard: Option<&Path>) -> Result<Config, String> {
-    save_hidden_projects_at(path, roots, guard, &now_iso())
-}
-
-/// `save_hidden_projects` with the time injected.
-pub fn save_hidden_projects_at(path: &Path, roots: &[String], guard: Option<&Path>, now_iso: &str) -> Result<Config, String> {
-    let roots = clean_roots(roots.iter().map(String::as_str));
-    update_config(path, guard, |obj, cfg| {
-        obj.insert("hiddenProjects".into(), serde_json::json!(roots));
-        obj.insert("hiddenAt".into(), serde_json::json!(stamps_for(&roots, cfg, now_iso)));
-        Ok(())
-    })
-}
-
-/// Hides one project: adds only `root` to `hiddenProjects` and stamps it `now_iso` (keeping an
-/// existing stamp), under the config lock, so a stale list in the UI can never show or hide
-/// anything else. Writes nothing when it is already hidden and stamped.
-pub fn hide_project(path: &Path, root: &str, guard: Option<&Path>, now_iso: &str) -> Result<Config, String> {
-    let root = root.trim().to_owned();
-    if root.is_empty() {
-        return Err("No project to hide.".into());
-    }
-    let c = load_or_create(path);
-    // Already hidden under another spelling of the same folder: that entry stands.
-    if c.hidden_projects.iter().any(|r| same_root(r, &root) && c.hidden_at.contains_key(r)) {
-        return Ok(c);
-    }
-    update_config(path, guard, |obj, cfg| {
-        let mut roots = cfg.hidden_projects.clone();
-        if !roots.iter().any(|r| same_root(r, &root)) {
-            roots.push(root.clone());
-        }
-        obj.insert("hiddenProjects".into(), serde_json::json!(roots));
-        obj.insert("hiddenAt".into(), serde_json::json!(stamps_for(&roots, cfg, now_iso)));
-        Ok(())
-    })
-}
-
-/// `hiddenAt` for `roots`: the stamps `cfg` has, `now_iso` for the rest.
-fn stamps_for(roots: &[String], cfg: &Config, now_iso: &str) -> std::collections::BTreeMap<String, String> {
-    roots
-        .iter()
-        .map(|r| (r.clone(), cfg.hidden_at.get(r).cloned().unwrap_or_else(|| now_iso.to_owned())))
-        .collect()
-}
-
-/// Stamps every hidden root that has no `hiddenAt` yet (hidden before the stamp existed) with
-/// `now_iso`: it counts as hidden from the moment the app first sees it unstamped. Writes only
-/// when one is missing.
-pub fn stamp_hidden_projects(path: &Path, guard: Option<&Path>, now_iso: &str) -> Result<Config, String> {
-    let c = load_or_create(path);
-    if c.hidden_projects.iter().all(|r| c.hidden_at.contains_key(r)) {
-        return Ok(c);
-    }
-    update_config(path, guard, |obj, cfg| {
-        obj.insert("hiddenAt".into(), serde_json::json!(stamps_for(&cfg.hidden_projects, cfg, now_iso)));
-        Ok(())
-    })
-}
-
-fn now_iso() -> String {
-    crate::commands::iso_from_ms(claudegate_core::time::now_ms())
-}
-
-/// Drops `root`'s `hiddenAt` stamp (every key that resolves to it).
-fn drop_stamp(obj: &mut serde_json::Map<String, serde_json::Value>, root: &str) {
-    if let Some(h) = obj.get_mut("hiddenAt").and_then(|h| h.as_object_mut()) {
-        h.retain(|k, _| !same_root(k, root));
-    }
 }
 
 /// Persists the read-only switch, keeping every other key in the file.
@@ -454,43 +379,106 @@ fn same_root(a: &str, root: &str) -> bool {
     resolve_root(Path::new(a)) == resolve_root(Path::new(root))
 }
 
-/// Drops the app's whole record of `root` after Remove: every `projects` key that resolves to it,
-/// and the root in `hiddenProjects`.
+/// Drops the app's whole record of `root` after Remove: every `projects` key that resolves to it.
+/// The workspace is the caller's (`remove_from_workspace`).
 pub fn forget_project(path: &Path, root: &str, guard: Option<&Path>) -> Result<(), String> {
     update_config(path, guard, |obj, _| {
         if let Some(p) = obj.get_mut("projects").and_then(|p| p.as_object_mut()) {
             p.retain(|k, _| !same_root(k, root));
         }
-        if let Some(h) = obj.get_mut("hiddenProjects").and_then(|h| h.as_array_mut()) {
-            h.retain(|r| !r.as_str().is_some_and(|r| same_root(r, root)));
-        }
-        drop_stamp(obj, root);
         Ok(())
     })
     .map(|_| ())
 }
 
-/// Takes `root` out of `hiddenProjects` (an added project is shown). Writes only when it is there.
-pub fn unhide_project(path: &Path, root: &str, guard: Option<&Path>) -> Result<(), String> {
-    if !load_hidden(path).iter().any(|r| same_root(r, root)) {
-        return Ok(());
+/// The roots the rail lists today (`workspace-roots.json`, a nested root folded into its parent),
+/// in the file's order. Read only.
+pub fn listed_root_strings(home: &Path) -> Vec<String> {
+    claudegate_core::project::listed_roots(&claudegate_core::roots::read_roots(home))
+        .into_iter()
+        .map(|r| r.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// The workspace in `obj`, or, when it has none yet, the one the migration derives: every listed
+/// root not in the retired `hiddenProjects`, in the listed order. Deriving also drops
+/// `hiddenProjects` and `hiddenAt`, in the same write as the caller's change. The bool says
+/// whether it derived.
+fn workspace_or_migrated(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    listed: impl FnOnce() -> Vec<String>,
+) -> (Vec<String>, bool) {
+    if let Some(w) = workspace_of(obj) {
+        return (w, false);
     }
-    update_config(path, guard, |obj, _| {
-        if let Some(h) = obj.get_mut("hiddenProjects").and_then(|h| h.as_array_mut()) {
-            h.retain(|r| !r.as_str().is_some_and(|r| same_root(r, root)));
-        }
-        drop_stamp(obj, root);
-        Ok(())
-    })
-    .map(|_| ())
+    let hidden: Vec<String> = obj
+        .get("hiddenProjects")
+        .and_then(|h| h.as_array())
+        .map(|a| clean_roots(a.iter().filter_map(|r| r.as_str())))
+        .unwrap_or_default();
+    let ws = listed().into_iter().filter(|r| !hidden.iter().any(|h| same_root(h, r))).collect();
+    obj.remove("hiddenProjects");
+    obj.remove("hiddenAt");
+    (ws, true)
 }
 
-fn load_hidden(path: &Path) -> Vec<String> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .map(|v| from_value(&v).hidden_projects)
-        .unwrap_or_default()
+/// Sets `workspace` on the first load (see `workspace_or_migrated`); `home` is the ClaudeGate home
+/// the listed roots are read from. Writes nothing when the config already has one.
+pub fn ensure_workspace(path: &Path, home: &Path, guard: Option<&Path>) -> Result<Config, String> {
+    if let Some(g) = guard {
+        if path.starts_with(g) {
+            return Err("Refusing to write settings inside the ClaudeGate folder.".into());
+        }
+    }
+    let c = load_or_create(path);
+    if c.workspace.is_some() {
+        return Ok(c);
+    }
+    update_config_if(path, guard, |obj, _| {
+        let (ws, derived) = workspace_or_migrated(obj, || listed_root_strings(home));
+        if derived {
+            obj.insert("workspace".into(), serde_json::json!(ws));
+        }
+        Ok(derived)
+    })
+}
+
+/// Adds only `root` to the workspace, at the end, under the config lock, so a stale list in the
+/// UI can never add or drop anything else. Never touches `workspace-roots.json`: what is captured
+/// does not change. Writes nothing when it is already there (under any spelling).
+pub fn add_to_workspace(path: &Path, home: &Path, root: &str, guard: Option<&Path>) -> Result<Config, String> {
+    let root = root.trim().to_owned();
+    if root.is_empty() {
+        return Err("No project to add.".into());
+    }
+    update_config_if(path, guard, |obj, _| {
+        let (mut ws, derived) = workspace_or_migrated(obj, || listed_root_strings(home));
+        let added = !ws.iter().any(|r| same_root(r, &root));
+        if added {
+            ws.push(root.clone());
+        }
+        if added || derived {
+            obj.insert("workspace".into(), serde_json::json!(ws));
+        }
+        Ok(added || derived)
+    })
+}
+
+/// Removes only `root` from the workspace (every spelling of it, and any root inside it, which
+/// the rail folds into its project), under the config lock. View only: capture is unchanged.
+pub fn remove_from_workspace(path: &Path, home: &Path, root: &str, guard: Option<&Path>) -> Result<Config, String> {
+    use claudegate_core::paths::resolve_root;
+    let gone = resolve_root(Path::new(root.trim()));
+    update_config_if(path, guard, |obj, _| {
+        let (mut ws, derived) = workspace_or_migrated(obj, || listed_root_strings(home));
+        let before = ws.len();
+        ws.retain(|r| !resolve_root(Path::new(r)).starts_with(&gone));
+        let removed = ws.len() != before;
+        if removed || derived {
+            obj.insert("workspace".into(), serde_json::json!(ws));
+        }
+        Ok(removed || derived)
+    })
 }
 
 /// `projects[root]` for `root`: the existing key that resolves to it, else a new one under the
@@ -643,11 +631,11 @@ pub fn read_app_settings(path: &Path) -> (claudegate_core::settings::AppSettings
 
 #[tauri::command]
 pub async fn get_config() -> Result<Config, String> {
-    // Stamps the roots hidden before `hiddenAt` existed; a failed stamp only delays that.
+    // Derives the workspace on the first load; a failed write only delays that.
     tauri::async_runtime::spawn_blocking(|| {
         let p = config_path();
-        stamp_hidden_projects(&p, Some(&claudegate_core::paths::claudegate_home()), &now_iso())
-            .unwrap_or_else(|_| load_or_create(&p))
+        let home = claudegate_core::paths::claudegate_home();
+        ensure_workspace(&p, &home, Some(&home)).unwrap_or_else(|_| load_or_create(&p))
     })
     .await
     .map_err(|e| e.to_string())
@@ -671,33 +659,12 @@ pub async fn set_read_only(on: bool) -> Result<Config, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Hides one project (`hide_project`), stamped now.
+/// Adds one project to the workspace (`add_to_workspace`). View only, so read-only mode allows it.
 #[tauri::command]
-pub async fn hide_project_cmd(root: String) -> Result<Config, String> {
+pub async fn add_to_workspace_cmd(root: String) -> Result<Config, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        hide_project(&config_path(), &root, Some(&claudegate_core::paths::claudegate_home()), &now_iso())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Shows one hidden project again: removes only `root` from `hiddenProjects` (and its stamp),
-/// under the config lock, so a stale list in the UI can never re-hide or show anything else.
-#[tauri::command]
-pub async fn show_project(root: String) -> Result<Config, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let p = config_path();
-        unhide_project(&p, &root, Some(&claudegate_core::paths::claudegate_home()))?;
-        Ok(load_or_create(&p))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn set_hidden_projects(roots: Vec<String>) -> Result<Config, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        save_hidden_projects(&config_path(), &roots, Some(&claudegate_core::paths::claudegate_home()))
+        let home = claudegate_core::paths::claudegate_home();
+        add_to_workspace(&config_path(), &home, &root, Some(&home))
     })
     .await
     .map_err(|e| e.to_string())?

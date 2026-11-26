@@ -19,11 +19,10 @@ pub struct ProjectSummary {
     pub next_recheck_at: Option<i64>,
     /// The registered roots folded into this project as scopes (`ScopeKind::Nested`).
     pub nested: Vec<String>,
-    /// Epoch ms of the newest `capturedAt` among the counted pending rows that are not waiting
-    /// (`newest_capture_ms`); `None` when none has one. A hidden project with a capture newer than
-    /// when it was hidden comes back on its own, so a capture whose write has not landed (and may
-    /// settle as a no-op) never counts.
-    pub newest_capture_ms: Option<i64>,
+    /// The counted pending rows whose write has landed (`pending` without the waiting ones). What
+    /// the rail says is pending outside the workspace: a capture that may still settle as a no-op
+    /// never counts there.
+    pub ready: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,9 +104,11 @@ pub struct ProjectView {
     /// Epoch ms of the earliest moment a `waiting` row may settle and disappear; the UI re-fetches
     /// then. `None` when nothing is waiting.
     pub next_recheck_at: Option<i64>,
-    /// See `ProjectSummary::newest_capture_ms`, over every pending row (the app narrows it by the
-    /// project's app-only hide patterns).
-    pub newest_capture_ms: Option<i64>,
+    /// The project's summary counts (`ProjectSummary::pending` and `ready`) as of this load, so a
+    /// refresh of one project keeps its rail and picker counts current without a full list. Over
+    /// every pending row here; the app narrows them by the project's app-only hide patterns.
+    pub counted_pending: usize,
+    pub counted_ready: usize,
 }
 
 fn line_counts(before: &str, after: &str) -> (usize, usize) {
@@ -560,7 +561,8 @@ fn load_project_full(
         accepted: vec![],
         rejected: vec![],
         next_recheck_at: None,
-        newest_capture_ms: None,
+        counted_pending: 0,
+        counted_ready: 0,
     };
     if view.missing {
         return view;
@@ -596,16 +598,11 @@ fn load_project_full(
         }
     }
     view.pending.sort_by(|a, b| a.path.cmp(&b.path));
-    view.newest_capture_ms = newest_capture_ms(view.pending.iter());
+    view.counted_pending = view.pending.len();
+    view.counted_ready = view.pending.iter().filter(|p| !p.waiting).count();
     view.accepted.sort_by(|a, b| b.decided_at.cmp(&a.decided_at));
     view.rejected.sort_by(|a, b| a.path.cmp(&b.path));
     view
-}
-
-/// Epoch ms of the newest `capturedAt` among `rows` that are not waiting; `None` when none has a
-/// readable one.
-pub fn newest_capture_ms<'a>(rows: impl Iterator<Item = &'a PendingItem>) -> Option<i64> {
-    rows.filter(|p| !p.waiting).filter_map(|p| p.captured_at.as_deref().and_then(parse_iso_ms)).max()
 }
 
 /// The registered roots listed as projects: every root, except one folded into a parent
@@ -626,7 +623,7 @@ pub fn summary_of(root: &Path, v: &ProjectView, counted: &dyn Fn(&PendingItem) -
         name,
         missing: v.missing,
         pending: rows.len(),
-        newest_capture_ms: newest_capture_ms(rows.iter().copied()),
+        ready: rows.iter().filter(|p| !p.waiting).count(),
         next_recheck_at: v.next_recheck_at,
         nested: v.scopes.iter().filter(|s| s.nested).map(|s| s.root.clone()).collect(),
     }

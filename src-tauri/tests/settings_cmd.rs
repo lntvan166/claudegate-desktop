@@ -4,7 +4,7 @@
 use claudegate_core::settings::{ExtSources, Source};
 use claudegate_desktop_lib::commands::{get_project_max, settings_view};
 use claudegate_desktop_lib::config::{
-    config_path_in, load_or_create, save_extra_hide, save_hidden_projects, save_read_only, save_setting,
+    config_path_in, load_or_create, save_extra_hide, save_read_only, save_setting,
 };
 use claudegate_desktop_lib::watch::KnownMap;
 use serde_json::json;
@@ -35,7 +35,7 @@ fn set_setting_round_trips_and_keeps_everything_else() {
             "editor": "code -g {path}:{line}:{col}",
             "customEditor": "hx {path}",
             "readOnly": true,
-            "hiddenProjects": ["/a"],
+            "workspace": ["/a"],
             "somethingNew": {"x": 1},
             "settings": {"futureKey": 7},
         })
@@ -61,7 +61,7 @@ fn set_setting_round_trips_and_keeps_everything_else() {
     assert_eq!(c.editor, "code -g {path}:{line}:{col}");
     assert_eq!(c.custom_editor.as_deref(), Some("hx {path}"));
     assert!(c.read_only);
-    assert_eq!(c.hidden_projects, vec!["/a".to_string()]);
+    assert_eq!(c.workspace, Some(vec!["/a".to_string()]));
 
     let s = settings_view(&p, None, &sources(home.path()));
     assert_eq!((s.effective.auto_advance.value, s.effective.auto_advance.source), (false, Source::App));
@@ -81,7 +81,7 @@ fn set_setting_round_trips_and_keeps_everything_else() {
 
     // The other writers keep the settings map.
     save_read_only(&p, false, None).unwrap();
-    save_hidden_projects(&p, &["/b".into()], None).unwrap();
+    claudegate_desktop_lib::config::add_to_workspace(&p, home.path(), "/b", None).unwrap();
     assert_eq!(read(&p)["settings"]["groupBySession"], json!(true));
 }
 

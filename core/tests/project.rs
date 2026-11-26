@@ -366,22 +366,31 @@ fn settled_no_ops_are_not_listed_or_counted_and_nothing_is_written() {
 }
 
 #[test]
-fn newest_capture_skips_waiting_rows() {
-    use claudegate_core::project::{newest_capture_ms, PendingItem, RejectOutcome};
-    let item = |at: &str, waiting: bool| PendingItem {
-        path: "/w/a".into(),
+fn the_summarys_ready_count_skips_waiting_rows() {
+    use claudegate_core::project::{summary_of, PendingItem, ProjectView, RejectOutcome};
+    let item = |path: &str, waiting: bool| PendingItem {
+        path: path.into(),
         rel: "a".into(),
         scope: "/w".into(),
         new_file: false,
-        captured_at: Some(at.into()),
+        captured_at: Some("2026-11-20T10:00:00.000Z".into()),
         session_id: None,
         added: 1,
         removed: 0,
         waiting,
         reject_outcome: RejectOutcome::Restore,
     };
-    let old = item("2026-11-20T10:00:00.000Z", false);
-    let young = item("2026-11-25T10:00:00.000Z", true);
-    assert_eq!(newest_capture_ms([&old, &young].into_iter()), parse_iso_ms("2026-11-20T10:00:00.000Z"));
-    assert_eq!(newest_capture_ms([&young].into_iter()), None);
+    let v = ProjectView {
+        root: "/w".into(),
+        missing: false,
+        scopes: vec![],
+        pending: vec![item("/w/a", false), item("/w/b", true), item("/w/c", false)],
+        accepted: vec![],
+        rejected: vec![],
+        next_recheck_at: None,
+        counted_pending: 3,
+        counted_ready: 2,
+    };
+    let s = summary_of(std::path::Path::new("/w"), &v, &|p| p.path != "/w/c");
+    assert_eq!((s.pending, s.ready), (2, 1), "waiting rows are pending but not ready; uncounted rows are neither");
 }

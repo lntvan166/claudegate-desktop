@@ -121,20 +121,17 @@ fn read_only_blocks_add_and_remove() {
 }
 
 #[test]
-fn add_unhides_and_remove_clears_hidden_and_every_spelling() {
+fn add_joins_the_workspace_and_remove_clears_every_spelling() {
     let f = fx();
     let app = f.dir("app");
     let keep = f.dir("keep");
-    claudegate_desktop_lib::config::save_hidden_projects(&f.cfg, &[app.clone(), keep.clone()], None).unwrap();
+    claudegate_desktop_lib::config::add_to_workspace(&f.cfg, &f.cg, &keep, None).unwrap();
     add_project_with(&f.cg, &f.cfg, &app).unwrap();
-    assert_eq!(f.config()["hiddenProjects"], json!([keep]));
-    // Hidden again, plus a second spelling of the same root in projects.
-    claudegate_desktop_lib::config::save_hidden_projects(&f.cfg, &[app.clone(), keep.clone()], None).unwrap();
+    assert_eq!(f.config()["workspace"], json!([keep, app]));
+    // A second spelling of the same root in projects.
     claudegate_desktop_lib::config::save_extra_hide(&f.cfg, &format!("{app}/"), &["x".into()], None).unwrap();
     remove_project_with(&f.cg, &f.cfg, &app, &[]).unwrap();
-    let c = f.config();
-    assert_eq!(c["hiddenProjects"], json!([keep]));
-    assert_eq!(c["projects"], json!({}));
+    assert_eq!(f.config()["projects"], json!({}));
 }
 
 #[test]
