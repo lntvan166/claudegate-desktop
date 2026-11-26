@@ -187,8 +187,9 @@
       if (ev.source !== "mouse" && ev.source !== "keyboard") return;
       cursor = { side, line: ev.position.lineNumber, col: ev.position.column };
     });
-    // Monaco's right-click menu: the diff's entry for "Copy reference for Claude".
-    e.addAction({
+    // Monaco's right-click menu: the diff's entry for "Copy reference for Claude" (the review's:
+    // a commit's file has no reference to copy).
+    if (!external) e.addAction({
       id: `claudegate.copyRef.${side}`,
       label: "Copy reference for Claude",
       contextMenuGroupId: "9_cutcopypaste",

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ChangesCache,
   CHANGES_DEBOUNCE_MS,
@@ -6,6 +6,8 @@ import {
   changesTitle,
   countsText,
   createGate,
+  enterAction,
+  leadingDebounce,
   diffPane,
   foldersOf,
   formatBytes,
@@ -141,5 +143,62 @@ describe("races", () => {
   it("debounces a held arrow key", () => {
     expect(CHANGES_DEBOUNCE_MS).toBeGreaterThanOrEqual(60);
     expect(CHANGES_DEBOUNCE_MS).toBeLessThanOrEqual(120);
+  });
+});
+
+describe("leading-edge debounce", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("runs the first call at once, with no delay", () => {
+    const fn = vi.fn();
+    const d = leadingDebounce(fn, CHANGES_DEBOUNCE_MS);
+    d();
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+  it("holding a key runs once at the start and once after the rest, not per row", () => {
+    const fn = vi.fn();
+    const d = leadingDebounce(fn, 80);
+    for (let i = 0; i < 20; i++) {
+      d();
+      vi.advanceTimersByTime(30);
+    }
+    expect(fn).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(80);
+    expect(fn).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(500);
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+  it("is leading again after a quiet window", () => {
+    const fn = vi.fn();
+    const d = leadingDebounce(fn, 80);
+    d();
+    vi.advanceTimersByTime(200);
+    d();
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+  it("flush runs a waiting repeat now; drop discards it", () => {
+    const fn = vi.fn();
+    const d = leadingDebounce(fn, 80);
+    d();
+    d();
+    expect(d.hasPending()).toBe(true);
+    d.flush();
+    expect(fn).toHaveBeenCalledTimes(2);
+    d();
+    d.drop();
+    vi.advanceTimersByTime(500);
+    expect(fn).toHaveBeenCalledTimes(2);
+    expect(d.hasPending()).toBe(false);
+  });
+});
+
+describe("Enter on a commit", () => {
+  it("focuses when loaded, waits when in flight, flushes a pending fetch, else starts one", () => {
+    expect(enterAction({ loaded: true, inflight: false, pending: false })).toBe("focus");
+    expect(enterAction({ loaded: false, inflight: true, pending: false })).toBe("wait");
+    expect(enterAction({ loaded: false, inflight: false, pending: true })).toBe("flush");
+    // a failed fetch leaves nothing pending or in flight: Enter retries rather than leaving a stale flag
+    expect(enterAction({ loaded: false, inflight: false, pending: false })).toBe("load");
   });
 });

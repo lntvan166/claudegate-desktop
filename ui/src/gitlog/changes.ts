@@ -185,5 +185,65 @@ export class ChangesCache {
 /** Typing "a/b" in the tree is not a feature; this is the one place the tree's nodes become ids. */
 export const nodeId = (n: ChangeNode) => `${n.kind}:${n.rel}`;
 
-/** How long the selection must rest before the commit's files are fetched (holding ↓ spawns none). */
+/** Repeats within this window of a fetch are coalesced (holding ↓ spawns one call per rest, not per row). */
 export const CHANGES_DEBOUNCE_MS = 80;
+
+export type LeadingDebounced = {
+  (): void;
+  /** Runs a coalesced repeat now, if one is waiting. */
+  flush(): void;
+  /** Drops a waiting repeat (the cool-down continues). */
+  drop(): void;
+  hasPending(): boolean;
+};
+
+/**
+ * Leading edge: the first call after a quiet `ms` runs at once (a click on a commit costs no
+ * delay). Calls inside the window coalesce into one trailing run, `ms` after the last of them.
+ */
+export function leadingDebounce(fn: () => void, ms: number): LeadingDebounced {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let pending = false;
+  const cool = () => {
+    timer = setTimeout(() => {
+      timer = null;
+      if (pending) {
+        pending = false;
+        fn();
+        cool();
+      }
+    }, ms);
+  };
+  const d = (() => {
+    if (!timer) {
+      fn();
+      cool();
+      return;
+    }
+    pending = true;
+    clearTimeout(timer);
+    cool();
+  }) as LeadingDebounced;
+  d.flush = () => {
+    if (!pending) return;
+    pending = false;
+    if (timer) clearTimeout(timer);
+    fn();
+    cool();
+  };
+  d.drop = () => {
+    pending = false;
+  };
+  d.hasPending = () => pending;
+  return d;
+}
+
+/**
+ * What Enter on a commit does: focus the tree when its files are here, wait when they are on their
+ * way, run the waiting fetch now, or start one (nothing pending or in flight, e.g. after a failure).
+ */
+export function enterAction(o: { loaded: boolean; inflight: boolean; pending: boolean }): "focus" | "wait" | "flush" | "load" {
+  if (o.loaded) return "focus";
+  if (o.inflight) return "wait";
+  return o.pending ? "flush" : "load";
+}

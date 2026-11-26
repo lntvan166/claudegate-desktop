@@ -532,7 +532,14 @@ fn main_path(r: &Repo) -> PathBuf {
 /// would read it relative to the working directory instead (`./`, `../`), or it leaves the
 /// repository.
 fn tree_path_ok(p: &str) -> bool {
-    !p.is_empty() && !p.starts_with('/') && !p.contains('\0') && !p.split('/').any(|s| s == "." || s == "..")
+    // Every component must be a plain name: a Windows `C:\x` or `\\server\share` would otherwise
+    // replace the root when joined, and a backslash is never a separator in a git path.
+    !p.is_empty()
+        && !p.starts_with('/')
+        && !p.contains('\0')
+        && !p.contains('\\')
+        && !p.split('/').any(|s| s == "." || s == "..")
+        && Path::new(p).components().all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 impl Default for GitLog {
@@ -977,11 +984,31 @@ pub async fn gitlog_file(repo: String, sha: String, path: String, side: Side, st
 /// may be gone by now (deleted or renamed later), which is an error, never a new empty buffer.
 /// Read-only: nothing is created.
 #[tauri::command]
-pub async fn gitlog_worktree_file(repo: String, path: String, state: tauri::State<'_, GitLogState>) -> Result<String, String> {
+pub async fn gitlog_worktree_file(repo: String, path: String, source: Option<String>, state: tauri::State<'_, GitLogState>) -> Result<String, String> {
     let gl = state.inner().0.clone();
-    crate::commands::blocking(move || worktree_file(&gl.cwd_of(&repo)?, &path)).await?
+    crate::commands::blocking(move || {
+        let root = gl.cached().iter().find(|r| r.id == repo).map(|r| checkout_path(r, source.as_deref())).ok_or_else(|| "Unknown repository; refresh the list".to_string())?;
+        worktree_file(&root, &path)
+    })
+    .await?
 }
 
+/// The checkout a commit's `source` (`RowView.source`: `HEAD`, `refs/heads/<b>`, a branch name or a
+/// sha) lives in: one of this repository's own checkouts, never a path from the caller. Anything
+/// that matches none falls back to the main checkout.
+pub fn checkout_path(r: &Repo, source: Option<&str>) -> PathBuf {
+    let want = source.map(str::trim).filter(|s| !s.is_empty() && *s != "HEAD");
+    let hit = want.and_then(|w| {
+        let b = w.strip_prefix("refs/heads/").unwrap_or(w);
+        r.checkouts.iter().find(|c| c.branch.as_deref() == Some(b)).or_else(|| r.checkouts.iter().find(|c| c.head == w))
+    });
+    match hit {
+        Some(c) => PathBuf::from(&c.path),
+        None => main_path(r),
+    }
+}
+
+/// Symlinks are followed by design: the same as `open_in_editor`, which opens whatever the path names.
 pub fn worktree_file(root: &std::path::Path, path: &str) -> Result<String, String> {
     if !tree_path_ok(path) {
         return Err("Not a path in the repository".into());
@@ -1127,6 +1154,39 @@ mod tests {
         assert!(worktree_file(dir.path(), "src").is_err(), "a folder is not a file");
         assert!(worktree_file(dir.path(), "../x").is_err());
         assert!(!dir.path().join("src/gone.rs").exists(), "nothing was created");
+    }
+
+    #[test]
+    fn a_worktree_only_commit_opens_in_its_own_checkout() {
+        use claudegate_core::gitlog::Checkout;
+        let co = |path: &str, head: &str, branch: Option<&str>, is_main| Checkout { path: path.into(), head: head.into(), branch: branch.map(String::from), is_main };
+        let r = Repo {
+            id: "/w/acme-api/.git".into(),
+            name: "acme-api".into(),
+            color: 0,
+            checkouts: vec![co("/w/acme-api", "aaa", Some("main"), true), co("/w/acme-api-wt", "bbb", Some("feat"), false), co("/w/acme-api-det", "ccc", None, false)],
+        };
+        assert_eq!(checkout_path(&r, None), PathBuf::from("/w/acme-api"));
+        assert_eq!(checkout_path(&r, Some("HEAD")), PathBuf::from("/w/acme-api"));
+        assert_eq!(checkout_path(&r, Some("refs/heads/feat")), PathBuf::from("/w/acme-api-wt"));
+        assert_eq!(checkout_path(&r, Some("feat")), PathBuf::from("/w/acme-api-wt"));
+        assert_eq!(checkout_path(&r, Some("ccc")), PathBuf::from("/w/acme-api-det"));
+        assert_eq!(checkout_path(&r, Some("/etc")), PathBuf::from("/w/acme-api"), "an unknown source never becomes a root");
+        // The file is looked up in that checkout, not the main one.
+        let main = tempfile::tempdir().unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        std::fs::write(wt.path().join("only.rs"), "x").unwrap();
+        let r2 = Repo { checkouts: vec![co(main.path().to_str().unwrap(), "a", Some("main"), true), co(wt.path().to_str().unwrap(), "b", Some("feat"), false)], ..r };
+        assert!(worktree_file(&checkout_path(&r2, Some("feat")), "only.rs").is_ok());
+        assert!(worktree_file(&checkout_path(&r2, None), "only.rs").unwrap_err().contains("no longer"));
+    }
+
+    #[test]
+    fn tree_paths_reject_roots_and_backslashes() {
+        assert!(!tree_path_ok("C:\\x"));
+        assert!(!tree_path_ok("\\\\server\\share\\f"));
+        assert!(!tree_path_ok("a\\b"));
+        assert!(tree_path_ok("a/b c/d.txt"));
     }
 
     #[test]

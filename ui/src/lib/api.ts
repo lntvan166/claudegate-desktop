@@ -220,8 +220,8 @@ export interface Api {
   gitlogChanges(repo: string, sha: string): Promise<ChangedFile[]>;
   /** One side of a changed file: before is the first parent's version (a rename's old path), after the commit's. */
   gitlogFile(repo: string, sha: string, path: string, side: FileSide): Promise<FileView>;
-  /** The working-tree path of a changed file, or rejects when it is gone from the working tree. Read-only. */
-  gitlogWorktreeFile(repo: string, path: string): Promise<string>;
+  /** The working-tree path of a changed file in the checkout the commit lives in (`source`: the row's), or rejects when it is gone. Read-only. */
+  gitlogWorktreeFile(repo: string, path: string, source?: string): Promise<string>;
   /** Opens the commit's page on its remote in the system browser; false when the remote has no link. */
   gitlogOpenRemote(repo: string, sha: string): Promise<boolean>;
 }
@@ -275,7 +275,7 @@ const tauriApi: Api = {
   gitlogMessage: (repo, sha) => invoke<string>("gitlog_message", { repo, sha }),
   gitlogChanges: (repo, sha) => invoke<ChangedFile[]>("gitlog_changes", { repo, sha }),
   gitlogFile: (repo, sha, path, side) => invoke<FileView>("gitlog_file", { repo, sha, path, side }),
-  gitlogWorktreeFile: (repo, path) => invoke<string>("gitlog_worktree_file", { repo, path }),
+  gitlogWorktreeFile: (repo, path, source) => invoke<string>("gitlog_worktree_file", { repo, path, source }),
   gitlogOpenRemote: (repo, sha) => invoke<boolean>("gitlog_open_remote", { repo, sha }),
 };
 
@@ -354,5 +354,6 @@ export const gitlogMessage = async (repo: string, sha: string) => (await api()).
 export const gitlogChanges = async (repo: string, sha: string) => (await api()).gitlogChanges(repo, sha);
 export const gitlogFile = async (repo: string, sha: string, path: string, side: FileSide) =>
   (await api()).gitlogFile(repo, sha, path, side);
-export const gitlogWorktreeFile = async (repo: string, path: string) => (await api()).gitlogWorktreeFile(repo, path);
+export const gitlogWorktreeFile = async (repo: string, path: string, source?: string) =>
+  (await api()).gitlogWorktreeFile(repo, path, source);
 export const gitlogOpenRemote = async (repo: string, sha: string) => (await api()).gitlogOpenRemote(repo, sha);

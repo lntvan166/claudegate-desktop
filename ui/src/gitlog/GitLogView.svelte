@@ -20,6 +20,8 @@
   import {
     CHANGES_DEBOUNCE_MS,
     ChangesCache,
+    enterAction,
+    leadingDebounce,
     changesTitle,
     createGate,
     diffPane,
@@ -121,7 +123,9 @@
   const changesCache = new ChangesCache();
   const commitGate = createGate();
   const fileGate = createGate();
-  const fetchChanges = debounce(() => void loadChanges(), CHANGES_DEBOUNCE_MS);
+    /** The commit whose files are being fetched now. */
+  let inflightFor: string | null = null;
+  const fetchChanges = leadingDebounce(() => void loadChanges(), CHANGES_DEBOUNCE_MS);
 
   const repoName = (id: string) => repos?.find((r) => r.id === id)?.name ?? id.replace(/\/\.git\/?$/, "").split("/").pop() ?? id;
   const changesHeading = $derived(
@@ -148,7 +152,10 @@
 
   function commitChanged(r: RowView | null) {
     commitGate.next();
-    fetchChanges.cancel();
+    fetchChanges.drop();
+    // Enter on an earlier commit must not pull the keyboard into this one's tree.
+    focusTreeWhenReady = false;
+    inflightFor = null;
     filesError = null;
     if (!r) {
       changesFor = null;
@@ -167,13 +174,18 @@
     const r = selected;
     if (!r) return;
     const g = commitGate.current();
+    inflightFor = rowKey(r);
+    filesLoading = true;
+    filesError = null;
     try {
       const list = await gitlogChanges(r.repo, r.sha);
       if (!commitGate.isCurrent(g)) return;
+      inflightFor = null;
       changesCache.set(r.repo, r.sha, list);
       applyChanges(r, list);
     } catch (e) {
       if (!commitGate.isCurrent(g)) return;
+      inflightFor = null;
       filesError = String(e);
       files = null;
       filesLoading = false;
@@ -224,8 +236,11 @@
 
   /** Enter on a commit: its changes, with the keyboard in the tree on the first file. */
   function openCommit(row: RowView) {
-    if (changesFor && files && rowKey(changesFor) === rowKey(row)) {
-      if (!activeFile && files.length) {
+    const key = rowKey(row);
+    const loaded = !!changesFor && !!files && rowKey(changesFor) === key;
+    const act = enterAction({ loaded, inflight: inflightFor === key, pending: fetchChanges.hasPending() });
+    if (act === "focus") {
+      if (!activeFile && files?.length) {
         const first = pickFile(files, null);
         if (first) void showFile(first);
       }
@@ -233,7 +248,8 @@
       return;
     }
     focusTreeWhenReady = true;
-    fetchChanges.flush();
+    if (act === "flush") fetchChanges.flush();
+    else if (act === "load") void loadChanges();
   }
 
   function leaveBottom(e: KeyboardEvent) {
@@ -282,17 +298,20 @@
   });
 
   /** "Open in editor": the working-tree file, never written to. It may be gone since the commit. */
-  async function openInWorktree(line: number, col: number, template: string | null = null) {
+  async function openInWorktree(line: number, col: number, template: string | null = null): Promise<boolean> {
     const r = changesFor;
     const f = activeFile;
-    if (!r || !f) return;
+    if (!r || !f) return false;
     openError = null;
     try {
-      const abs = await gitlogWorktreeFile(r.repo, f.path);
+      // The commit's source picks the checkout it lives in (a worktree-only commit opens there).
+      const abs = await gitlogWorktreeFile(r.repo, f.path, r.source);
       await openInEditor(abs, line, col, template);
       onnotice(openedText(abs, line, template ?? config.editor));
+      return true;
     } catch (e) {
       openError = String(e);
+      return false;
     }
   }
   function openAtCursor() {
@@ -301,7 +320,7 @@
   }
   async function pickEditor(template: string) {
     const t = diffView?.openTarget() ?? { line: 1, col: 1 };
-    await openInWorktree(t.line, t.col, template);
+    if (!(await openInWorktree(t.line, t.col, template))) return;
     try {
       onconfig(await setEditor(template));
     } catch (e) {
