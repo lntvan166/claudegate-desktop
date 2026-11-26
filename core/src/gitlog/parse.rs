@@ -3,9 +3,7 @@
 use std::collections::HashMap;
 
 /// Fields separated by NUL, records terminated by RS (0x1e).
-/// The last field, `%S`, is the ref the commit was reached by (`--source`): `HEAD`,
-/// `refs/heads/<b>` or a sha, as passed to `git log`.
-pub const LOG_FORMAT: &str = "--format=%H%x00%ct%x00%an%x00%ae%x00%s%x00%P%x00%S%x1e";
+pub const LOG_FORMAT: &str = "--format=%H%x00%ct%x00%an%x00%ae%x00%s%x00%P%x1e";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commit {
@@ -17,8 +15,6 @@ pub struct Commit {
     pub email: String,
     pub subject: String,
     pub parents: Vec<String>,
-    /// The head this commit was reached from (`%S`): which checkout or branch it is on.
-    pub source: String,
 }
 
 pub fn is_sha(s: &str) -> bool {
@@ -34,7 +30,7 @@ pub fn parse_log(out: &str) -> Vec<Commit> {
     for rec in records {
         let rec = rec.strip_prefix('\n').unwrap_or(rec);
         let f: Vec<&str> = rec.split('\0').collect();
-        if f.len() != 7 {
+        if f.len() != 6 {
             continue;
         }
         let Ok(time) = f[1].parse::<i64>() else { continue };
@@ -49,7 +45,6 @@ pub fn parse_log(out: &str) -> Vec<Commit> {
             email: f[3].to_string(),
             subject: f[4].to_string(),
             parents: f[5].split(' ').filter(|p| !p.is_empty()).map(String::from).collect(),
-            source: f[6].to_string(),
         });
     }
     commits

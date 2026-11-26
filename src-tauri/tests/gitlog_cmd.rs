@@ -319,14 +319,19 @@ fn rows_carry_their_source() {
     commit(&main, &[("a.txt", Some(b"a"))], "base", BASE);
     let wt = root.join("acme-api-wt");
     git(&main, &["worktree", "add", "-q", "-b", "w1", wt.to_str().unwrap()]);
-    commit(&wt, &[("w.txt", Some(b"w"))], "on w1", BASE + 10);
-    commit(&main, &[("m.txt", Some(b"m"))], "on main", BASE + 20);
+    // The worktree's tip is newer than main's: git's --source would label "base" w1.
+    commit(&main, &[("m.txt", Some(b"m"))], "on main", BASE + 10);
+    commit(&wt, &[("w.txt", Some(b"w"))], "on w1", BASE + 20);
     let g = gl();
     let ids = ids_of(&g, &[root]);
     assert_eq!(ids.len(), 1, "one repository for the checkout and its worktree");
     let p = first_page(&g, 1, &ids, &FilterView::default());
     let src: std::collections::HashMap<&str, &str> = p.rows.iter().map(|r| (r.subject.as_str(), r.source.as_str())).collect();
     assert_eq!(src["on main"], "HEAD");
+    assert_eq!(src["base"], "HEAD", "shared history below the fork point is the main checkout's");
     assert_eq!(src["on w1"], "refs/heads/w1");
     assert_eq!(p.rows.len(), 3);
+    let f = FilterView { branch: Some("w1".into()), ..Default::default() };
+    let p = first_page(&g, 2, &ids, &f);
+    assert!(p.rows.iter().all(|r| r.source == "w1"), "one head: every row is that branch");
 }

@@ -13,7 +13,7 @@
 //!   pending, then takes the rows at or above the horizon (`take_ready`), for at most
 //!   `MAX_ROUNDS` rounds.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -328,14 +328,15 @@ pub struct RowView {
     pub email: String,
     pub subject: String,
     pub parents: Vec<String>,
-    /// The head the commit was reached from: `HEAD` (the main checkout), `refs/heads/<b>`
-    /// (a worktree's branch), the branch filter as typed, or a sha (a detached worktree).
+    /// Where the commit lives: `HEAD` (the main checkout's history), `refs/heads/<b>` (only on
+    /// that worktree's branch), a sha (only on that detached worktree), or, with the branch
+    /// filter on, the branch as typed.
     pub source: String,
 }
 
-impl From<Commit> for RowView {
-    fn from(c: Commit) -> Self {
-        RowView { repo: c.repo, sha: c.sha, time: c.time, author: c.author, email: c.email, subject: c.subject, parents: c.parents, source: c.source }
+impl RowView {
+    fn of(c: Commit, source: String) -> Self {
+        RowView { repo: c.repo, sha: c.sha, time: c.time, author: c.author, email: c.email, subject: c.subject, parents: c.parents, source }
     }
 }
 
@@ -442,7 +443,27 @@ struct RepoQuery {
     cwd: PathBuf,
     heads: Vec<String>,
     me: Option<String>,
+    /// For each head after the first: the commits only it has (`rev-list <first>..<head>`).
+    only: Vec<(String, HashSet<String>)>,
 }
+
+impl RepoQuery {
+    /// The head a row is labelled with: the first head (`HEAD`, or the branch filter's), unless
+    /// only another head has the commit. Not git's `--source`, which labels shared history with
+    /// whichever head reached it first in date order.
+    fn source_of(&self, sha: &str) -> String {
+        for (h, set) in &self.only {
+            if set.contains(sha) {
+                return h.clone();
+            }
+        }
+        self.heads.first().cloned().unwrap_or_default()
+    }
+}
+
+/// `rev-list` reads at most this many commits per worktree for its "only here" set; a branch
+/// further ahead than that labels its older commits with the first head.
+const ONLY_MAX: usize = 10_000;
 
 struct QueryState {
     query: u64,
@@ -657,7 +678,19 @@ impl GitLog {
                 None => false,
             };
             let heads = heads_for(branch.as_deref(), has, &current_heads(r));
-            Ok(Some((RepoQuery { id: r.id.clone(), cwd, heads, me }, has)))
+            // One spawn per extra head; a repository with one head skips this.
+            let mut only = Vec::new();
+            for h in heads.iter().skip(1) {
+                let range = format!("{}..{h}", heads[0]);
+                let max = format!("--max-count={ONLY_MAX}");
+                match self.runner.text(Some(tag), &cwd, &["rev-list", &max, "--end-of-options", &range, "--"]) {
+                    Ok(out) => only.push((h.clone(), out.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect())),
+                    Err(RunError::Cancelled) => return Err(RunError::Cancelled),
+                    // The log of that head fails too, and says why.
+                    Err(_) => {}
+                }
+            }
+            Ok(Some((RepoQuery { id: r.id.clone(), cwd, heads, me, only }, has)))
         });
         let mut rq = Vec::new();
         let mut has = Vec::new();
@@ -734,7 +767,13 @@ impl GitLog {
         let done = st.progress.values().all(|p| p.exhausted && p.pending.is_empty());
         Ok(PageView {
             query_id: st.query,
-            rows: rows.into_iter().map(RowView::from).collect(),
+            rows: rows
+                .into_iter()
+                .map(|c| {
+                    let src = st.repos.iter().find(|q| q.id == c.repo).map(|q| q.source_of(&c.sha)).unwrap_or_default();
+                    RowView::of(c, src)
+                })
+                .collect(),
             failures: st.failures.clone(),
             branch_use: st.branch_use.clone().map(BranchUseView::from),
             done,
