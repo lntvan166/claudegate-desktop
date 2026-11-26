@@ -19,6 +19,7 @@ import type {
   SettingsView,
 } from "./api";
 import type { FilterView, PageView, RowView } from "../gitlog/log";
+import type { ChangedFile, FileView } from "../gitlog/changes";
 import { DEFAULT_GITLOG_CONFIG, SCAN_DEPTH_MAX, type GitLogConfig, type RepoView } from "../gitlog/repos";
 import { DEFAULT_PROTECTED, globMatcher, type ExcludeOwner, type Resolved } from "./settings";
 
@@ -650,6 +651,25 @@ function glStart(id: number, repos: string[], f: FilterView) {
   };
 }
 
+// What a commit changed: a deterministic set per commit id, from a one-file edit to a rename with a
+// binary, a deleted file and a file too large to show (the five states the pane has to draw).
+const ch = (path: string, status: ChangedFile["status"], added: number | null, removed: number | null, from: string | null = null): ChangedFile => ({ path, status, from, added, removed });
+const GL_CHANGES: ChangedFile[][] = [
+  [ch("internal/refunds/refund.go", "modified", 12, 3), ch("internal/refunds/refund_test.go", "added", 41, 0), ch("README.md", "modified", 2, 1)],
+  [
+    ch("web/src/client.ts", "renamed", 6, 2, "web/src/api.ts"),
+    ch("web/src/components/Cart.ts", "modified", 18, 7),
+    ch("web/src/components/Totals.ts", "added", 54, 0),
+    ch("web/public/logo.png", "modified", null, null),
+    ch("docs/old-notes.md", "deleted", 0, 31),
+    ch("package.json", "modified", 1, 1),
+  ],
+  [ch("service/billing.py", "modified", 5, 5)],
+  [ch("db/seed.sql", "modified", 9000, 8800), ch("config/deploy.yml", "modified", 3, 0), ch("scripts/export.rs", "deleted", 0, 12)],
+  [],
+];
+const glFiles = (sha: string) => GL_CHANGES[parseInt(sha.slice(-4), 16) % GL_CHANGES.length];
+
 const gitlogMock: Pick<
   Api,
   | "gitlogRepos"
@@ -669,7 +689,9 @@ const gitlogMock: Pick<
   | "gitlogLastFilter"
   | "gitlogPage"
   | "gitlogMessage"
-  | "gitlogWebUrl"
+  | "gitlogChanges"
+  | "gitlogFile"
+  | "gitlogWorktreeFile"
   | "gitlogOpenRemote"
 > = {
   gitlogRepos: async () => {
@@ -752,7 +774,25 @@ const gitlogMock: Pick<
     return { queryId, rows, failures: q.failures, branchUse: q.branchUse, done: q.at >= q.rows.length };
   },
   gitlogMessage: async (_repo, sha) => `${glSubject(sha)}\n\nThe longer explanation of this change goes here, wrapped the way git stores it.\n\nCo-authored-by: Sam <sam@acme.test>`,
-  gitlogWebUrl: async (repo, sha) => (repo.includes("legacy-billing") ? null : `https://github.com/acme/${repo.split("/").slice(-2, -1)[0]}/commit/${sha}`),
+  gitlogChanges: async (_repo, sha) => {
+    await new Promise((r) => setTimeout(r, 40));
+    return structuredClone(glFiles(sha));
+  },
+  gitlogFile: async (_repo, sha, path, side): Promise<FileView> => {
+    await new Promise((r) => setTimeout(r, 40));
+    const f = glFiles(sha).find((x) => x.path === path);
+    if (!f) throw "Not a path in the repository";
+    if (f.added === null) return { kind: "binary" };
+    if (path.endsWith(".sql")) return { kind: "tooLarge", value: 3_400_000 };
+    if ((side === "before" && f.status === "added") || (side === "after" && f.status === "deleted")) return { kind: "missing" };
+    const { before, after } = sample(f.from ?? path, f.status === "added");
+    const text = side === "before" ? before : after;
+    return text === null ? { kind: "missing" } : { kind: "text", value: text };
+  },
+  gitlogWorktreeFile: async (repo, path) => {
+    if (path.startsWith("docs/old") || path.startsWith("scripts/")) throw `${path} is no longer in the working tree`;
+    return `${repo.replace(/\/\.git\/?$/, "")}/${path}`;
+  },
   gitlogOpenRemote: async (repo, sha) => {
     if (repo.includes("legacy-billing")) return false;
     console.info("open", `https://github.com/acme/${repo.split("/").slice(-2, -1)[0]}/commit/${sha}`);

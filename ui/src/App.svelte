@@ -1618,7 +1618,7 @@
   </div>
 
   {#if gitlogMounted}
-    <GitLogView bind:this={gitlogView} active={appView === "gitlog"} onnotice={announce} />
+    <GitLogView bind:this={gitlogView} active={appView === "gitlog"} onnotice={announce} {config} {theme} onconfig={(c) => (config = c)} />
   {/if}
 </div>
 

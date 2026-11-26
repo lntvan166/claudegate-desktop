@@ -972,10 +972,25 @@ pub async fn gitlog_file(repo: String, sha: String, path: String, side: Side, st
     crate::commands::blocking(move || gl.file(&repo, &sha, &path, side)).await?
 }
 
+/// The working-tree file for a changed path, for "Open in editor": `path` is a path in the
+/// repository (as `gitlog_changes` reports it) and the file must still be there. A commit's file
+/// may be gone by now (deleted or renamed later), which is an error, never a new empty buffer.
+/// Read-only: nothing is created.
 #[tauri::command]
-pub async fn gitlog_web_url(repo: String, sha: String, state: tauri::State<'_, GitLogState>) -> Result<Option<String>, String> {
+pub async fn gitlog_worktree_file(repo: String, path: String, state: tauri::State<'_, GitLogState>) -> Result<String, String> {
     let gl = state.inner().0.clone();
-    crate::commands::blocking(move || gl.web_url(&repo, &sha)).await?
+    crate::commands::blocking(move || worktree_file(&gl.cwd_of(&repo)?, &path)).await?
+}
+
+pub fn worktree_file(root: &std::path::Path, path: &str) -> Result<String, String> {
+    if !tree_path_ok(path) {
+        return Err("Not a path in the repository".into());
+    }
+    let full = root.join(path);
+    if !full.is_file() {
+        return Err(format!("{path} is no longer in the working tree"));
+    }
+    Ok(full.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -1059,6 +1074,11 @@ mod tests {
                 assert!(check_open_url(&url).is_err(), "{remote} -> {url}");
             }
         }
+        // This one does produce a link, so the assertion above can never be skipped for it.
+        {
+            let url = web_url("https://github.x\"&y.com/acme/r.git", &sha).expect("a link is built for this origin");
+            assert!(check_open_url(&url).is_err(), "{url}");
+        }
         let ok = web_url("git@github.com:acme/acme-api.git", &sha).expect("github link");
         assert!(check_open_url(&ok).is_ok(), "{ok}");
     }
@@ -1094,6 +1114,19 @@ mod tests {
         let f = FilterView { within: Some(86_400), path: Some("  ".into()), ..Default::default() }.resolve(1_000_000);
         assert_eq!(f.since, Some(1_000_000 - 86_400));
         assert_eq!(f.path, None);
+    }
+
+    #[test]
+    fn worktree_file_is_read_only_and_must_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "x").unwrap();
+        let got = worktree_file(dir.path(), "src/a.rs").unwrap();
+        assert!(got.ends_with("a.rs"));
+        assert!(worktree_file(dir.path(), "src/gone.rs").unwrap_err().contains("no longer"));
+        assert!(worktree_file(dir.path(), "src").is_err(), "a folder is not a file");
+        assert!(worktree_file(dir.path(), "../x").is_err());
+        assert!(!dir.path().join("src/gone.rs").exists(), "nothing was created");
     }
 
     #[test]

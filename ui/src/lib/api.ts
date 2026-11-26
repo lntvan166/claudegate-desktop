@@ -14,6 +14,7 @@ import type { SettingKey, SettingsView } from "./settings";
 import type { UpdateView } from "./update";
 import type { GitLogConfig, RepoView } from "../gitlog/repos";
 import type { FilterView, PageView } from "../gitlog/log";
+import type { ChangedFile, FileSide, FileView } from "../gitlog/changes";
 
 export type { CaptureView, HookReplacedView, HookView, InstallView, UpdateView };
 export type { GitLogConfig, RepoView };
@@ -215,8 +216,12 @@ export interface Api {
   gitlogPage(queryId: number, repos: string[], filter: FilterView, more: boolean): Promise<PageView>;
   /** A commit's full message. */
   gitlogMessage(repo: string, sha: string): Promise<string>;
-  /** The commit's page on its remote, or null when the host is not one we can build a link for. */
-  gitlogWebUrl(repo: string, sha: string): Promise<string | null>;
+  /** The files `sha` changed against its first parent, with +/- counts. */
+  gitlogChanges(repo: string, sha: string): Promise<ChangedFile[]>;
+  /** One side of a changed file: before is the first parent's version (a rename's old path), after the commit's. */
+  gitlogFile(repo: string, sha: string, path: string, side: FileSide): Promise<FileView>;
+  /** The working-tree path of a changed file, or rejects when it is gone from the working tree. Read-only. */
+  gitlogWorktreeFile(repo: string, path: string): Promise<string>;
   /** Opens the commit's page on its remote in the system browser; false when the remote has no link. */
   gitlogOpenRemote(repo: string, sha: string): Promise<boolean>;
 }
@@ -268,7 +273,9 @@ const tauriApi: Api = {
   gitlogLastFilter: (filter) => invoke<GitLogConfig>("gitlog_last_filter", { filter }),
   gitlogPage: (queryId, repos, filter, more) => invoke<PageView>("gitlog_page", { queryId, repos, filter, more }),
   gitlogMessage: (repo, sha) => invoke<string>("gitlog_message", { repo, sha }),
-  gitlogWebUrl: (repo, sha) => invoke<string | null>("gitlog_web_url", { repo, sha }),
+  gitlogChanges: (repo, sha) => invoke<ChangedFile[]>("gitlog_changes", { repo, sha }),
+  gitlogFile: (repo, sha, path, side) => invoke<FileView>("gitlog_file", { repo, sha, path, side }),
+  gitlogWorktreeFile: (repo, path) => invoke<string>("gitlog_worktree_file", { repo, path }),
   gitlogOpenRemote: (repo, sha) => invoke<boolean>("gitlog_open_remote", { repo, sha }),
 };
 
@@ -344,5 +351,8 @@ export const gitlogLastFilter = async (filter: Record<string, unknown> | null) =
 export const gitlogPage = async (queryId: number, repos: string[], filter: FilterView, more: boolean) =>
   (await api()).gitlogPage(queryId, repos, filter, more);
 export const gitlogMessage = async (repo: string, sha: string) => (await api()).gitlogMessage(repo, sha);
-export const gitlogWebUrl = async (repo: string, sha: string) => (await api()).gitlogWebUrl(repo, sha);
+export const gitlogChanges = async (repo: string, sha: string) => (await api()).gitlogChanges(repo, sha);
+export const gitlogFile = async (repo: string, sha: string, path: string, side: FileSide) =>
+  (await api()).gitlogFile(repo, sha, path, side);
+export const gitlogWorktreeFile = async (repo: string, path: string) => (await api()).gitlogWorktreeFile(repo, path);
 export const gitlogOpenRemote = async (repo: string, sha: string) => (await api()).gitlogOpenRemote(repo, sha);

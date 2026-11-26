@@ -89,7 +89,7 @@ pub fn run() {
             gitlog::gitlog_page,
             gitlog::gitlog_changes,
             gitlog::gitlog_file,
-            gitlog::gitlog_web_url,
+            gitlog::gitlog_worktree_file,
             gitlog::gitlog_message,
             gitlog::gitlog_open_remote,
             tray::set_pending_count,

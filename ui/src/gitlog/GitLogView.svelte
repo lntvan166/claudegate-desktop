@@ -1,11 +1,38 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
+  import DiffView from "../components/DiffView.svelte";
   import Splitter from "../components/Splitter.svelte";
-  import { gitlogConfig, gitlogLastFilter, gitlogPane, gitlogRepos } from "../lib/api";
+  import {
+    gitlogChanges,
+    gitlogConfig,
+    gitlogFile,
+    gitlogLastFilter,
+    gitlogPane,
+    gitlogRepos,
+    gitlogWorktreeFile,
+    openInEditor,
+    setEditor,
+  } from "../lib/api";
+  import { openedText, type EditorConfig } from "../lib/editors";
+  import type { IconTheme } from "../lib/icons";
+  import type { Row } from "../lib/rows";
+  import Changes from "./Changes.svelte";
+  import {
+    CHANGES_DEBOUNCE_MS,
+    ChangesCache,
+    changesTitle,
+    createGate,
+    diffPane,
+    paneMessage,
+    pickFile,
+    statusText,
+    type ChangedFile,
+    type DiffPane,
+  } from "./changes";
   import Filters from "./Filters.svelte";
   import LogList from "./LogList.svelte";
   import RepoPane from "./RepoPane.svelte";
-  import { DEFAULT_FILTER, debounce, parseFilter, type FilterState, type RowView } from "./log";
+  import { DEFAULT_FILTER, debounce, parseFilter, rowKey, type FilterState, type RowView } from "./log";
   import {
     DEFAULT_GITLOG_CONFIG,
     PANE_DEFAULTS,
@@ -25,10 +52,18 @@
   let {
     active,
     onnotice,
+    config,
+    theme,
+    onconfig,
   }: {
     /** On screen; the repository list is fetched again each time it comes back. */
     active: boolean;
     onnotice: (text: string) => void;
+    /** The editor "Open in editor" uses (the review's own setting). */
+    config: EditorConfig;
+    theme: IconTheme;
+    /** The editor choice changed (from the Open with menu): App keeps the one config. */
+    onconfig: (c: EditorConfig) => void;
   } = $props();
 
   let repoPane: RepoPane | undefined = $state();
@@ -66,8 +101,213 @@
     if (filtersRead) saveFilter();
   });
 
-  /** Enter on a commit: Task 7 opens its first changed file in the diff here. */
-  function openCommit(_row: RowView) {}
+  // ---- the selected commit's changes and diff -------------------------------------------------
+  // Selecting a commit fetches its files after a short rest (holding an arrow key spawns none);
+  // a file's two sides are fetched when it is opened. Two generation counters keep an older answer
+  // from landing on a newer selection.
+  let changesTree: Changes | undefined = $state();
+  let diffView: DiffView | undefined = $state();
+  /** The commit `files` belong to (may trail `selected` while the next one loads). */
+  let changesFor = $state<RowView | null>(null);
+  let files = $state<ChangedFile[] | null>(null);
+  let filesLoading = $state(false);
+  let filesError = $state<string | null>(null);
+  let activeFile = $state<ChangedFile | null>(null);
+  let diffLoading = $state(false);
+  let diffError = $state<string | null>(null);
+  let shownPane = $state<DiffPane | null>(null);
+  let openError = $state<string | null>(null);
+  let focusTreeWhenReady = false;
+  const changesCache = new ChangesCache();
+  const commitGate = createGate();
+  const fileGate = createGate();
+  const fetchChanges = debounce(() => void loadChanges(), CHANGES_DEBOUNCE_MS);
+
+  const repoName = (id: string) => repos?.find((r) => r.id === id)?.name ?? id.replace(/\/\.git\/?$/, "").split("/").pop() ?? id;
+  const changesHeading = $derived(
+    changesFor && files ? changesTitle(repoName(changesFor.repo), changesFor.sha, files.length) : "Changes",
+  );
+
+  const selKey = $derived(selected ? rowKey(selected) : null);
+  let lastKey: string | null = null;
+  $effect(() => {
+    const k = selKey;
+    if (k === lastKey) return;
+    lastKey = k;
+    untrack(() => commitChanged(selected));
+  });
+
+  function clearDiff() {
+    fileGate.next();
+    activeFile = null;
+    shownPane = null;
+    diffLoading = false;
+    diffError = null;
+    openError = null;
+  }
+
+  function commitChanged(r: RowView | null) {
+    commitGate.next();
+    fetchChanges.cancel();
+    filesError = null;
+    if (!r) {
+      changesFor = null;
+      files = null;
+      filesLoading = false;
+      clearDiff();
+      return;
+    }
+    const hit = changesCache.get(r.repo, r.sha);
+    if (hit) return applyChanges(r, hit);
+    filesLoading = true;
+    fetchChanges();
+  }
+
+  async function loadChanges() {
+    const r = selected;
+    if (!r) return;
+    const g = commitGate.current();
+    try {
+      const list = await gitlogChanges(r.repo, r.sha);
+      if (!commitGate.isCurrent(g)) return;
+      changesCache.set(r.repo, r.sha, list);
+      applyChanges(r, list);
+    } catch (e) {
+      if (!commitGate.isCurrent(g)) return;
+      filesError = String(e);
+      files = null;
+      filesLoading = false;
+      changesFor = null;
+      clearDiff();
+      focusTreeWhenReady = false;
+    }
+  }
+
+  function applyChanges(r: RowView, list: ChangedFile[]) {
+    changesFor = r;
+    files = list;
+    filesLoading = false;
+    filesError = null;
+    // The diff follows the selection: the file that was open if this commit has it too, else the first.
+    const pick = pickFile(list, untrack(() => activeFile?.path ?? null));
+    if (pick) void showFile(pick);
+    else clearDiff();
+    if (focusTreeWhenReady) {
+      focusTreeWhenReady = false;
+      void tick().then(() => changesTree?.focus());
+    }
+  }
+
+  async function showFile(f: ChangedFile) {
+    const r = changesFor;
+    if (!r) return;
+    const g = fileGate.next();
+    activeFile = f;
+    shownPane = null;
+    diffLoading = true;
+    diffError = null;
+    openError = null;
+    try {
+      const [before, after] = await Promise.all([
+        gitlogFile(r.repo, r.sha, f.path, "before"),
+        gitlogFile(r.repo, r.sha, f.path, "after"),
+      ]);
+      if (!fileGate.isCurrent(g)) return;
+      shownPane = diffPane(f.path, before, after);
+      diffLoading = false;
+    } catch (e) {
+      if (!fileGate.isCurrent(g)) return;
+      diffError = String(e);
+      diffLoading = false;
+    }
+  }
+
+  /** Enter on a commit: its changes, with the keyboard in the tree on the first file. */
+  function openCommit(row: RowView) {
+    if (changesFor && files && rowKey(changesFor) === rowKey(row)) {
+      if (!activeFile && files.length) {
+        const first = pickFile(files, null);
+        if (first) void showFile(first);
+      }
+      changesTree?.focus();
+      return;
+    }
+    focusTreeWhenReady = true;
+    fetchChanges.flush();
+  }
+
+  function leaveBottom(e: KeyboardEvent) {
+    // Esc in the tree (it handles its own) or the diff: back to the commit list.
+    if (e.key !== "Escape" || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+    e.preventDefault();
+    logList?.focusList();
+  }
+
+  /** The row the shared diff header draws: a commit's file, never a review row. */
+  const diffRow = $derived<Row | null>(
+    changesFor && activeFile
+      ? {
+          key: `${changesFor.sha}:${activeFile.path}`,
+          path: activeFile.path,
+          rel: activeFile.path,
+          scope: changesFor.repo,
+          added: activeFile.added ?? 0,
+          removed: activeFile.removed ?? 0,
+          newFile: activeFile.status === "added",
+          decidedAt: null,
+          waiting: false,
+          rejectOutcome: null,
+        }
+      : null,
+  );
+  const external = $derived.by(() => {
+    const pane = shownPane;
+    const f = activeFile;
+    const empty = {
+      title: selected ? "Select a file to see its diff" : "Select a commit to see its changes",
+      body: selected ? "Click a file in Changes, or press Enter on it." : "Pick one in the log above; its files appear on the left.",
+    };
+    return {
+      payload: pane?.kind === "diff" ? pane.payload : null,
+      loading: diffLoading,
+      error: diffError,
+      notice: !f ? empty : pane && pane.kind !== "diff" ? paneMessage(pane) : null,
+      tag:
+        f?.status === "deleted"
+          ? { text: "Deleted", tone: "deleted" as const }
+          : f && (f.status === "renamed" || f.status === "copied")
+            ? { text: statusText(f), tone: "new" as const }
+            : null,
+    };
+  });
+
+  /** "Open in editor": the working-tree file, never written to. It may be gone since the commit. */
+  async function openInWorktree(line: number, col: number, template: string | null = null) {
+    const r = changesFor;
+    const f = activeFile;
+    if (!r || !f) return;
+    openError = null;
+    try {
+      const abs = await gitlogWorktreeFile(r.repo, f.path);
+      await openInEditor(abs, line, col, template);
+      onnotice(openedText(abs, line, template ?? config.editor));
+    } catch (e) {
+      openError = String(e);
+    }
+  }
+  function openAtCursor() {
+    const t = diffView?.openTarget() ?? { line: 1, col: 1 };
+    void openInWorktree(t.line, t.col);
+  }
+  async function pickEditor(template: string) {
+    const t = diffView?.openTarget() ?? { line: 1, col: 1 };
+    await openInWorktree(t.line, t.col, template);
+    try {
+      onconfig(await setEditor(template));
+    } catch (e) {
+      openError = `Opened, but couldn't remember the choice: ${e}`;
+    }
+  }
 
   function readCollapsed(): boolean {
     try {
@@ -192,11 +432,19 @@
         />
       {/if}
     </div>
-    <div class="bottom">
-      <section class="changes" aria-label="Changes">
-        <p class="pane-title">Changes</p>
-        <p class="state-body pad">Select a commit to see the files it changed.</p>
-      </section>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="bottom" onkeydown={leaveBottom}>
+      <Changes
+        bind:this={changesTree}
+        title={changesHeading}
+        {files}
+        loading={filesLoading}
+        error={filesError}
+        activePath={activeFile?.path ?? null}
+        {theme}
+        onopenfile={(f) => !filesLoading && void showFile(f)}
+        onescape={() => logList?.focusList()}
+      />
       <div class="split split-changes">
         <Splitter
           label="Resize changes"
@@ -209,9 +457,24 @@
           onreset={() => resetPane("changes")}
         />
       </div>
-      <section class="diff" aria-label="Diff">
-        <p class="state-body pad">Select a file to see its diff.</p>
-      </section>
+      <div class="diffcol">
+        <DiffView
+          bind:this={diffView}
+          row={diffRow}
+          kind="pending"
+          root={changesFor?.repo ?? ""}
+          version={0}
+          {theme}
+          {config}
+          {openError}
+          {external}
+          onopen={openAtCursor}
+          onopenat={(line, col) => void openInWorktree(line, col)}
+          onpick={(t) => void pickEditor(t)}
+          ondismiss={() => (openError = null)}
+          onnotice={onnotice}
+        />
+      </div>
     </div>
   </div>
 </div>
@@ -266,26 +529,17 @@
     grid-template-columns: var(--changes-w) minmax(0, 1fr);
     min-height: 0;
   }
-  .changes {
-    min-height: 0;
+  .bottom > :global(.changes) {
     border-right: 1px solid var(--rule);
-    overflow: auto;
   }
-  .diff {
+  .diffcol {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
     min-height: 0;
-    overflow: auto;
   }
-  .pane-title {
-    padding: 12px var(--pad) 4px;
-    font-size: var(--fs-small);
-    font-weight: 600;
-    color: var(--muted);
-  }
-  .pad {
-    padding: 4px var(--pad);
-  }
-  .diff .pad {
-    padding-top: 12px;
+  .diffcol > :global(.diff) {
+    flex: 1;
   }
 
   .state {
@@ -300,14 +554,8 @@
     border-radius: 4px;
     background: var(--hover);
   }
-  .state-body {
-    max-width: 420px;
-    font-size: var(--fs-small);
-    line-height: 1.5;
-    color: var(--muted);
-  }
 
-  /* A narrow window: repositories on top, the commit list below; no Changes or diff yet. */
+  /* A narrow window: repositories on top; the commit list, then the commit's files over its diff. */
   @media (max-width: 720px) {
     .gitlog-view {
       grid-template-columns: minmax(0, 1fr);
@@ -320,11 +568,15 @@
       display: none;
     }
     .sheet {
-      grid-template-rows: minmax(0, 1fr);
       margin: 0 var(--sheet-inset) var(--sheet-inset);
     }
     .bottom {
-      display: none;
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: minmax(0, 2fr) minmax(0, 3fr);
+    }
+    .bottom > :global(.changes) {
+      border-right: 0;
+      border-bottom: 1px solid var(--rule);
     }
   }
 </style>

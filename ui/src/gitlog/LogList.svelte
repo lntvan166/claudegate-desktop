@@ -3,7 +3,7 @@
   import ContextMenu from "../components/ContextMenu.svelte";
   import { gitlogMessage, gitlogOpenRemote, gitlogPage } from "../lib/api";
   import { writeClipboard } from "../lib/clipboard";
-    import { OVERLAY_SELECTOR, overlayShown } from "../lib/viewSwitch";
+  import { OVERLAY_SELECTOR, overlayShown } from "../lib/viewSwitch";
   import {
     EMPTY_QUERY,
     LogQuery,

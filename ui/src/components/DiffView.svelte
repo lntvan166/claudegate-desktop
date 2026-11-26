@@ -7,7 +7,7 @@
   import { iconFor, type IconTheme } from "../lib/icons";
   import { languageFor } from "../lib/language";
   import { modifiedPositionFor } from "../lib/navigate";
-  import { deletedOnDisk, diffErrorText, paneState } from "../lib/paneState";
+  import { deletedOnDisk, diffErrorText, paneState, type PaneState } from "../lib/paneState";
   import { loadWrap, readStore, WRAP_KEY, writeStore } from "../lib/uiState";
   import { chooseSelection, refLines, selectionOnModified, type LineRange } from "../lib/ref";
   import type { Row } from "../lib/rows";
@@ -39,6 +39,7 @@
     onopenat = () => {},
     oncopyref = () => {},
     copyRefHint = "Ctrl+Alt+C",
+    external = null,
   }: {
     row: Row | null;
     kind: DiffKind;
@@ -71,6 +72,19 @@
     oncopyref?: (sel: LineRange | null) => void;
     /** The shortcut shown in the Copy @ref button's tooltip. */
     copyRefHint?: string;
+    /**
+     * The Git log view hands in the two texts itself (a commit's file against its parent's), so
+     * nothing is fetched and the review's own controls (decisions, copy reference) stay away.
+     * `notice` replaces the diff with a message (binary, too large, nothing selected).
+     */
+    external?: {
+      payload: DiffPayload | null;
+      loading: boolean;
+      error: string | null;
+      notice: { title: string; body: string } | null;
+      /** A chip beside the path: "Deleted", "Renamed from a.ts". */
+      tag?: { text: string; tone: "new" | "deleted" } | null;
+    } | null;
   } = $props();
 
   /** The last cursor position in either side of the diff, for "Open at cursor". */
@@ -286,7 +300,7 @@
   /** The payload only when it belongs to the selected row: never another row's text under this one. */
   const shown = $derived(row && payloadIdent === rowIdent ? payload : null);
   /** Exactly one of empty / loading / error / binary / editor is on screen. */
-  const pane = $derived(paneState(row, shown, loading, loadError));
+  const pane = $derived<PaneState | "notice">(external?.notice ? "notice" : paneState(row, shown, loading, loadError));
 
   // Fetch the selected row's diff; `version` re-runs it when the project reloads.
   $effect(() => {
@@ -294,6 +308,20 @@
     const k = kind;
     void version;
     const s = ++seq;
+    const ext = external;
+    if (ext) {
+      // Handed in by the Git log: the text is already here (or on its way), keyed on the same row.
+      if (!r) {
+        payload = null;
+        payloadIdent = "";
+      } else {
+        payload = ext.payload;
+        payloadIdent = ext.payload ? `${k}\u0000${r.key}` : "";
+      }
+      loadError = ext.error;
+      loading = ext.loading;
+      return;
+    }
     if (!r) {
       payload = null;
       payloadIdent = "";
@@ -497,8 +525,9 @@
         {#if row.rel.includes("/")}<span class="diff-dir"><bdi>{row.rel.slice(0, row.rel.lastIndexOf("/") + 1)}</bdi></span>{/if}<span class="diff-file">{fileName(row.rel)}</span>
       </span>
       {#if row.newFile}<span class="tag new">New file</span>{/if}
-      {#if deletedOnDisk(shown)}<span class="tag deleted" title="The file is no longer on disk">Deleted</span>{/if}
-      {#if row.waiting}
+      {#if external?.tag}<span class="tag {external.tag.tone}">{external.tag.text}</span>{/if}
+      {#if !external && deletedOnDisk(shown)}<span class="tag deleted" title="The file is no longer on disk">Deleted</span>{/if}
+      {#if row.waiting && !external}
         <!-- No change on disk yet: "+0 −0" would read as an empty edit, so say what it is. -->
         <span class="tag waiting" title="Captured before Claude wrote it; the write hasn't landed yet. It can be decided once it does.">Not written yet</span>
         <span class="diff-stats-gap"></span>
@@ -522,6 +551,7 @@
           </svg>
         </button>
       </div>
+      {#if !external}
       <div class="decide" role="group" aria-label="Decide this file">
         {#each decisions as d (d.action)}
           <!-- Waiting: aria-disabled so the tooltip shows and a click says why; locked: disabled. -->
@@ -557,6 +587,7 @@
         </svg>
         <span class="crlabel">Copy @ref</span>
       </button>
+      {/if}
       <OpenWith {config} onopen={pane === "editor" ? openAtCursor : onopen} {onpick} onopencursor={pane === "editor" ? openAtCursor : null} />
     </div>
   {/if}
@@ -577,11 +608,19 @@
     </div>
   {/if}
 
+  {#if external && !row}
+    <div class="diff-head" aria-hidden="true"></div>
+  {/if}
   <div class="body">
     <!-- display:none, not visibility:hidden: Monaco sets an inline `visibility: visible` on both
          sides of the diff, which beat the inherited hidden and drew code under the empty state. -->
     <div class="editor" hidden={pane !== "editor"} bind:this={host}></div>
-    {#if pane === "empty"}
+    {#if pane === "notice" && external?.notice}
+      <div class="placeholder">
+        <p class="ph-title">{external.notice.title}</p>
+        <p class="ph-body">{external.notice.body}</p>
+      </div>
+    {:else if pane === "empty"}
       <div class="placeholder">
         <p class="ph-title">Select a file to see its changes</p>
         <dl class="keys">
