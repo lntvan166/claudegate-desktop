@@ -33,8 +33,6 @@ pub const PAGE_SIZE: usize = 200;
 pub const MAX_ROUNDS: usize = 64;
 /// A file side larger than this is not loaded: `FileView::TooLarge`.
 pub const MAX_FILE: u64 = 2 * 1024 * 1024;
-/// A NUL in this many leading bytes makes a file binary.
-const BINARY_SNIFF: usize = 8 * 1024;
 /// The error a superseded query's call returns. The UI also gates on `query_id`.
 pub const STALE: &str = "stale query";
 
@@ -112,7 +110,10 @@ impl Drop for Permit<'_> {
 /// (a GUI app's PATH is often bare). Bare `git` when none is found.
 pub fn resolve_git() -> PathBuf {
     let home = dirs::home_dir();
-    let extra = crate::editor::fallback_dirs(home.as_deref());
+    let mut extra = crate::editor::fallback_dirs(home.as_deref());
+    if cfg!(windows) {
+        extra.push(PathBuf::from(r"C:\Program Files\Git\cmd"));
+    }
     let path = std::env::var_os("PATH");
     crate::editor::resolve_program("git", path.as_deref(), &extra, &crate::editor::is_executable).unwrap_or_else(|| PathBuf::from("git"))
 }
@@ -123,10 +124,15 @@ impl Runner {
     }
 
     /// Makes `query` the window's latest. Every child of the window's other queries is killed
-    /// and reaped before this returns.
-    pub fn set_current(&self, window: &str, query: u64) {
+    /// and reaped before this returns. Query ids only rise within a window (the UI seeds them
+    /// from `Date.now()`, so a reloaded webview keeps rising): a query older than the current
+    /// one arriving late returns false and kills nothing.
+    pub fn set_current(&self, window: &str, query: u64) -> bool {
         let doomed: Vec<Slot> = {
             let mut reg = lock(&self.reg);
+            if reg.current.get(window).is_some_and(|c| *c > query) {
+                return false;
+            }
             reg.current.insert(window.to_string(), query);
             let old: Vec<Tag> = reg.children.keys().filter(|t| t.window == window && t.query != query).cloned().collect();
             old.iter().flat_map(|t| reg.children.remove(t).unwrap_or_default()).map(|(_, s)| s).collect()
@@ -135,6 +141,21 @@ impl Runner {
             kill(s);
         }
         // Waiters for a pool slot re-check whether they were superseded.
+        self.freed.notify_all();
+        true
+    }
+
+    /// A closed window: no query of it is current any more, and its children are killed.
+    pub fn forget_window(&self, window: &str) {
+        let doomed: Vec<Slot> = {
+            let mut reg = lock(&self.reg);
+            reg.current.remove(window);
+            let old: Vec<Tag> = reg.children.keys().filter(|t| t.window == window).cloned().collect();
+            old.iter().flat_map(|t| reg.children.remove(t).unwrap_or_default()).map(|(_, s)| s).collect()
+        };
+        for s in &doomed {
+            kill(s);
+        }
         self.freed.notify_all();
     }
 
@@ -209,7 +230,7 @@ impl Runner {
         if let Some(t) = tag {
             let mut reg = lock(&self.reg);
             if let Some(v) = reg.children.get_mut(t) {
-                v.retain(|(p, _)| *p != pid);
+                v.retain(|(_, s)| !Arc::ptr_eq(s, &slot));
                 if v.is_empty() {
                     reg.children.remove(t);
                 }
@@ -307,11 +328,14 @@ pub struct RowView {
     pub email: String,
     pub subject: String,
     pub parents: Vec<String>,
+    /// The head the commit was reached from: `HEAD` (the main checkout), `refs/heads/<b>`
+    /// (a worktree's branch), the branch filter as typed, or a sha (a detached worktree).
+    pub source: String,
 }
 
 impl From<Commit> for RowView {
     fn from(c: Commit) -> Self {
-        RowView { repo: c.repo, sha: c.sha, time: c.time, author: c.author, email: c.email, subject: c.subject, parents: c.parents }
+        RowView { repo: c.repo, sha: c.sha, time: c.time, author: c.author, email: c.email, subject: c.subject, parents: c.parents, source: c.source }
     }
 }
 
@@ -397,9 +421,9 @@ pub enum Side {
     After,
 }
 
-/// Binary: a NUL in the first 8 KiB, or not UTF-8.
+/// Binary: a NUL anywhere, or not UTF-8.
 pub fn file_view_of(bytes: Vec<u8>) -> FileView {
-    if bytes[..bytes.len().min(BINARY_SNIFF)].contains(&0) {
+    if bytes.contains(&0) {
         return FileView::Binary;
     }
     match String::from_utf8(bytes) {
@@ -422,9 +446,7 @@ struct RepoQuery {
 
 struct QueryState {
     query: u64,
-    /// Fixed at the first page; `within` was resolved against it.
-    #[allow(dead_code)]
-    now: i64,
+    /// `within` already resolved against the query's "now", fixed at its first page.
     filter: Filter,
     repos: Vec<RepoQuery>,
     progress: BTreeMap<String, RepoProgress>,
@@ -552,6 +574,17 @@ impl GitLog {
             .collect()
     }
 
+    /// Whether a repository list was ever loaded (an empty one counts).
+    pub fn loaded(&self) -> bool {
+        lock(&self.repos).is_some()
+    }
+
+    /// A window closed: drop its query and kill its children.
+    pub fn forget_window(&self, window: &str) {
+        self.runner.forget_window(window);
+        lock(&self.queries).remove(window);
+    }
+
     fn cached(&self) -> Arc<Vec<Repo>> {
         lock(&self.repos).as_ref().map(|(_, l)| l.clone()).unwrap_or_default()
     }
@@ -571,7 +604,9 @@ impl GitLog {
                 _ => return Err(STALE.into()),
             }
         } else {
-            self.runner.set_current(window, query_id);
+            if !self.runner.set_current(window, query_id) {
+                return Err(STALE.into());
+            }
             let st = self.start(&tag, repos, filter)?;
             Arc::new(Mutex::new(st))
         };
@@ -638,7 +673,7 @@ impl GitLog {
         }
         let branch_use = branch.as_deref().map(|b| BranchUse::tally(b, has));
         let progress = rq.iter().map(|q| (q.id.clone(), RepoProgress::default())).collect();
-        Ok(QueryState { query: tag.query, now, filter, repos: rq, progress, failures: Vec::new(), branch_use })
+        Ok(QueryState { query: tag.query, filter, repos: rq, progress, failures: Vec::new(), branch_use })
     }
 
     /// Refill and take ready rows until a page is full, everything is drained, or
@@ -761,7 +796,11 @@ impl GitLog {
             }
         };
         // No such object at that side: missing. The size first, so a huge blob is never read.
-        let Ok(size) = self.runner.text(None, &cwd, &["cat-file", "-s", &spec]) else { return Ok(FileView::Missing) };
+        let size = match self.runner.text(None, &cwd, &["cat-file", "-s", &spec]) {
+            Ok(s) => s,
+            Err(RunError::Failed(_)) => return Ok(FileView::Missing),
+            Err(e) => return Err(e.reason()),
+        };
         let size: u64 = size.trim().parse().map_err(|_| "Unexpected output from git cat-file".to_string())?;
         if size > MAX_FILE {
             return Ok(FileView::TooLarge(size));
@@ -868,7 +907,7 @@ pub async fn gitlog_page(
     let label = window.label().to_string();
     crate::commands::blocking(move || {
         // A page asked for before the list was ever loaded: discover first.
-        if gl.cached().is_empty() {
+        if !gl.loaded() {
             let (roots, depth, exclude) = workspace_scan(&crate::config::config_path(), &claudegate_core::paths::claudegate_home());
             gl.repos_for(&roots, depth, &exclude, false);
         }
@@ -910,10 +949,9 @@ mod tests {
         assert_eq!(file_view_of(b"plain\n".to_vec()), FileView::Text("plain\n".into()));
         assert_eq!(file_view_of(vec![b'a', 0, b'b']), FileView::Binary);
         assert_eq!(file_view_of(vec![0xff, 0xfe, b'a']), FileView::Binary);
-        let mut late_nul = vec![b'a'; BINARY_SNIFF + 10];
-        late_nul[BINARY_SNIFF + 5] = 0;
-        // Past the sniff window a NUL is still valid UTF-8: text.
-        assert!(matches!(file_view_of(late_nul), FileView::Text(_)));
+        let mut late_nul = vec![b'a'; 64 * 1024];
+        late_nul[60 * 1024] = 0;
+        assert_eq!(file_view_of(late_nul), FileView::Binary, "a NUL anywhere is binary");
     }
 
     #[test]

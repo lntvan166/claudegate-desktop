@@ -24,7 +24,7 @@ fn git_date_is_iso_utc() {
 
 #[test]
 fn no_filters_is_the_bare_log() {
-    let bare = s(&["log", LOG_FORMAT, "--max-count=200", "--"]);
+    let bare = s(&["log", LOG_FORMAT, "--source", "--max-count=200", "--"]);
     assert_eq!(args(&Filter::default()), bare);
     assert_eq!(args(&Filter { search: Some("   ".into()), ..Default::default() }), bare, "blank search adds no --grep");
 }
@@ -32,7 +32,7 @@ fn no_filters_is_the_bare_log() {
 #[test]
 fn search_is_literal_and_case_insensitive() {
     let a = args(&Filter { search: Some(" ACME-7 ".into()), ..Default::default() });
-    assert_eq!(a, s(&["log", LOG_FORMAT, "--max-count=200", "--grep=ACME-7", "-i", "-F", "--"]));
+    assert_eq!(a, s(&["log", LOG_FORMAT, "--source", "--max-count=200", "--grep=ACME-7", "-i", "-F", "--"]));
     for t in ["fix(api)", "[ACME-7]", ".", "a|b", "^x$"] {
         let a = args(&Filter { search: Some(t.into()), ..Default::default() });
         assert!(a.contains(&"-F".to_string()) && a.contains(&format!("--grep={t}")), "literal: {t}");
@@ -67,7 +67,7 @@ fn cursor_is_a_skip_never_a_date() {
 #[test]
 fn authors_one_flag_each() {
     let a = args(&Filter { authors: s(&["Rin"]), ..Default::default() });
-    assert_eq!(a, s(&["log", LOG_FORMAT, "--max-count=200", "--author=Rin", "-i", "-F", "--"]));
+    assert_eq!(a, s(&["log", LOG_FORMAT, "--source", "--max-count=200", "--author=Rin", "-i", "-F", "--"]));
     let many = args(&Filter { authors: s(&["dana", " rin@example.com "]), search: Some("ACME-7".into()), ..Default::default() });
     assert_eq!(authors_of(&many), s(&["--author=dana", "--author=rin@example.com"]));
     assert_eq!(many.iter().filter(|x| *x == "-F").count(), 1, "literal flags are given once");

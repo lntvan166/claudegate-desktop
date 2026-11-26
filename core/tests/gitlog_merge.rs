@@ -18,6 +18,7 @@ fn mk(repo: &str, time: i64) -> Commit {
         email: "dana@example.com".into(),
         subject: format!("{repo}@{time}"),
         parents: vec![],
+        source: "HEAD".into(),
     }
 }
 

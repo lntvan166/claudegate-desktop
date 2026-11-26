@@ -291,3 +291,42 @@ fn repo_list_is_cached_until_refresh() {
     let v = g.repo_views(&roots, 2, &[], false);
     assert_eq!((v[0].ahead, v[0].behind), (None, None), "no upstream");
 }
+
+#[test]
+fn late_older_query_is_stale_and_harmless() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    init(&d);
+    for i in 0..5 {
+        commit(&d, &[("a.txt", Some(format!("{i}").as_bytes()))], &format!("c{i}"), BASE + i);
+    }
+    let g = gl().with_page_size(2);
+    let ids = ids_of(&g, &[root]);
+    first_page(&g, 2, &ids, &FilterView::default());
+    assert_eq!(g.page("main", 1, &ids, &FilterView::default(), false), Err(STALE.to_string()), "an older id arriving late");
+    let more = g.page("main", 2, &ids, &FilterView::default(), true).unwrap();
+    assert_eq!(more.rows.len(), 2, "query 2's state survived");
+    g.forget_window("main");
+    assert_eq!(g.page("main", 2, &ids, &FilterView::default(), true), Err(STALE.to_string()), "a closed window's query is gone");
+    assert!(g.page("main", 1, &ids, &FilterView::default(), false).is_ok(), "a reopened window starts afresh");
+}
+
+#[test]
+fn rows_carry_their_source() {
+    let (_t, root) = tmp();
+    let main = root.join("acme-api");
+    init(&main);
+    commit(&main, &[("a.txt", Some(b"a"))], "base", BASE);
+    let wt = root.join("acme-api-wt");
+    git(&main, &["worktree", "add", "-q", "-b", "w1", wt.to_str().unwrap()]);
+    commit(&wt, &[("w.txt", Some(b"w"))], "on w1", BASE + 10);
+    commit(&main, &[("m.txt", Some(b"m"))], "on main", BASE + 20);
+    let g = gl();
+    let ids = ids_of(&g, &[root]);
+    assert_eq!(ids.len(), 1, "one repository for the checkout and its worktree");
+    let p = first_page(&g, 1, &ids, &FilterView::default());
+    let src: std::collections::HashMap<&str, &str> = p.rows.iter().map(|r| (r.subject.as_str(), r.source.as_str())).collect();
+    assert_eq!(src["on main"], "HEAD");
+    assert_eq!(src["on w1"], "refs/heads/w1");
+    assert_eq!(p.rows.len(), 3);
+}

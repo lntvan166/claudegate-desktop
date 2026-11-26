@@ -5,7 +5,11 @@ const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const C: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
 fn rec(sha: &str, ct: &str, an: &str, ae: &str, s: &str, p: &str) -> String {
-    format!("{sha}\0{ct}\0{an}\0{ae}\0{s}\0{p}\x1e")
+    rec_src(sha, ct, an, ae, s, p, "HEAD")
+}
+
+fn rec_src(sha: &str, ct: &str, an: &str, ae: &str, s: &str, p: &str, src: &str) -> String {
+    format!("{sha}\0{ct}\0{an}\0{ae}\0{s}\0{p}\0{src}\x1e")
 }
 
 #[test]
@@ -26,6 +30,16 @@ fn parses_root_and_merge_parents() {
     let c = parse_log(&out);
     assert!(c[0].parents.is_empty());
     assert_eq!(c[1].parents, vec![A.to_string(), B.to_string()]);
+}
+
+#[test]
+fn parses_source() {
+    let out = format!("{}\n{}\n{}\n", rec(A, "3", "a", "e", "x", ""), rec_src(B, "2", "a", "e", "y", "", "refs/heads/feature/x"), rec_src(C, "1", "a", "e", "z", "", A));
+    let c = parse_log(&out);
+    let src: Vec<&str> = c.iter().map(|c| c.source.as_str()).collect();
+    assert_eq!(src, vec!["HEAD", "refs/heads/feature/x", A]);
+    // The six-field records of the old format are not commits.
+    assert!(parse_log(&format!("{A}\0001\0a\0e\0s\0\x1e")).is_empty());
 }
 
 #[test]
@@ -130,7 +144,7 @@ fn brace_rename_empty_sides() {
 #[test]
 fn log_without_trailing_rs_and_crlf() {
     let full = rec(A, "1", "a", "e", "ok", "");
-    let cut = format!("{}{B}\0{}\0a\0e\0s\0", full, 2);
+    let cut = format!("{}{B}\0{}\0a\0e\0s\0\0HEAD", full, 2);
     assert_eq!(parse_log(&cut).len(), 1);
     let f = parse_changes("M\ta.rs\r\nA\tb.rs\r\n", "1\t2\ta.rs\r\n3\t4\tb.rs\r\n");
     assert_eq!(f.len(), 2);
