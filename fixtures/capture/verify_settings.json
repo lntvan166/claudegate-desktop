@@ -110,6 +110,14 @@
       "expected": null
     },
     {
+      "name": "audit: null entries beside ours still verify",
+      "after": "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"x\",\"hooks\":[null,{\"command\":\"/home/u/.claudegate/hook.sh\"}]}],\"PostToolUse\":[null,{\"hooks\":[null,{\"command\":\"/home/u/.claudegate/audit.sh\"}]}],\"PostToolUseFailure\":[{\"hooks\":[1,{\"command\":\"/home/u/.claudegate/audit.sh\"}]}]}}",
+      "previous": "",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "auditCommand": "/home/u/.claudegate/audit.sh",
+      "expected": null
+    },
+    {
       "name": "audit: matcher does not matter, only the command",
       "after": "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"^(Write|Edit|MultiEdit|Bash)$\",\"hooks\":[{\"type\":\"command\",\"command\":\"/home/u/.claudegate/hook.sh\"}]}],\"PostToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"/home/u/.claudegate/audit.sh\"}]}],\"PostToolUseFailure\":[{\"matcher\":\"x\",\"hooks\":[{\"type\":\"command\",\"command\":\"/home/u/.claudegate/audit.sh\"}]}]}}",
       "previous": "",
