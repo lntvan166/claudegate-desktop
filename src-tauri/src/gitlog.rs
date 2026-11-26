@@ -595,6 +595,11 @@ impl GitLog {
             .collect()
     }
 
+    /// The cached repository ids, in discovery order; `None` before the first discovery.
+    pub fn known_ids(&self) -> Option<Vec<String>> {
+        lock(&self.repos).as_ref().map(|(_, l)| l.iter().map(|r| r.id.clone()).collect())
+    }
+
     /// Whether a repository list was ever loaded (an empty one counts).
     pub fn loaded(&self) -> bool {
         lock(&self.repos).is_some()

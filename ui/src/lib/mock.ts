@@ -18,6 +18,7 @@ import type {
   SettingKey,
   SettingsView,
 } from "./api";
+import { DEFAULT_GITLOG_CONFIG, SCAN_DEPTH_MAX, type GitLogConfig, type RepoView } from "../gitlog/repos";
 import { DEFAULT_PROTECTED, globMatcher, type ExcludeOwner, type Resolved } from "./settings";
 
 const SHOP = "/home/dev/src/shop-api";
@@ -530,7 +531,143 @@ const deleted = new Set<string>();
   },
 };
 
+// ---- Git log -------------------------------------------------------------------------------
+// The workspace's repositories as gitlog.rs `gitlog_repos` reports them: one per git common dir,
+// a worktree folded into its repository, ahead/behind from the last fetch (null: no upstream).
+const head = (n: number) => n.toString(16).padStart(40, "0");
+function mockRepo(path: string, color: number, ahead: number | null, behind: number | null, worktrees: { path: string; branch: string | null }[] = []): RepoView {
+  return {
+    id: `${path}/.git`,
+    name: path.split("/").pop()!,
+    color,
+    checkouts: [
+      { path, head: head(color + 1), branch: "main", isMain: true },
+      ...worktrees.map((w, i) => ({ path: w.path, head: head(100 + i), branch: w.branch, isMain: false })),
+    ],
+    ahead,
+    behind,
+  };
+}
+const gitRepos: RepoView[] = [
+  mockRepo(SHOP, 0, 1, 2, [{ path: WT, branch: "checkout-v2" }]),
+  mockRepo(UMBRELLA, 1, 0, 0),
+  mockRepo(UMB_NESTED, 2, 0, 5),
+  mockRepo(`${UMBRELLA}/umbrella-payments`, 3, 3, 0),
+  mockRepo(`${UMBRELLA}/umbrella-web`, 4, null, null, [
+    { path: `${UMBRELLA}/umbrella-web/.worktrees/dark-mode`, branch: "dark-mode" },
+    { path: `${UMBRELLA}/umbrella-web/.worktrees/hotfix`, branch: null },
+  ]),
+  mockRepo(`${UMBRELLA}/svc-lib`, 5, 0, 0),
+  mockRepo(NOTES, 6, 0, 0),
+  mockRepo(BILLING, 7, null, null),
+  mockRepo(TIDE, 8, 2, 1),
+];
+/** `gitLog` in config.json. `?gitlog=profiles` starts with a couple of profiles, one naming a gone repo. */
+let gitLog: GitLogConfig = structuredClone(DEFAULT_GITLOG_CONFIG);
+if (new URLSearchParams(location.search).get("gitlog") === "profiles") {
+  gitLog.profiles = {
+    Checkout: [`${SHOP}/.git`, `${UMB_NESTED}/.git`, `${UMBRELLA}/umbrella-payments/.git`],
+    "Front end": [`${UMBRELLA}/umbrella-web/.git`, "/home/dev/src/retired-site/.git"],
+  };
+  gitLog.ticked = gitLog.profiles.Checkout.slice();
+}
+const gl = () => delay(gitLog);
+function glTicked(): string[] {
+  return gitLog.ticked ?? gitRepos.map((r) => r.id);
+}
+function glName(n: string): string {
+  const t = n.trim();
+  if (!t) throw "A profile needs a name.";
+  return t;
+}
+
+const gitlogMock: Pick<
+  Api,
+  | "gitlogRepos"
+  | "gitlogConfig"
+  | "gitlogTick"
+  | "gitlogUntick"
+  | "gitlogShowAll"
+  | "gitlogShowOnly"
+  | "gitlogProfileApply"
+  | "gitlogProfileSave"
+  | "gitlogProfileRename"
+  | "gitlogProfileDelete"
+  | "gitlogScanDepth"
+  | "gitlogExclude"
+  | "gitlogInclude"
+  | "gitlogPane"
+  | "gitlogLastFilter"
+> = {
+  gitlogRepos: async () => {
+    await new Promise((r) => setTimeout(r, 300));
+    return structuredClone(gitRepos.filter((r) => !gitLog.excludeRepos.includes(r.name)));
+  },
+  gitlogConfig: gl,
+  gitlogTick: (ids) => {
+    if (gitLog.ticked) gitLog = { ...gitLog, ticked: [...gitLog.ticked, ...ids.filter((i) => !gitLog.ticked!.includes(i))] };
+    return gl();
+  },
+  gitlogUntick: (ids) => {
+    gitLog = { ...gitLog, ticked: glTicked().filter((i) => !ids.includes(i)) };
+    return gl();
+  },
+  gitlogShowAll: () => {
+    gitLog = { ...gitLog, ticked: null };
+    return gl();
+  },
+  gitlogShowOnly: (ids) => {
+    gitLog = { ...gitLog, ticked: [...ids] };
+    return gl();
+  },
+  gitlogProfileApply: async (name) => {
+    const p = gitLog.profiles[name];
+    if (!p) throw `There is no profile named ${name}.`;
+    gitLog = { ...gitLog, ticked: [...p] };
+    return gl();
+  },
+  gitlogProfileSave: async (name) => {
+    gitLog = { ...gitLog, profiles: { ...gitLog.profiles, [glName(name)]: glTicked() } };
+    return gl();
+  },
+  gitlogProfileRename: async (from, to) => {
+    const t = glName(to);
+    if (t !== from && gitLog.profiles[t]) throw `A profile named ${t} already exists.`;
+    const { [from]: ids, ...rest } = gitLog.profiles;
+    if (!ids) throw `There is no profile named ${from}.`;
+    gitLog = { ...gitLog, profiles: { ...rest, [t]: ids } };
+    return gl();
+  },
+  gitlogProfileDelete: (name) => {
+    const { [name]: _gone, ...rest } = gitLog.profiles;
+    gitLog = { ...gitLog, profiles: rest };
+    return gl();
+  },
+  gitlogScanDepth: async (depth) => {
+    if (depth < 0 || depth > SCAN_DEPTH_MAX) throw `The scan depth must be 0 to ${SCAN_DEPTH_MAX}.`;
+    gitLog = { ...gitLog, scanDepth: depth };
+    return gl();
+  },
+  gitlogExclude: (glob) => {
+    if (!gitLog.excludeRepos.includes(glob)) gitLog = { ...gitLog, excludeRepos: [...gitLog.excludeRepos, glob] };
+    return gl();
+  },
+  gitlogInclude: (glob) => {
+    gitLog = { ...gitLog, excludeRepos: gitLog.excludeRepos.filter((g) => g !== glob) };
+    return gl();
+  },
+  gitlogPane: (pane, width) => {
+    gitLog = { ...gitLog, panes: { ...gitLog.panes, [pane]: Math.round(width) } };
+    return gl();
+  },
+  gitlogLastFilter: (filter) => {
+    gitLog = { ...gitLog, lastFilter: filter };
+    return gl();
+  },
+};
+
 export const mockApi: Api = {
+  ...gitlogMock,
   listProjects: () =>
     delay<ProjectSummary[]>(
       rootsList.map((root) => {

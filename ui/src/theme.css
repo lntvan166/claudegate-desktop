@@ -76,6 +76,20 @@
   --danger-hover: #b23021;
   --on-danger: #ffffff;
   --scrollbar: rgba(108, 102, 75, 0.3);
+
+  /* Git log repo chips: Alucard's accents, darkened where needed to read 4.5:1 on the surface. */
+  --repo-0: #644ac9; /* purple */
+  --repo-1: #a3144d; /* pink */
+  --repo-2: #b8321f; /* red */
+  --repo-3: #a34d14; /* orange */
+  --repo-4: #846e15; /* yellow */
+  --repo-5: #4f6d00; /* lime */
+  --repo-6: #14710a; /* green */
+  --repo-7: #00715f; /* teal */
+  --repo-8: #036a96; /* cyan */
+  --repo-9: #2f5bc4; /* blue */
+  --repo-10: #8a3fb0; /* lavender */
+  --repo-11: #9c3f5a; /* rose */
   /* Only what floats (menus, the shortcut sheet) casts a shadow. */
   --menu-shadow: 0 10px 28px rgba(31, 31, 31, 0.12), 0 2px 6px rgba(31, 31, 31, 0.06);
 }
@@ -115,6 +129,20 @@
     --danger-hover: #ff6e6e;
     --on-danger: #21222c;
     --scrollbar: rgba(98, 114, 164, 0.45);
+
+    /* Git log repo chips: Dracula's accents and their lighter shades, 4.5:1 or more on the surface. */
+    --repo-0: #bd93f9; /* purple */
+    --repo-1: #ff79c6; /* pink */
+    --repo-2: #ff6e6e; /* red */
+    --repo-3: #ffb86c; /* orange */
+    --repo-4: #f1fa8c; /* yellow */
+    --repo-5: #c3f07a; /* lime */
+    --repo-6: #50fa7b; /* green */
+    --repo-7: #5ee6c2; /* teal */
+    --repo-8: #8be9fd; /* cyan */
+    --repo-9: #82aaff; /* blue */
+    --repo-10: #e0a3ff; /* lavender */
+    --repo-11: #ffa3b1; /* rose */
     --menu-shadow: 0 12px 32px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
   }
 }
