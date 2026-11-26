@@ -75,7 +75,9 @@ export const UNSUPPORTED_TEXT = "Setup isn't supported on this platform yet.";
 export function chipLabel(v: CaptureView | null, failed = false, readOnly = false): string {
   if (!v) return failed ? "Capture: couldn't check" : "Capture: checking…";
   if (v.status === "not-set-up" && (readOnly || !v.setupSupported)) return "Not capturing";
-  return LABELS[v.status] ?? "Capture: unknown";
+  const label = LABELS[v.status] ?? "Capture: unknown";
+  // The Update hook button lives in the popover; say so on the chip, or nobody finds it.
+  return hookOutdated(v) && !readOnly ? `${label} · update hook` : label;
 }
 
 export function capturing(v: CaptureView | null): boolean {

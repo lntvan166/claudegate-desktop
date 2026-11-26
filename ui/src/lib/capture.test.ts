@@ -36,6 +36,10 @@ const v = (status: CaptureView["status"], extra: Partial<CaptureView> = {}): Cap
 describe("chipLabel", () => {
   it("names every state", () => {
     expect(chipLabel(v("vscode"))).toBe("Capturing (VS Code)");
+    const stale = { hook: { state: "different" as const, installed: null, bundled: "v1.17.0" } };
+    expect(chipLabel(v("vscode", stale))).toBe("Capturing (VS Code) · update hook");
+    expect(chipLabel(v("vscode", stale), false, true)).toBe("Capturing (VS Code)");
+    expect(chipLabel(v("app", { hook: { state: "newer" as const, installed: "v9.0.0", bundled: "v1.17.0" } }))).toBe("Capturing (this app)");
     expect(chipLabel(v("app", { version: "v1.16.1" }))).toBe("Capturing (this app)");
     expect(chipLabel(v("not-set-up"))).toBe("Not capturing — Set up");
     expect(chipLabel(v("not-set-up", { setupSupported: false }))).toBe("Not capturing");
