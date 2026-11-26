@@ -597,10 +597,11 @@ export const mockApi: Api = {
     joinWorkspace(root);
     return delay(config);
   },
-  removeFromWorkspace: async (root, stopCapture) => {
+  removeFromWorkspace: async (root, nested, stopCapture) => {
     // commands.rs: the Remove flow first; when it fails the workspace is left alone.
     const removed = stopCapture ? await mockApi.removeProject(root) : null;
-    config = { ...config, workspace: (config.workspace ?? []).filter((r) => r !== root && !r.startsWith(`${root}/`)) };
+    const gone = [root, ...nested];
+    config = { ...config, workspace: (config.workspace ?? []).filter((r) => !gone.includes(r)) };
     return { config, removed };
   },
   getSettings: (root) => delay(mockSettings(root)),

@@ -727,14 +727,24 @@
    * selection moves to the next project on the rail, or the one before, or nothing.
    */
   async function removeFromWorkspaceAt(root: string, stopCapture: boolean) {
-    const name = projects.find((p) => p.root === root)?.name ?? basename(root);
+    const project = projects.find((p) => p.root === root);
+    const name = project?.name ?? basename(root);
     const rail = split.workspace;
     const i = rail.findIndex((p) => p.root === root);
     const next = rail[i + 1] ?? rail[i - 1] ?? null;
     try {
-      // One root, remove-only: the UI's copy of the list may be stale.
-      const r = await removeFromWorkspace(root, stopCapture);
+      // One root (and the nested roots it folds), remove-only: the UI's copy of the list may be stale.
+      const r = await removeFromWorkspace(root, project?.nested ?? [], stopCapture);
       config = r.config;
+      if (r.workspaceError) {
+        // Capture did stop; only taking it off the rail failed. Say exactly that.
+        await loadProjects();
+        show({
+          text: `${removedMessage(name, r.removed?.unregistered ?? false).replace(/\.?$/, ".")} It stays on your workspace, which couldn't be saved: ${r.workspaceError}`,
+          tone: "warn",
+        });
+        return;
+      }
       if (selected === root) {
         if (next) select(next.root);
         else {

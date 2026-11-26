@@ -99,7 +99,12 @@ export type AddedProject = { root: string; already: boolean };
 /** core `projects::Removed`: `unregistered` false when VS Code also uses the folder (capture stays on). */
 export type RemovedProject = { root: string; unregistered: boolean };
 /** commands.rs `WorkspaceRemoved`: the config now, and the capture side when it was stopped too. */
-export type WorkspaceRemoved = { config: EditorConfig; removed: RemovedProject | null };
+export type WorkspaceRemoved = {
+  config: EditorConfig;
+  removed: RemovedProject | null;
+  /** Capture was stopped, but the project could not be taken off the rail: why. */
+  workspaceError?: string | null;
+};
 
 export interface Api {
   listProjects(): Promise<ProjectSummary[]>;
@@ -127,10 +132,10 @@ export interface Api {
   /** Adds one known project to the workspace in config.json (add-only; never workspace-roots.json). */
   addToWorkspace(root: string): Promise<EditorConfig>;
   /**
-   * Takes one project off the rail (remove-only, view only). `stopCapture` (an app-added root)
-   * first runs the Remove flow; when that fails nothing changes.
+   * Takes one project off the rail, with the nested roots it folds (remove-only, view only).
+   * `stopCapture` (an app-added root) first runs the Remove flow; when that fails nothing changes.
    */
-  removeFromWorkspace(root: string, stopCapture: boolean): Promise<WorkspaceRemoved>;
+  removeFromWorkspace(root: string, nested: string[], stopCapture: boolean): Promise<WorkspaceRemoved>;
   /** Every setting as it resolves for `root` (app, then the extension, then the default). */
   getSettings(root: string | null): Promise<SettingsView>;
   /** One app override; `null` drops it. Resolves to the settings as they now stand for `root`. */
@@ -187,7 +192,7 @@ const tauriApi: Api = {
   decide: (root, action, target) => invoke<DecideReport>("decide", { root, action, target }),
   setReadOnly: (on) => invoke<EditorConfig>("set_read_only", { on }),
   addToWorkspace: (root) => invoke<EditorConfig>("add_to_workspace_cmd", { root }),
-  removeFromWorkspace: (root, stopCapture) => invoke<WorkspaceRemoved>("remove_from_workspace", { root, stopCapture }),
+  removeFromWorkspace: (root, nested, stopCapture) => invoke<WorkspaceRemoved>("remove_from_workspace", { root, nested, stopCapture }),
   getSettings: (root) => invoke<SettingsView>("get_settings", { root }),
   setSetting: (key, value, root) => invoke<SettingsView>("set_setting", { key, value, root }),
   setHookLog: (on, root) => invoke<SettingsView>("set_hook_log", { on, root }),
@@ -237,7 +242,8 @@ export const decide = async (root: string, action: DecideAction, target: DecideT
   (await api()).decide(root, action, target);
 export const setReadOnly = async (on: boolean) => (await api()).setReadOnly(on);
 export const addToWorkspace = async (root: string) => (await api()).addToWorkspace(root);
-export const removeFromWorkspace = async (root: string, stopCapture: boolean) => (await api()).removeFromWorkspace(root, stopCapture);
+export const removeFromWorkspace = async (root: string, nested: string[], stopCapture: boolean) =>
+  (await api()).removeFromWorkspace(root, nested, stopCapture);
 export const getSettings = async (root: string | null) => (await api()).getSettings(root);
 export const setSetting = async (key: SettingKey, value: unknown, root: string | null) =>
   (await api()).setSetting(key, value, root);

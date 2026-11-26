@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import type { ProjectSummary } from "../lib/api";
   import { initials } from "../lib/rows";
   import { elsewhereLine, pickerRows, shortPath } from "../lib/workspace";
@@ -79,9 +80,41 @@
   let confirmInVsCode = $state<boolean | null>(null);
 
   const isAppAdded = (root: string) => appRoots.includes(root);
-  const rowButton = (root: string) => document.querySelector<HTMLButtonElement>(`.project[data-root="${CSS.escape(root)}"]`);
+  /** A project's row, or its chip on the collapsed rail. */
+  const rowButton = (root: string) =>
+    document.querySelector<HTMLButtonElement>(`.project[data-root="${CSS.escape(root)}"], .chip[data-root="${CSS.escape(root)}"]`);
+  let addButtonEl = $state<HTMLButtonElement | null>(null);
+  let addChipEl = $state<HTMLButtonElement | null>(null);
+  /** The picker expanded a collapsed rail: closing it collapses the rail again. */
+  let expandedForPicker = false;
+  /** Likewise for a Remove confirm asked from a collapsed chip (the confirm needs the full rail). */
+  let expandedForConfirm = false;
+
+  /** Ends a Remove confirm: collapses the rail again if the confirm expanded it. */
+  function endConfirm() {
+    confirming = null;
+    if (expandedForConfirm) {
+      expandedForConfirm = false;
+      if (!collapsed) ontoggle();
+    }
+  }
+
+  function cancelConfirm(root: string) {
+    endConfirm();
+    void focusAfter(root);
+  }
+
+  /** Focus after the DOM settles: `root`'s row, else the add button (or the collapsed add chip). */
+  async function focusAfter(root: string | null) {
+    await tick();
+    requestAnimationFrame(() => {
+      const row = root ? rowButton(root) : null;
+      (row ?? (collapsed ? addChipEl : addButtonEl))?.focus();
+    });
+  }
 
   function openPicker() {
+    expandedForPicker = collapsed;
     if (collapsed) ontoggle();
     picking = true;
     query = "";
@@ -90,12 +123,18 @@
     queueMicrotask(() => searchInput?.focus());
   }
 
-  function closePicker() {
+  /** Closes the picker; focus goes to `focusRoot`'s row, else back to what opened it. */
+  function closePicker(focusRoot: string | null = null) {
     picking = false;
     adding = false;
     addError = null;
     addPath = "";
     pickError = null;
+    if (expandedForPicker) {
+      expandedForPicker = false;
+      if (!collapsed) ontoggle();
+    }
+    void focusAfter(focusRoot);
   }
 
   async function addKnown(root: string) {
@@ -105,7 +144,7 @@
     try {
       const err = await onaddknown(root);
       if (err) pickError = err;
-      else closePicker();
+      else closePicker(root);
     } finally {
       busy = false;
     }
@@ -139,7 +178,9 @@
       if (r) void addKnown(r.root);
       return;
     }
-    if (!inSearch && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // Space (and Enter) on a button presses it; only other typing goes to the search box.
+    const onButton = e.target instanceof HTMLButtonElement;
+    if (!inSearch && !onButton && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       query += e.key;
       searchInput?.focus();
@@ -162,7 +203,9 @@
         adding = true;
         return;
       }
-      closePicker();
+      // The new project is the selected one now.
+      await tick();
+      closePicker(selected);
     } finally {
       busy = false;
     }
@@ -193,7 +236,7 @@
   }
 
   function openMenu(root: string, x: number, y: number) {
-    confirming = null;
+    if (confirming) endConfirm();
     menu = { root, x, y };
   }
 
@@ -206,8 +249,12 @@
   /** Remove from workspace: at once for a project VS Code registered, after a confirm for one the app added. */
   function askRemove(root: string) {
     if (!isAppAdded(root)) {
-      void onremove(root, false);
+      void removeAndRefocus(root, false);
       return;
+    }
+    if (collapsed) {
+      expandedForConfirm = true;
+      ontoggle();
     }
     confirming = root;
     stopCapture = false;
@@ -228,8 +275,17 @@
 
   async function confirmRemove(root: string) {
     const stop = stopCapture && !readOnly;
-    confirming = null;
+    endConfirm();
+    await removeAndRefocus(root, stop);
+  }
+
+  /** Removes `root` from the workspace, then focuses the next row (or the one before, or the add button). */
+  async function removeAndRefocus(root: string, stop: boolean) {
+    const i = projects.findIndex((p) => p.root === root);
+    const next = projects[i + 1] ?? projects[i - 1] ?? null;
     await onremove(root, stop);
+    const still = projects.some((p) => p.root === root);
+    void focusAfter(still ? root : (next?.root ?? null));
   }
 
   /** Delete removes the focused project from the workspace; the menu key or Shift+F10 opens its menu. */
@@ -242,7 +298,7 @@
       return;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.key === "Delete" || e.key === "Backspace") {
+    if (e.key === "Delete") {
       e.preventDefault();
       e.stopPropagation();
       askRemove(root);
@@ -272,8 +328,7 @@
     onkeydown={(e) => {
       if (e.key === "Escape") {
         e.stopPropagation();
-        confirming = null;
-        queueMicrotask(() => rowButton(p.root)?.focus());
+        cancelConfirm(p.root);
       }
     }}
   >
@@ -300,10 +355,7 @@
       <button
         class="btn"
         bind:this={cancelButton}
-        onclick={() => {
-          confirming = null;
-          queueMicrotask(() => rowButton(p.root)?.focus());
-        }}>Cancel</button
+        onclick={() => cancelConfirm(p.root)}>Cancel</button
       >
       <button class="btn danger" disabled={stopCapture && !readOnly && confirmInVsCode === null} onclick={() => void confirmRemove(p.root)}>
         Remove
@@ -322,7 +374,7 @@
 {/snippet}
 
 {#snippet addButton()}
-  <button class="add" disabled={busy} aria-haspopup="dialog" aria-expanded={picking} onclick={openPicker}>
+  <button class="add" bind:this={addButtonEl} disabled={busy} aria-haspopup="dialog" aria-expanded={picking} onclick={openPicker}>
     <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
       <path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
     </svg>
@@ -362,10 +414,18 @@
           class="chip"
           class:active={p.root === selected}
           class:missing={p.missing}
+          data-root={p.root}
           title={p.name}
           aria-label={railName(p)}
           aria-current={p.root === selected ? "true" : undefined}
+          aria-haspopup="menu"
+          aria-keyshortcuts="Delete Shift+F10"
           onclick={() => onselect(p.root)}
+          oncontextmenu={(e) => {
+            e.preventDefault();
+            openMenu(p.root, e.clientX, e.clientY);
+          }}
+          onkeydown={(e) => onProjectKey(e, p.root)}
         >
           <span class="initials" aria-hidden="true">{initials(p.name)}</span>
           {#if p.pending > 0}<span class="badge num" aria-hidden="true">{p.pending > 99 ? "99+" : p.pending}</span>{/if}
@@ -373,6 +433,7 @@
       {/each}
       <button
         class="chip add-chip"
+        bind:this={addChipEl}
         title={elsewhereText ? `Add to workspace · ${elsewhereText}` : "Add to workspace"}
         aria-label={elsewhereText ? `Add to workspace, ${elsewhereText}` : "Add to workspace"}
         onclick={openPicker}
@@ -460,7 +521,7 @@
             aria-activedescendant={rows.length > 0 && !adding ? `known-${active}` : undefined}
             aria-label="Search known projects"
           />
-          <button class="close" aria-label="Close" title="Close (Esc)" onclick={closePicker}>
+          <button class="close" aria-label="Close" title="Close (Esc)" onclick={() => closePicker()}>
             <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
               <path d="M4.5 4.5 11.5 11.5M11.5 4.5 4.5 11.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
             </svg>
@@ -951,6 +1012,7 @@
   }
   .picker-foot {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 4px;
     padding-top: 6px;
