@@ -1,5 +1,6 @@
 // Dev-only fixtures for previewing the UI in a plain browser (`npm run dev`, no Tauri).
 // Loaded through a DEV-guarded dynamic import in api.ts, so it never ships.
+import type { AuditView } from "./audit";
 import type {
   Api,
   CaptureView,
@@ -530,7 +531,32 @@ const deleted = new Set<string>();
   },
 };
 
+/** `?audit=some`: a few files Claude changed that were not captured (and a few that may be the user's). */
+const AUDIT_STATE = typeof location === "undefined" ? null : new URLSearchParams(location.search).get("audit");
+const auditAgo = (min: number) => Date.now() - min * 60_000;
+const auditDismissed = new Set<string>();
+function mockAudit(root: string): AuditView {
+  const stats = { calls: 212, captured: 148, missed: 0, uncertain: 0, phantom: 0, covered: 31, implicit: 0, outOfScope: 4, truncated: 0 };
+  if (AUDIT_STATE !== "some" || root !== SHOP) return { missed: [], uncertain: [], stats };
+  const it = (path: string, min: number, commandHead: string, r = SHOP) => ({ path: `${r}/${path}`, atMs: auditAgo(min), commandHead, root: r });
+  const missed = [
+    it("src/x.go", 4, "sed -i s/old/new/"),
+    it("src/y.go", 4, "sed -i s/old/new/"),
+    it("scripts/rotate.sh", 38, "python3 - <<EOF"),
+    it("web/app.tsx", 190, "perl -pi -e", WT),
+  ].filter((i) => !auditDismissed.has(i.path));
+  const uncertain = [it("notes/todo.md", 12, "go test ./..."), it("tmp/out.json", 95, "make lint")].filter((i) => !auditDismissed.has(i.path));
+  return { missed, uncertain, stats: { ...stats, missed: 4, uncertain: 2, phantom: 3, implicit: 5 } };
+}
+
 export const mockApi: Api = {
+  getAudit: (root) => delay(mockAudit(root)),
+  dismissAudit: async (paths) => {
+    await new Promise((r) => setTimeout(r, 250));
+    if (new URLSearchParams(location.search).get("dismiss") === "fail") throw "cannot write config.json: permission denied";
+    for (const p of paths) auditDismissed.add(p);
+  },
+  onAuditChanged: async () => () => {},
   listProjects: () =>
     delay<ProjectSummary[]>(
       rootsList.map((root) => {

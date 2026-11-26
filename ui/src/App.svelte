@@ -8,6 +8,8 @@
   import ResultBar from "./components/ResultBar.svelte";
   import Settings from "./components/Settings.svelte";
   import CaptureChip from "./components/CaptureChip.svelte";
+  import NotCaptured from "./components/NotCaptured.svelte";
+  import { AuditRefresher, EMPTY_AUDIT, restorePaths, withoutPaths, type AuditItem, type AuditView } from "./lib/audit";
   import UpdateChip from "./components/UpdateChip.svelte";
   import ContextMenu from "./components/ContextMenu.svelte";
   import ReviewTabs from "./components/ReviewTabs.svelte";
@@ -32,6 +34,9 @@
     listProjects,
     onChanged,
     openInEditor,
+    getAudit,
+    dismissAudit,
+    onAuditChanged,
     setEditor,
     setPendingCount,
     addToWorkspace,
@@ -354,6 +359,55 @@
   // Responses can arrive out of order when events land in quick succession.
   let viewSeq = 0;
 
+  /** The selected project's capture audit: what Claude changed that the hook did not capture. */
+  let audit = $state<AuditView | null>(null);
+  /** Bumped by every optimistic dismiss, so a read that began before it cannot bring the rows back. */
+  let auditGen = 0;
+  const auditScopeRoots = $derived(view?.scopes.map((s) => s.root) ?? []);
+  /**
+   * Reads the audit of the selected project only, one read at a time and at most one every 2 s
+   * while files keep changing (the audit file changes on every Bash call; a read parses up to
+   * 10 MB per scope). It never polls: it runs on a project change, a session change or an
+   * audit-file event.
+   */
+  const auditRefresher = new AuditRefresher(async () => {
+    const root = selected;
+    if (!root) return;
+    const gen = auditGen;
+    try {
+      const a = await getAudit(root);
+      if (root === selected && gen === auditGen) audit = a;
+    } catch {
+      // Best effort: the review itself must not depend on the audit.
+    }
+  });
+  const auditShown = $derived(audit ?? EMPTY_AUDIT);
+
+  async function dismissAuditPaths(paths: string[]) {
+    const before = audit;
+    if (!before) return;
+    auditGen++;
+    audit = withoutPaths(before, paths);
+    try {
+      await dismissAudit(paths);
+    } catch (e) {
+      if (audit) audit = restorePaths(audit, before, paths);
+      show({ text: `Couldn't dismiss: ${e}`, tone: "error" });
+    }
+    auditGen++;
+    auditRefresher.request();
+  }
+
+  async function openAudit(item: AuditItem) {
+    openError = null;
+    try {
+      await openInEditor(item.path, 1, 1, null);
+      announce(openedText(item.path, 1, config.editor));
+    } catch (e) {
+      openError = String(e);
+    }
+  }
+
   /** Re-fetches a project when one of its "waiting for write" rows may have settled. */
   const rechecks = new Rechecks((root) => refresh(root));
 
@@ -460,6 +514,8 @@
       selected = root;
       filterText = "";
       rawView = null;
+      audit = null;
+      auditRefresher.request(true);
       selectedRow = null;
       result = null;
       settingsBlocked = null;
@@ -1188,6 +1244,10 @@
         return;
       }
       for (const root of roots) refresh(root);
+      if (selected && roots.includes(selected)) auditRefresher.request();
+    });
+    const offAudit = onAuditChanged(({ roots }) => {
+      if (selected && roots.includes(selected)) auditRefresher.request();
     });
 
     // A launch path: asked for once (the first event can fire before this listener exists), then
@@ -1207,6 +1267,8 @@
       window.removeEventListener("keydown", onKey);
       rechecks.clear();
       void off.then((f) => f());
+      void offAudit.then((f) => f());
+      auditRefresher.stop();
     };
   });
 </script>
@@ -1388,6 +1450,9 @@
           <h1>{current.name}</h1>
           <p class="finding" title={finding?.detail ?? finding?.text}>{finding?.text ?? "\u00a0"}</p>
         </div>
+        {#if audit && view}
+          <NotCaptured audit={auditShown} projectRoot={view.root} scopeRoots={auditScopeRoots} onopen={(i) => void openAudit(i)} ondismiss={(p) => void dismissAuditPaths(p)} />
+        {/if}
         <ReviewTabs bind:this={reviewTabs} bind:filter={filterText} shown={shownPendingRows} total={counts.pending} {tab} {counts} {mode} ontab={setTab} onmode={setMode} onleave={leaveFilter} />
         {#each troubled as s (s.root)}
           <div class="notice error">
@@ -1492,6 +1557,7 @@
     <Settings
       {settings}
       {config}
+      audit={audit?.stats ?? null}
       project={current ? { root: current.root, name: current.name } : null}
       onset={changeSetting}
       onhooklog={changeHookLog}

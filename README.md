@@ -74,6 +74,16 @@ The rail lists your workspace: the projects you added to it, in the order you ad
 
 **Upgrading.** The first time this version loads, it sets the workspace to every listed project that was not hidden, in the listed order, and drops `hiddenProjects` and `hiddenAt` from `config.json` in the same write.
 
+## Not captured
+
+When Claude changes a file through a shell command that ClaudeGate's hook did not record, the project header says so: "3 files Claude changed weren't captured". Click it to see each file, when it changed and the command that did it, then open it in your editor or dismiss it.
+
+There is no Reject for these. Nothing was saved before the change, so there is no baseline to go back to. Review them in your editor or with git.
+
+A second list, "Changed while Claude was running (may be yours)", holds files that changed during a Claude command but that the command may not have touched. It is collapsed by default.
+
+Changes that arrive from `git pull`, merges, code generators and archive extraction are never shown: they are not edits Claude made to your files. Dismissing a file hides it in this app only until it is missed again. Settings, under Capture, shows the last 7 days as captured, missed, phantom and implicit counts.
+
 ## Decisions
 
 Each action works on one file, one folder or the whole project, in the same way as the VS Code extension.

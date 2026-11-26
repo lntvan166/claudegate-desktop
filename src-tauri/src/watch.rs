@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 
 pub const COALESCE_MS: u64 = 150;
 pub const CHANGED_EVENT: &str = "claudegate://changed";
+/// A project's capture-audit file changed (`<home>/audit/<hash>.jsonl`). Separate from
+/// `CHANGED_EVENT` because it fires on every Bash call Claude makes and must not reload a project.
+pub const AUDIT_EVENT: &str = "claudegate://audit-changed";
 
 /// (project root, one of its scopes' session file). Rebuilt on every relist.
 pub type KnownMap = Arc<Mutex<Vec<(String, PathBuf)>>>;
@@ -78,6 +81,26 @@ pub fn affected(changed: &[PathBuf], known: &[(String, PathBuf)]) -> Affected {
     out
 }
 
+/// The project roots whose audit file is in `changed`. The audit file is named after the same
+/// hash as its scope's session file, so the stem finds the project in `known`. Rotation
+/// (`.jsonl.1`) counts; `.lock`/`.tmp` files and unknown hashes do not.
+pub fn audit_roots(changed: &[PathBuf], known: &[(String, PathBuf)]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for p in changed {
+        let Some(name) = p.file_name().and_then(|n| n.to_str()) else { continue };
+        if is_noise(name) || !p.parent().and_then(|d| d.file_name()).is_some_and(|d| d == "audit") {
+            continue;
+        }
+        let Some(stem) = name.strip_suffix(".jsonl.1").or_else(|| name.strip_suffix(".jsonl")) else { continue };
+        for (root, f) in known {
+            if f.file_stem().and_then(|s| s.to_str()) == Some(stem) && !out.contains(root) {
+                out.push(root.clone());
+            }
+        }
+    }
+    out
+}
+
 pub fn affected_roots(changed: &[PathBuf], known: &[(String, PathBuf)]) -> Vec<String> {
     affected(changed, known).roots
 }
@@ -133,7 +156,7 @@ pub fn payload_for(batch: &[PathBuf], known: &[(String, PathBuf)]) -> Option<Cha
     Some(ChangedPayload { roots: a.roots })
 }
 
-/// Directories we want watched right now: `home` and `home/sessions` when they exist, else the
+/// Directories we want watched right now: `home`, `home/sessions` and `home/audit` when they exist, else the
 /// nearest existing ancestor of `home` (so their creation is seen).
 pub fn desired_dirs(home: &Path, exists: &dyn Fn(&Path) -> bool) -> Vec<PathBuf> {
     if exists(home) {
@@ -141,6 +164,10 @@ pub fn desired_dirs(home: &Path, exists: &dyn Fn(&Path) -> bool) -> Vec<PathBuf>
         let s = home.join("sessions");
         if exists(&s) {
             v.push(s);
+        }
+        let a = home.join("audit");
+        if exists(&a) {
+            v.push(a);
         }
         return v;
     }
@@ -189,6 +216,7 @@ pub fn start(app: tauri::AppHandle, home: PathBuf, known: KnownMap) {
     let cg = home.clone();
     let cg2 = home.clone();
     let config = crate::config::config_path();
+    let app_audit = app.clone();
     run_with_hooks(
         home,
         known,
@@ -211,6 +239,10 @@ pub fn start(app: tauri::AppHandle, home: PathBuf, known: KnownMap) {
         move || {
             crate::commands::sync_excludes_with(&cg2, &config);
         },
+        // The audit file of a project changed: tell the window, which re-reads it (throttled there).
+        move |p| {
+            let _ = app_audit.emit(AUDIT_EVENT, p);
+        },
     );
 }
 
@@ -227,12 +259,13 @@ pub fn touches_excludes_or_config(batch: &[PathBuf], config: Option<&Path>) -> b
 /// The watcher loop behind `start`, with the emitter injected so it can be driven by a test.
 /// The thread lives as long as the process.
 pub fn run(home: PathBuf, known: KnownMap, emit: impl Fn(ChangedPayload) + Send + 'static) {
-    run_with_hooks(home, known, None, emit, || {}, || {});
+    run_with_hooks(home, known, None, emit, || {}, || {}, |_| {});
 }
 
 /// `run`, also calling (before the emit, once per settled batch; the 150 ms coalescing is the
 /// debounce) `on_roots` when the batch touched `workspace-roots.json`, and `on_sync` when it
-/// touched `excludes.json` or `config`, whose folder is watched too.
+/// touched `excludes.json` or `config`, whose folder is watched too, and `on_audit` with the
+/// project roots whose audit file changed (watch only; the audit files are never written).
 pub fn run_with_hooks(
     home: PathBuf,
     known: KnownMap,
@@ -240,6 +273,7 @@ pub fn run_with_hooks(
     emit: impl Fn(ChangedPayload) + Send + 'static,
     on_roots: impl Fn() + Send + 'static,
     on_sync: impl Fn() + Send + 'static,
+    on_audit: impl Fn(ChangedPayload) + Send + 'static,
 ) {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -283,6 +317,10 @@ pub fn run_with_hooks(
                     on_sync();
                 }
                 let snapshot = known.lock().map(|k| k.clone()).unwrap_or_default();
+                let ar = audit_roots(&batch, &snapshot);
+                if !ar.is_empty() {
+                    on_audit(ChangedPayload { roots: ar });
+                }
                 if let Some(p) = payload_for(&batch, &snapshot) {
                     emit(p);
                 }
@@ -385,6 +423,25 @@ mod tests {
         assert!(!touches_excludes_or_config(&[PathBuf::from("/h/excludes.json.0123456789ab.tmp")], Some(&cfg)));
         assert!(!touches_excludes_or_config(&[PathBuf::from("/u/.claudegate-desktop/.config.json.9.tmp")], Some(&cfg)));
         assert!(!touches_excludes_or_config(&[cfg.clone()], None));
+    }
+
+    #[test]
+    fn audit_files_map_to_their_project_and_never_relist() {
+        let k = known();
+        let a = [PathBuf::from("/h/audit/bbb.jsonl"), PathBuf::from("/h/audit/a-wt.jsonl.1"), PathBuf::from("/h/audit/zzz.jsonl")];
+        assert_eq!(audit_roots(&a, &k), vec!["/ws/b".to_string(), "/ws/a".to_string()]);
+        // an audit write is not a session change: it must not reload the project or relist
+        assert_eq!(payload_for(&a, &k), None);
+        assert!(audit_roots(&[PathBuf::from("/h/audit/bbb.jsonl.lock"), PathBuf::from("/h/sessions/bbb.jsonl")], &k).is_empty());
+    }
+
+    #[test]
+    fn audit_dir_is_watched_once_it_exists() {
+        let home = Path::new("/u/.claudegate");
+        let e = ex(&["/u", "/u/.claudegate", "/u/.claudegate/sessions", "/u/.claudegate/audit"]);
+        assert_eq!(desired_dirs(home, &e), vec![home.to_path_buf(), home.join("sessions"), home.join("audit")]);
+        // attaching it is no reason to relist the projects
+        assert!(!needs_relist(home, &[home.join("audit")]));
     }
 
     #[test]

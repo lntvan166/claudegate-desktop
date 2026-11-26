@@ -12,8 +12,10 @@ import type { CaptureView, HookReplacedView, HookView, InstallView } from "./cap
 import type { EditorConfig } from "./editors";
 import type { SettingKey, SettingsView } from "./settings";
 import type { UpdateView } from "./update";
+import type { AuditView } from "./audit";
+import { AUDIT_EVENT } from "./audit";
 
-export type { CaptureView, HookReplacedView, HookView, InstallView, UpdateView };
+export type { AuditView, CaptureView, HookReplacedView, HookView, InstallView, UpdateView };
 export type { DecideAction, DecideReport, DecideTarget, EditorConfig, SettingKey, SettingsView };
 
 export type ProjectSummary = {
@@ -174,6 +176,12 @@ export interface Api {
   setUpCapture(): Promise<InstallView>;
   /** Replaces ~/.claudegate/hook.py with the bundled hook, after a backup (after the UI's confirmation). */
   updateCaptureHook(): Promise<HookReplacedView>;
+  /** The files Claude changed in `root` that were not captured, and the 7-day capture stats. Read only. */
+  getAudit(root: string): Promise<AuditView>;
+  /** Hides these paths from the audit list in this app (config.json only; nothing else is touched). */
+  dismissAudit(paths: string[]): Promise<void>;
+  /** The audit file of a project changed: the roots to re-read. Fires on every Bash call Claude makes. */
+  onAuditChanged(handler: (p: ChangedPayload) => void): Promise<() => void>;
   /** A newer release on GitHub, or null. Read only. */
   checkUpdate(): Promise<UpdateView | null>;
   /** Download, verify, install and restart (macOS, AppImage only). */
@@ -208,6 +216,9 @@ const tauriApi: Api = {
   captureStatus: (recheck) => invoke<CaptureView>("capture_status", { recheck }),
   setUpCapture: () => invoke<InstallView>("set_up_capture"),
   updateCaptureHook: () => invoke<HookReplacedView>("update_capture_hook"),
+  getAudit: (root) => invoke<AuditView>("get_audit", { root }),
+  dismissAudit: (paths) => invoke<void>("dismiss_audit", { paths }),
+  onAuditChanged: (handler) => listen<ChangedPayload>(AUDIT_EVENT, (e) => handler(e.payload)),
   checkUpdate: () => invoke<UpdateView | null>("check_update"),
   installUpdate: () => invoke<void>("install_update"),
 };
@@ -265,3 +276,6 @@ export const setUpCapture = async () => (await api()).setUpCapture();
 export const updateCaptureHook = async () => (await api()).updateCaptureHook();
 export const checkUpdate = async () => (await api()).checkUpdate();
 export const installUpdate = async () => (await api()).installUpdate();
+export const getAudit = async (root: string) => (await api()).getAudit(root);
+export const dismissAudit = async (paths: string[]) => (await api()).dismissAudit(paths);
+export const onAuditChanged = async (handler: (p: ChangedPayload) => void) => (await api()).onAuditChanged(handler);
