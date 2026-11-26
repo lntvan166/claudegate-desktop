@@ -149,9 +149,10 @@ pub fn author_patterns(f: &Filter, me: Option<&str>) -> Vec<String> {
 
 /// Whether one repository is searched at all. Me alone needs that repository's
 /// `user.email`: without it, nothing there is "mine". With other authors picked too, the
-/// repository is still searched for them.
+/// repository is still searched for them. A chip that is blank once `author_patterns` cleans
+/// it (control characters only) is no author.
 pub fn repo_searched(f: &Filter, me: Option<&str>) -> bool {
-    !f.mine || f.authors.iter().any(|a| !a.trim().is_empty()) || me.is_some_and(|m| !m.trim().is_empty())
+    !f.mine || f.authors.iter().any(|a| !clean_text(a).trim().is_empty()) || me.is_some_and(|m| !clean_text(m).trim().is_empty())
 }
 
 /// `git log` argv for one page of one repository: `page` records starting `skip` records into

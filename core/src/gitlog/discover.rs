@@ -18,8 +18,9 @@ pub const DEFAULT_SCAN_DEPTH: usize = 2;
 const SKIP: &[&str] = &[".git", "node_modules", "vendor", "target"];
 
 /// Runs `git` with the given arguments in `cwd`; `None` on a spawn failure or non-zero exit.
-/// A trait so tests (and the app) can substitute the runner.
-pub trait GitRun {
+/// A trait so tests (and the app) can substitute the runner. `Sync`: discovery runs its calls
+/// from several threads at once.
+pub trait GitRun: Sync {
     fn run(&self, cwd: &Path, args: &[&str]) -> Option<String>;
 }
 
@@ -48,6 +49,34 @@ impl GitRun for RealGit {
         }
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
     }
+}
+
+/// How many threads `par_map` runs at most: the size of the app's git pool.
+pub const PARALLEL: usize = 16;
+
+/// `f` over `items` on at most `PARALLEL` threads; the results come back in input order.
+pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let n = items.len();
+    if n <= 1 {
+        return items.iter().map(&f).collect();
+    }
+    let next = AtomicUsize::new(0);
+    let slots: Vec<Mutex<Option<R>>> = (0..n).map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|s| {
+        for _ in 0..PARALLEL.min(n) {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= n {
+                    break;
+                }
+                let r = f(&items[i]);
+                *slots[i].lock().unwrap_or_else(|p| p.into_inner()) = Some(r);
+            });
+        }
+    });
+    slots.into_iter().map(|m| m.into_inner().unwrap_or_else(|p| p.into_inner()).expect("every slot filled")).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,7 +168,7 @@ fn parse_worktrees(out: &str, nul: bool) -> Vec<Checkout> {
     let sep = if nul { '\0' } else { '\n' };
     let mut res: Vec<Checkout> = Vec::new();
     let mut fields: Vec<&str> = Vec::new();
-    let mut flush = |fields: &mut Vec<&str>, res: &mut Vec<Checkout>| {
+    let flush = |fields: &mut Vec<&str>, res: &mut Vec<Checkout>| {
         let (mut path, mut head, mut branch) = (None, None, None);
         let (mut bare, mut prunable) = (false, false);
         for line in fields.drain(..) {
@@ -235,13 +264,21 @@ pub fn discover(roots: &[PathBuf], scan_depth: usize, exclude: &[String], git: &
         matchers.iter().any(|m| m.is_excluded(&s)) || (!is_root && name_res.iter().any(|re| re.is_match(&b)))
     };
 
-    let mut by_id: HashMap<PathBuf, Vec<Checkout>> = HashMap::new();
-    for dir in walk(roots, scan_depth, &excluded) {
-        let Some((common, top)) = identify(&dir, git) else { continue };
-        if by_id.contains_key(&common) {
-            continue;
+    // One `rev-parse` per candidate and one worktree listing per repository, each batch run in
+    // parallel; the first candidate (in walk order) of each common dir is the one listed.
+    let dirs = walk(roots, scan_depth, &excluded);
+    let ids = par_map(&dirs, |d| identify(d, git));
+    let mut firsts: Vec<(&PathBuf, PathBuf, PathBuf)> = Vec::new();
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for (dir, id) in dirs.iter().zip(ids) {
+        let Some((common, top)) = id else { continue };
+        if seen.insert(common.clone()) {
+            firsts.push((dir, common, top));
         }
-        let mut list = list_worktrees(&dir, git);
+    }
+    let lists = par_map(&firsts, |(dir, _, _)| list_worktrees(dir, git));
+    let mut by_id: HashMap<PathBuf, Vec<Checkout>> = HashMap::new();
+    for ((_, common, top), mut list) in firsts.into_iter().zip(lists) {
         // A submodule lists its gitdir (`<super>/.git/modules/x`) as the main entry: its working
         // tree is this candidate's toplevel.
         let top_s = top.to_string_lossy().into_owned();

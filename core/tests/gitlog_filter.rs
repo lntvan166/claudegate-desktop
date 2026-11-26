@@ -93,6 +93,9 @@ fn mine_without_email_skips_repo() {
     assert!(repo_searched(&me_only, Some("dana@example.com")));
     assert!(repo_searched(&Filter { mine: true, authors: s(&["rin"]), ..Default::default() }, None), "still searched for the other authors");
     assert!(repo_searched(&Filter::default(), None));
+    let ctl_only = Filter { mine: true, authors: s(&["\n\t\x01"]), ..Default::default() };
+    assert!(!repo_searched(&ctl_only, None), "a chip of control characters only is no author");
+    assert!(author_patterns(&ctl_only, None).is_empty());
 }
 
 #[test]

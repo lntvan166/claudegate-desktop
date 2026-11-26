@@ -2,6 +2,7 @@ pub mod capture;
 pub mod commands;
 pub mod config;
 pub mod editor;
+pub mod gitlog;
 pub mod launch;
 pub mod tray;
 pub mod update;
@@ -23,6 +24,7 @@ pub fn run() {
         .manage(watch::KnownMap::default())
         .manage(commands::WriteLock::default())
         .manage(upkeep::UpkeepState::default())
+        .manage(gitlog::GitLogState::default())
         .setup(|app| {
             launch::remember(app.handle(), &std::env::args().collect::<Vec<_>>());
             let known = app.state::<watch::KnownMap>().inner().clone();
@@ -63,6 +65,12 @@ pub fn run() {
             config::set_read_only,
             config::add_to_workspace_cmd,
             editor::open_in_editor,
+            gitlog::gitlog_repos,
+            gitlog::gitlog_page,
+            gitlog::gitlog_changes,
+            gitlog::gitlog_file,
+            gitlog::gitlog_web_url,
+            gitlog::gitlog_message,
             tray::set_pending_count,
             update::check_update,
             update::install_update
