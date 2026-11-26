@@ -70,14 +70,18 @@ export function refKeyFor(e: RefKeyLike, isMac: boolean): "selection" | "file" |
 
 type ElementLike = { tagName: string; isContentEditable?: boolean; closest?: (sel: string) => unknown };
 
-/** True when keys belong to what has focus: a field, an editable region (Monaco), or a menu. */
+/**
+ * True when keys belong to what has focus: a field, an editable region (Monaco), a menu, or the
+ * Not captured panel (`data-audit-panel`), whose rows have no baseline: the review keys (a, r, ...)
+ * must never act on the selected pending row from there.
+ */
 export function isTypingTarget(el: ElementLike | null | undefined): boolean {
   // A key sent to the window or the document has no tag: nothing is being typed into.
   if (!el || typeof el.tagName !== "string") return false;
   const tag = el.tagName.toUpperCase();
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
   if (el.isContentEditable) return true;
-  return !!el.closest?.('[role="menu"], [role="menubar"], [role="listbox"]');
+  return !!el.closest?.('[role="menu"], [role="menubar"], [role="listbox"], [data-audit-panel]');
 }
 
 export type DecisionContext = {

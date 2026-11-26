@@ -101,6 +101,23 @@ pub fn audit_roots(changed: &[PathBuf], known: &[(String, PathBuf)]) -> Vec<Stri
     out
 }
 
+/// True when attaching `dirs` added the audit directory.
+pub fn audit_dir_added(home: &Path, dirs: &[PathBuf]) -> bool {
+    let a = home.join("audit");
+    dirs.iter().any(|d| *d == a)
+}
+
+/// Every distinct project root in `known`, in order.
+pub fn all_roots(known: &[(String, PathBuf)]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for (r, _) in known {
+        if !out.contains(r) {
+            out.push(r.clone());
+        }
+    }
+    out
+}
+
 pub fn affected_roots(changed: &[PathBuf], known: &[(String, PathBuf)]) -> Vec<String> {
     affected(changed, known).roots
 }
@@ -300,6 +317,14 @@ pub fn run_with_hooks(
             match rx.recv_timeout(wait) {
                 Ok(paths) => {
                     let added = attach(&mut watcher, &home2, config_dir.as_deref(), &mut watched);
+                    if audit_dir_added(&home2, &added) {
+                        // A write can land before the attach sees the new dir: say every project
+                        // may have changed once (the window throttles its reads).
+                        let roots = all_roots(&known.lock().map(|k| k.clone()).unwrap_or_default());
+                        if !roots.is_empty() {
+                            on_audit(ChangedPayload { roots });
+                        }
+                    }
                     if needs_relist(&home2, &added) {
                         // a pseudo-change on a relist-trigger file: one empty-roots event
                         co.push(Instant::now(), [home2.join("workspace-roots.json")]);
@@ -433,6 +458,14 @@ mod tests {
         // an audit write is not a session change: it must not reload the project or relist
         assert_eq!(payload_for(&a, &k), None);
         assert!(audit_roots(&[PathBuf::from("/h/audit/bbb.jsonl.lock"), PathBuf::from("/h/sessions/bbb.jsonl")], &k).is_empty());
+    }
+
+    #[test]
+    fn a_new_audit_dir_reports_every_known_root_once() {
+        let home = Path::new("/h");
+        assert!(audit_dir_added(home, &[PathBuf::from("/h/audit")]));
+        assert!(!audit_dir_added(home, &[PathBuf::from("/h/sessions"), PathBuf::from("/h")]));
+        assert_eq!(all_roots(&known()), vec!["/ws/a".to_string(), "/ws/b".to_string()]);
     }
 
     #[test]

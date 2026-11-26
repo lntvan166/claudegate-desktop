@@ -15,15 +15,12 @@
     audit,
     projectRoot,
     scopeRoots,
-    canWrite = true,
     onopen,
     ondismiss,
   }: {
     audit: AuditView;
     projectRoot: string;
     scopeRoots: string[];
-    /** Dismiss writes the app's config; false while read-only mode blocks it. */
-    canWrite?: boolean;
     onopen: (item: AuditItem) => void;
     /** Hide these paths now; the owner restores them and says why if the backend refuses. */
     ondismiss: (paths: string[]) => void;
@@ -51,12 +48,19 @@
   }
 
   function dismiss(paths: string[]) {
-    if (!canWrite || paths.length === 0) return;
+    if (paths.length === 0) return;
     // Keep the keyboard in the list: the row after the first dismissed one, else the one before.
     const i = rows.findIndex((r) => paths.includes(r.path));
     const next = rows.slice(i + 1).find((r) => !paths.includes(r.path)) ?? rows.slice(0, i).reverse().find((r) => !paths.includes(r.path));
+    // With no missed row left the whole panel goes (the header needs one), so focus must leave
+    // for the review tabs rather than fall to the page.
+    const gone = !audit.missed.some((r) => !paths.includes(r.path));
     ondismiss(paths);
-    if (next) void focusPath(next.path);
+    if (gone) {
+      void tick().then(() => document.querySelector<HTMLElement>('[role="tablist"] [role="tab"][aria-selected="true"]')?.focus());
+    } else if (next) {
+      void focusPath(next.path);
+    }
   }
 
   function key(e: KeyboardEvent, it: AuditItem) {
@@ -64,7 +68,7 @@
     if (e.key === "Enter") {
       e.preventDefault();
       onopen(it);
-    } else if (e.key === "Delete" || e.key === "Backspace") {
+    } else if (e.key === "Delete") {
       e.preventDefault();
       dismiss([it.path]);
     } else if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Home" || e.key === "End") {
@@ -76,7 +80,7 @@
 </script>
 
 {#if header}
-  <div class="nc">
+  <div class="nc" data-audit-panel>
     <button class="head" aria-expanded={open} aria-controls="nc-panel" onclick={() => (open = !open)}>
       <svg class="chev" class:open viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
         <path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
@@ -111,8 +115,7 @@
                   <button
                     tabindex="-1"
                     aria-label={`Dismiss ${relPath(it, scopeRoots)}`}
-                    disabled={!canWrite}
-                    title={canWrite ? "Hide this file from the list (Delete)" : "Read-only mode is on"}
+                    title="Hide this file from the list (Delete)"
                     onclick={() => dismiss([it.path])}>Dismiss</button
                   >
                 </span>
@@ -123,7 +126,7 @@
 
         <div class="sec-head">
           <span class="sec-title">Not captured</span>
-          <button class="link" disabled={!canWrite} onclick={() => dismiss(audit.missed.map((i) => i.path))}>Dismiss all</button>
+          <button class="link" onclick={() => dismiss(audit.missed.map((i) => i.path))}>Dismiss all</button>
         </div>
         {@render list(audit.missed, "Files Claude changed that weren't captured")}
 
@@ -136,7 +139,7 @@
               <span>{UNCERTAIN_TITLE} · {audit.uncertain.length}</span>
             </button>
             {#if uncertainOpen}
-              <button class="link" disabled={!canWrite} onclick={() => dismiss(audit.uncertain.map((i) => i.path))}>Dismiss all</button>
+              <button class="link" onclick={() => dismiss(audit.uncertain.map((i) => i.path))}>Dismiss all</button>
             {/if}
           </div>
           <div id="nc-uncertain">
@@ -153,6 +156,14 @@
     flex: none;
     padding: 0 var(--pad) 8px;
     font-size: var(--fs-small);
+  }
+  .disclose {
+    min-width: 0;
+  }
+  .disclose span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .head,
   .disclose {
@@ -201,17 +212,14 @@
     color: var(--text);
   }
   .link {
+    flex: none;
+    white-space: nowrap;
     color: var(--muted);
     text-decoration: underline;
     text-underline-offset: 2px;
   }
-  .link:hover:not(:disabled) {
+  .link:hover {
     color: var(--text);
-  }
-  .link:disabled,
-  .acts button:disabled {
-    opacity: 0.5;
-    cursor: default;
   }
   .list {
     list-style: none;
@@ -283,7 +291,7 @@
     font-size: var(--fs-meta);
     white-space: nowrap;
   }
-  .acts button:hover:not(:disabled) {
+  .acts button:hover {
     background: var(--active);
   }
   @container review (max-width: 520px) {

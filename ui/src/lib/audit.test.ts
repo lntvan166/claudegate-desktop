@@ -129,6 +129,18 @@ describe("AuditRefresher", () => {
     expect(max).toBe(1);
   });
 
+  it("an immediate request made during a read runs right after it, not 2 s later", async () => {
+    let release: () => void = () => {};
+    const run = vi.fn(() => new Promise<void>((res) => (release = res)));
+    const r = mk(run);
+    r.request();
+    r.request(true);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(run).toHaveBeenCalledTimes(2);
+    release();
+  });
+
   it("immediate skips the interval", async () => {
     const run = vi.fn(async () => {});
     const r = mk(run);

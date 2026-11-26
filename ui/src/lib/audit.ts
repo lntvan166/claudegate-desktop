@@ -117,6 +117,7 @@ export function rove(i: number, key: "ArrowDown" | "ArrowUp" | "Home" | "End", n
 export class AuditRefresher {
   private inflight = false;
   private dirty = false;
+  private dirtyNow = false;
   private last = -Infinity;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private dead = false;
@@ -131,6 +132,7 @@ export class AuditRefresher {
     if (this.dead) return;
     if (this.inflight) {
       this.dirty = true;
+      if (immediate) this.dirtyNow = true;
       return;
     }
     const wait = immediate ? 0 : this.last + this.minMs - this.now();
@@ -149,12 +151,13 @@ export class AuditRefresher {
     this.timer = undefined;
     this.inflight = true;
     this.dirty = false;
+    this.dirtyNow = false;
     this.last = this.now();
     void this.run()
       .catch(() => {})
       .finally(() => {
         this.inflight = false;
-        if (this.dirty) this.request();
+        if (this.dirty) this.request(this.dirtyNow);
       });
   }
 
