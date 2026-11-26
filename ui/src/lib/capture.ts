@@ -59,8 +59,10 @@ export const CONFIRM_TEXT =
   "Set up capture? This writes ~/.claudegate/hook.py and hook.sh, and adds one hook to ~/.claude/settings.json (a backup is kept).";
 
 const LABELS: Record<CaptureStatus, string> = {
-  vscode: "Capturing (VS Code)",
-  app: "Capturing (this app)",
+  // Who registered the hook is the popover's "Registered by" line, not the chip's: after Update
+  // hook, "(VS Code)" read as "the update didn't take".
+  vscode: "Capturing",
+  app: "Capturing",
   "not-set-up": "Not capturing — Set up",
   "settings-unreadable": "Capture: settings unreadable",
   "python-missing": "Capture: python3 not found",
@@ -91,13 +93,30 @@ export function detail(v: CaptureView, projectCount: number | null = null): stri
       if (v.takenOver) {
         return `The VS Code extension now manages the hook. This app set capture up first; the extension has since replaced its hook, and this app leaves it alone.${noProjects(projectCount)}`;
       }
-      // An outdated hook is the case where the extension is not keeping it up to date (not opened).
-      return `The ClaudeGate VS Code extension set up the hook, so Claude Code's edits are captured.${hookOutdated(v) ? "" : " The extension keeps it up to date."}${noProjects(projectCount)}`;
+      return `The ClaudeGate VS Code extension registered the hook, so Claude Code's edits are captured.${keeper(v)}${noProjects(projectCount)}`;
     case "app":
-      return `This app set up the hook${v.version ? ` (${v.version})` : ""}, so Claude Code's edits are captured. The app updates its own hook when it starts.${noProjects(projectCount)}`;
+      return `This app registered the hook, so Claude Code's edits are captured.${keeper(v)}${noProjects(projectCount)}`;
     default:
       return explanation(v) ?? "";
   }
+}
+
+/** Who keeps hook.py current. A hook carrying this app's stamp is updated by the app at startup,
+ *  whoever registered it; an unstamped one is the extension's, refreshed when VS Code starts. An
+ *  outdated unstamped (or missing) hook gets no claim: that is the case where nobody is. */
+function keeper(v: CaptureView): string {
+  const h = v.hook;
+  if (!h) return "";
+  if (h.installed !== null && (h.state === "upToDate" || h.state === "older")) return " This app keeps hook.py up to date when it starts.";
+  if (h.installed === null && h.state === "upToDate") return " The extension refreshes hook.py when VS Code starts.";
+  return "";
+}
+
+/** The popover's "Registered by" line: who added the hook to ~/.claude/settings.json. */
+export function registeredBy(v: CaptureView | null): string | null {
+  if (v?.status === "app") return "Registered by: this app";
+  if (v?.status === "vscode") return v.takenOver ? "Registered by: this app, then taken over by the VS Code extension" : "Registered by: VS Code extension";
+  return null;
 }
 
 /** The hook only captures under registered project roots, so "capturing" with none is empty. */
@@ -179,7 +198,7 @@ function installedHook(h: HookView): string {
 export function hookLine(v: CaptureView | null): string | null {
   if (!capturing(v) || !v?.hook) return null;
   const h = v.hook;
-  if (h.state === "upToDate") return `Hook: ${h.bundled}, the version bundled in this app`;
+  if (h.state === "upToDate") return h.installed ? `Hook: ${h.installed}, kept up to date by this app` : "Hook: VS Code extension's version";
   if (h.state === "newer") return `Hook: ${h.installed} is newer than this app's ${h.bundled}`;
   return `Hook: ${installedHook(h)} · this app has ${h.bundled}`;
 }
@@ -216,5 +235,7 @@ export function hookUpdateResult(r: HookReplacedView): SetupResult {
     const now = hookLine(r.capture) ?? `“${chipLabel(r.capture)}”`;
     return { tone: "warning", text: `hook.py was written, but it now reads: ${now}. ${prev}` };
   }
-  return { tone: "success", text: `hook.py is now ${r.to}. ${prev}${r.appOwnsNow ? ` ${APP_OWNS_NOW}` : ""}` };
+  // A stamped hook is the startup update's to keep current, whoever registered it (and whether or
+  // not this took it back from the extension, `appOwnsNow`), until the extension rewrites it.
+  return { tone: "success", text: `hook.py is now ${r.to}. ${prev} ${APP_OWNS_NOW}` };
 }

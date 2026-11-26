@@ -11,6 +11,7 @@ import {
   setupResult,
   setupUnsupported,
   canUpdateHook,
+  registeredBy,
   hookLine,
   hookOutdated,
   hookUpdateBlocked,
@@ -35,15 +36,15 @@ const v = (status: CaptureView["status"], extra: Partial<CaptureView> = {}): Cap
 
 describe("chipLabel", () => {
   it("names every state", () => {
-    expect(chipLabel(v("vscode"))).toBe("Capturing (VS Code)");
+    expect(chipLabel(v("vscode"))).toBe("Capturing");
     const stale = { hook: { state: "different" as const, installed: null, bundled: "v1.17.0" } };
-    expect(chipLabel(v("vscode", stale))).toBe("Capturing (VS Code) · update hook");
-    expect(chipLabel(v("vscode", stale), false, true)).toBe("Capturing (VS Code)");
-    expect(chipLabel(v("app", { hook: { state: "newer" as const, installed: "v9.0.0", bundled: "v1.17.0" } }))).toBe("Capturing (this app)");
-    expect(chipLabel(v("app", { version: "v1.16.1" }))).toBe("Capturing (this app)");
+    expect(chipLabel(v("vscode", stale))).toBe("Capturing · update hook");
+    expect(chipLabel(v("vscode", stale), false, true)).toBe("Capturing");
+    expect(chipLabel(v("app", { hook: { state: "newer" as const, installed: "v9.0.0", bundled: "v1.17.0" } }))).toBe("Capturing");
+    expect(chipLabel(v("app", { version: "v1.16.1" }))).toBe("Capturing");
     expect(chipLabel(v("not-set-up"))).toBe("Not capturing — Set up");
     expect(chipLabel(v("not-set-up", { setupSupported: false }))).toBe("Not capturing");
-    expect(chipLabel(v("app", { setupSupported: false }))).toBe("Capturing (this app)");
+    expect(chipLabel(v("app", { setupSupported: false }))).toBe("Capturing");
     expect(chipLabel(v("not-set-up"), false, true)).toBe("Not capturing");
     expect(chipLabel(v("settings-unreadable", { note: "x" }))).toBe("Capture: settings unreadable");
     expect(chipLabel(v("python-missing"))).toBe("Capture: python3 not found");
@@ -54,11 +55,11 @@ describe("chipLabel", () => {
   });
   it("says the check failed instead of checking forever", () => {
     expect(chipLabel(null, true)).toBe("Capture: couldn't check");
-    expect(chipLabel(v("vscode"), true)).toBe("Capturing (VS Code)");
+    expect(chipLabel(v("vscode"), true)).toBe("Capturing");
   });
   it("keeps the capturing label when python3 is missing", () => {
-    expect(chipLabel(v("vscode", { pythonMissing: true }))).toBe("Capturing (VS Code)");
-    expect(chipLabel(v("app", { pythonMissing: true }))).toBe("Capturing (this app)");
+    expect(chipLabel(v("vscode", { pythonMissing: true }))).toBe("Capturing");
+    expect(chipLabel(v("app", { pythonMissing: true }))).toBe("Capturing");
   });
 });
 
@@ -211,7 +212,9 @@ describe("the hook line and Update hook", () => {
     expect(hookLine(v("vscode", { hook: hk("older", "v1.16.1") }))).toBe("Hook: v1.16.1 · this app has v1.17.0");
     expect(hookLine(v("app", { hook: hk("different", "v2.0.0") }))).toBe("Hook: v2.0.0 · this app has v1.17.0");
     expect(hookLine(v("vscode", { hook: hk("missing") }))).toBe("Hook: hook.py is missing · this app has v1.17.0");
-    expect(hookLine(v("app", { hook: hk("upToDate") }))).toBe("Hook: v1.17.0, the version bundled in this app");
+    expect(hookLine(v("app", { hook: hk("upToDate", "v1.17.0") }))).toBe("Hook: v1.17.0, kept up to date by this app");
+    expect(hookLine(v("vscode", { hook: hk("upToDate", "v1.17.0") }))).toBe("Hook: v1.17.0, kept up to date by this app");
+    expect(hookLine(v("vscode", { hook: hk("upToDate") }))).toBe("Hook: VS Code extension's version");
   });
   it("has no hook line when nothing is registered", () => {
     expect(hookLine(null)).toBeNull();
@@ -264,9 +267,11 @@ describe("the hook line and Update hook", () => {
     });
     expect(hookUpdateResult(r("/h/.claudegate-desktop/backups/hook/hook-x.py", "upToDate"))).toEqual({
       tone: "success",
-      text: "hook.py is now v1.17.0. The previous file is in /h/.claudegate-desktop/backups/hook/hook-x.py.",
+      text: "hook.py is now v1.17.0. The previous file is in /h/.claudegate-desktop/backups/hook/hook-x.py. This app will keep this hook up to date until the VS Code extension replaces it.",
     });
-    expect(hookUpdateResult(r(null, "upToDate")).text).toBe("hook.py is now v1.17.0. There was no previous file.");
+    expect(hookUpdateResult(r(null, "upToDate")).text).toBe(
+      "hook.py is now v1.17.0. There was no previous file. This app will keep this hook up to date until the VS Code extension replaces it.",
+    );
     const w = hookUpdateResult(r("/b.py", "different"));
     expect(w.tone).toBe("warning");
     expect(w.text).toContain("VS Code extension's version");
@@ -276,8 +281,9 @@ describe("the hook line and Update hook", () => {
 
 describe("detail with an outdated hook", () => {
   it("does not claim the extension keeps an outdated hook up to date", () => {
-    expect(detail(v("vscode", { hook: hk("different") }))).not.toContain("keeps it up to date");
-    expect(detail(v("vscode", { hook: hk("upToDate") }))).toContain("The extension keeps it up to date.");
+    expect(detail(v("vscode", { hook: hk("different") }))).not.toMatch(/keeps|refreshes/);
+    expect(detail(v("vscode", { hook: hk("missing") }))).not.toMatch(/keeps|refreshes/);
+    expect(detail(v("vscode", { hook: hk("upToDate") }))).toContain("The extension refreshes hook.py when VS Code starts.");
   });
 });
 
@@ -288,7 +294,7 @@ describe("a newer hook, a modified copy, and taking the hook back", () => {
     expect(hookOutdated(n)).toBe(false);
     expect(canUpdateHook(n, false)).toBe(false);
     expect(hookUpdateBlocked(n, true)).toBeNull();
-    expect(detail(n)).toContain("The extension keeps it up to date.");
+    expect(detail(n)).not.toMatch(/keeps|refreshes/);
   });
   it("keeps the button for a modified copy of the bundled version", () => {
     const m = v("app", { hook: hk("different", "v1.17.0") });
@@ -307,5 +313,30 @@ describe("a newer hook, a modified copy, and taking the hook back", () => {
     expect(hookUpdateResult(r).text).toBe(
       "hook.py is now v1.17.0. The previous file is in /b.py. This app will keep this hook up to date until the VS Code extension replaces it.",
     );
+  });
+});
+
+describe("who registered the hook, and who keeps it current", () => {
+  it("names who registered it, apart from the chip label", () => {
+    expect(registeredBy(v("vscode"))).toBe("Registered by: VS Code extension");
+    expect(registeredBy(v("app"))).toBe("Registered by: this app");
+    expect(registeredBy(v("vscode", { takenOver: true }))).toBe("Registered by: this app, then taken over by the VS Code extension");
+    for (const st of ["not-set-up", "settings-unreadable", "python-missing"] as const) expect(registeredBy(v(st))).toBeNull();
+    expect(registeredBy(null)).toBeNull();
+  });
+  it("the chip says Capturing for either side after Update hook", () => {
+    const stamped = v("vscode", { hook: hk("upToDate", "v1.17.0") });
+    expect(chipLabel(stamped)).toBe("Capturing");
+    expect(chipLabel(v("app", { hook: hk("upToDate", "v1.17.0") }))).toBe("Capturing");
+  });
+  it("credits the app with a stamped hook and the extension with an unstamped one", () => {
+    const app = "This app keeps hook.py up to date when it starts.";
+    expect(detail(v("vscode", { hook: hk("upToDate", "v1.17.0") }))).toBe(
+      `The ClaudeGate VS Code extension registered the hook, so Claude Code's edits are captured. ${app}`,
+    );
+    expect(detail(v("app", { hook: hk("upToDate", "v1.17.0") }))).toBe(`This app registered the hook, so Claude Code's edits are captured. ${app}`);
+    expect(detail(v("app", { hook: hk("older", "v1.16.1") }))).toContain(app);
+    expect(detail(v("vscode", { hook: hk("upToDate") }))).not.toContain(app);
+    expect(detail(v("app"))).toBe("This app registered the hook, so Claude Code's edits are captured.");
   });
 });

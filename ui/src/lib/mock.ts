@@ -690,7 +690,7 @@ export const mockApi: Api = {
       pythonMissing: false,
       takenOver: false,
       setupSupported: true,
-      hook: { state: "upToDate", installed: null, bundled: MOCK_BUNDLED },
+      hook: { state: "upToDate", installed: MOCK_BUNDLED, bundled: MOCK_BUNDLED },
     };
     return {
       settings: "/home/dev/.claude/settings.json",
@@ -712,7 +712,7 @@ export const mockApi: Api = {
     if (from.state === "newer") throw `hook.py is ${from.installed}, newer than the version bundled in this app, so it was left as is.`;
     const appOwnsNow = capture.takenOver;
     if (appOwnsNow) capture = { ...capture, status: "app", version: "v1.16.1", takenOver: false };
-    capture = { ...capture, hook: { state: "upToDate", installed: null, bundled: MOCK_BUNDLED } };
+    capture = { ...capture, hook: { state: "upToDate", installed: MOCK_BUNDLED, bundled: MOCK_BUNDLED } };
     return {
       hook: "/home/dev/.claudegate/hook.py",
       backup: from.state === "missing" ? null : "/home/dev/.claudegate-desktop/backups/hook/hook-20261126T101530.123Z.py",
@@ -752,7 +752,8 @@ function mockHook(status: CaptureView["status"], q: URLSearchParams): HookView |
   if (status !== "vscode" && status !== "app") return null;
   const want = q.get("captureHook") ?? (status === "vscode" ? "different" : "older");
   const state = (want === "modified" ? "different" : ["upToDate", "older", "newer", "different", "missing"].includes(want) ? want : "different") as HookView["state"];
-  const installed = state === "older" ? "v1.16.1" : state === "newer" ? "v1.18.0" : want === "modified" ? MOCK_BUNDLED : null;
+  const installed =
+    state === "older" ? "v1.16.1" : state === "newer" ? "v1.18.0" : want === "modified" || (state === "upToDate" && status === "app") ? MOCK_BUNDLED : null;
   return { state, installed, bundled: MOCK_BUNDLED };
 }
 let captureFails = typeof location !== "undefined" && new URLSearchParams(location.search).get("capture") === "fail";

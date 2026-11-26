@@ -8,6 +8,7 @@
     canSetUp,
     canUpdateHook,
     hookLine,
+    registeredBy,
     hookUpdateBlocked,
     hookUpdateResult,
     updateHookConfirm,
@@ -224,6 +225,9 @@
         <p class="body">{detail(view, projectCount)}</p>
         {#if pythonWarning(view)}
           <p class="banner warning">{pythonWarning(view)}</p>
+        {/if}
+        {#if registeredBy(view)}
+          <p class="body muted" data-registered-by>{registeredBy(view)}</p>
         {/if}
         {#if hookLine(view)}
           <p class="body muted" data-hook-line>{hookLine(view)}</p>
