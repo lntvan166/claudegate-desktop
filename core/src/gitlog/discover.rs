@@ -33,6 +33,12 @@ impl GitRun for RealGit {
             .args(args)
             .current_dir(cwd)
             .env("GIT_TERMINAL_PROMPT", "0")
+            // An inherited repository override would make every candidate resolve to one repo.
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_OBJECT_DIRECTORY")
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .output()
@@ -125,14 +131,18 @@ fn identify(dir: &Path, git: &dyn GitRun) -> Option<(PathBuf, PathBuf)> {
     Some((canon(&common), canon(Path::new(top))))
 }
 
-/// Parses `git worktree list --porcelain`: the first entry is the main checkout. Bare,
-/// prunable and unborn (all-zero HEAD) entries are dropped.
-fn parse_worktrees(out: &str) -> Vec<Checkout> {
-    let mut res = Vec::new();
-    for (i, block) in out.split("\n\n").enumerate() {
+/// Parses `git worktree list --porcelain` (`-z`: NUL-terminated fields when `nul`). Bare,
+/// prunable and unborn (all-zero HEAD) entries are dropped; an unborn-only repository therefore
+/// yields no checkout and no `Repo`, on purpose: it has no history to show. The first entry
+/// kept is the main checkout (the first listed, unless that one is a bare repository).
+fn parse_worktrees(out: &str, nul: bool) -> Vec<Checkout> {
+    let sep = if nul { '\0' } else { '\n' };
+    let mut res: Vec<Checkout> = Vec::new();
+    let mut fields: Vec<&str> = Vec::new();
+    let mut flush = |fields: &mut Vec<&str>, res: &mut Vec<Checkout>| {
         let (mut path, mut head, mut branch) = (None, None, None);
         let (mut bare, mut prunable) = (false, false);
-        for line in block.lines() {
+        for line in fields.drain(..) {
             if let Some(v) = line.strip_prefix("worktree ") {
                 path = Some(v.to_string());
             } else if let Some(v) = line.strip_prefix("HEAD ") {
@@ -145,13 +155,31 @@ fn parse_worktrees(out: &str) -> Vec<Checkout> {
                 prunable = true;
             }
         }
-        let (Some(path), Some(head)) = (path, head) else { continue };
+        let (Some(path), Some(head)) = (path, head) else { return };
         if bare || prunable || head.is_empty() || head.chars().all(|c| c == '0') {
-            continue;
+            return;
         }
-        res.push(Checkout { path, head, branch, is_main: i == 0 });
+        let is_main = res.is_empty();
+        res.push(Checkout { path, head, branch, is_main });
+    };
+    for line in out.split(sep) {
+        if line.is_empty() {
+            flush(&mut fields, &mut res);
+        } else {
+            fields.push(line);
+        }
     }
+    flush(&mut fields, &mut res);
     res
+}
+
+/// The worktrees of the repository `dir` belongs to. `-z` (git >= 2.36) keeps a path with a
+/// newline intact; older git rejects it and the plain form is used.
+fn list_worktrees(dir: &Path, git: &dyn GitRun) -> Vec<Checkout> {
+    if let Some(o) = git.run(dir, &["worktree", "list", "--porcelain", "-z"]) {
+        return parse_worktrees(&o, true);
+    }
+    git.run(dir, &["worktree", "list", "--porcelain"]).map(|o| parse_worktrees(&o, false)).unwrap_or_default()
 }
 
 fn color_of(id: &str) -> u8 {
@@ -195,24 +223,34 @@ fn label(repos: &mut [Repo]) {
 /// `exclude` globs (the `claudegate.exclude` syntax, plus a bare folder name) drop directories
 /// from the walk and checkouts from the result.
 pub fn discover(roots: &[PathBuf], scan_depth: usize, exclude: &[String], git: &dyn GitRun) -> Vec<Repo> {
+    let roots: Vec<PathBuf> = roots.iter().map(|r| canon(r)).collect();
+    let roots = &roots[..];
     let matchers: Vec<ExcludeMatcher> = roots.iter().map(|r| ExcludeMatcher::new(r, exclude)).collect();
     let name_res: Vec<regex::Regex> = exclude.iter().filter_map(|g| glob_to_regex(g)).collect();
     let excluded = |p: &Path| {
         let s = p.to_string_lossy();
         let b = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        matchers.iter().any(|m| m.is_excluded(&s)) || name_res.iter().any(|re| re.is_match(&b))
+        // A bare folder name never excludes a workspace root itself.
+        let is_root = roots.iter().any(|r| r == p);
+        matchers.iter().any(|m| m.is_excluded(&s)) || (!is_root && name_res.iter().any(|re| re.is_match(&b)))
     };
 
     let mut by_id: HashMap<PathBuf, Vec<Checkout>> = HashMap::new();
     for dir in walk(roots, scan_depth, &excluded) {
-        let Some((common, _top)) = identify(&dir, git) else { continue };
+        let Some((common, top)) = identify(&dir, git) else { continue };
         if by_id.contains_key(&common) {
             continue;
         }
-        let list = git
-            .run(&dir, &["worktree", "list", "--porcelain"])
-            .map(|o| parse_worktrees(&o))
-            .unwrap_or_default();
+        let mut list = list_worktrees(&dir, git);
+        // A submodule lists its gitdir (`<super>/.git/modules/x`) as the main entry: its working
+        // tree is this candidate's toplevel.
+        let top_s = top.to_string_lossy().into_owned();
+        let top_listed = list.iter().any(|c| canon(Path::new(&c.path)) == top);
+        if let Some(m) = list.first_mut() {
+            if canon(Path::new(&m.path)) == common && !top_listed {
+                m.path = top_s;
+            }
+        }
         let list: Vec<Checkout> = list.into_iter().filter(|c| !excluded(Path::new(&c.path))).collect();
         by_id.insert(common, list);
     }

@@ -128,3 +128,124 @@ fn seventy_repos_discovery_time() {
     assert_eq!(found.len(), 70);
     assert!(el.as_secs() < 10, "{el:?}");
 }
+
+fn commit_at(dir: &Path) -> String {
+    let o = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(dir).output().unwrap();
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+
+#[test]
+fn submodule_is_its_own_repo_at_its_working_tree() {
+    let (_t, root) = tmp();
+    let lib = root.join("lib-src");
+    repo(&lib);
+    let sup = root.join("super");
+    repo(&sup);
+    git(&sup, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", lib.to_str().unwrap(), "x"]);
+    let found = discover(&[sup.clone()], 2, &[], &RealGit);
+    assert_eq!(found.len(), 2, "{:?}", names(&found));
+    let x = found.iter().find(|r| r.name == "x").unwrap();
+    assert!(x.id.ends_with(".git/modules/x"), "{}", x.id);
+    assert_eq!(x.checkouts.len(), 1);
+    assert_eq!(x.checkouts[0].path, sup.join("x").to_string_lossy());
+    assert!(x.checkouts[0].is_main);
+}
+
+#[test]
+fn detached_main_head() {
+    let (_t, root) = tmp();
+    let r = root.join("r");
+    repo(&r);
+    git(&r, &["checkout", "-q", "--detach"]);
+    let f = discover(&[root], 2, &[], &RealGit);
+    assert_eq!(f[0].checkouts[0].branch, None);
+    assert!(f[0].checkouts[0].is_main);
+    assert_eq!(f[0].checkouts[0].head, commit_at(&r));
+}
+
+#[test]
+fn unborn_repo_is_dropped() {
+    let (_t, root) = tmp();
+    std::fs::create_dir_all(root.join("empty")).unwrap();
+    git(&root.join("empty"), &["init", "-q"]);
+    repo(&root.join("real"));
+    assert_eq!(names(&discover(&[root], 2, &[], &RealGit)), vec!["real"]);
+}
+
+#[test]
+fn worktree_outside_root_is_the_same_repo() {
+    let (_t, root) = tmp();
+    let (_t2, elsewhere) = tmp();
+    let main = root.join("r");
+    repo(&main);
+    let wt = elsewhere.join("wt");
+    git(&main, &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()]);
+    let f = discover(&[root], 2, &[], &RealGit);
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].checkouts.len(), 2);
+    assert!(f[0].checkouts.iter().any(|c| c.path == wt.to_string_lossy()));
+}
+
+#[test]
+fn bare_repo_with_worktrees_keeps_first_checkout_as_main() {
+    let (_t, root) = tmp();
+    let seed = root.join("seed");
+    repo(&seed);
+    let bare = root.join("store.git");
+    git(&root, &["clone", "-q", "--bare", seed.to_str().unwrap(), bare.to_str().unwrap()]);
+    let scan = root.join("scan");
+    git(&bare, &["worktree", "add", "-q", "--detach", scan.join("w1").to_str().unwrap()]);
+    git(&bare, &["worktree", "add", "-q", "--detach", scan.join("w2").to_str().unwrap()]);
+    let f = discover(&[scan], 2, &[], &RealGit);
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].checkouts.len(), 2);
+    assert!(f[0].checkouts[0].is_main && !f[0].checkouts[1].is_main);
+}
+
+#[test]
+fn symlink_loop_terminates() {
+    let (_t, root) = tmp();
+    repo(&root.join("r"));
+    std::os::unix::fs::symlink("..", root.join("r").join("loop")).unwrap();
+    std::os::unix::fs::symlink("..", root.join("up")).unwrap();
+    assert_eq!(names(&discover(&[root], 4, &[], &RealGit)), vec!["r"]);
+}
+
+#[test]
+fn unreadable_dir_is_skipped() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_t, root) = tmp();
+    repo(&root.join("ok"));
+    let locked = root.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let f = discover(&[root], 2, &[], &RealGit);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(names(&f), vec!["ok"]);
+}
+
+#[test]
+fn dash_named_repo_dir() {
+    let (_t, root) = tmp();
+    repo(&root.join("-x"));
+    let f = discover(&[root], 2, &[], &RealGit);
+    assert_eq!(names(&f), vec!["-x"]);
+    assert_eq!(f[0].checkouts.len(), 1);
+}
+
+#[test]
+fn same_name_same_parent_falls_back_to_full_path() {
+    let (_t, root) = tmp();
+    repo(&root.join("a/x/svc"));
+    repo(&root.join("b/x/svc"));
+    let n = names(&discover(&[root.clone()], 3, &[], &RealGit));
+    assert_eq!(n, vec![root.join("a/x/svc").to_string_lossy(), root.join("b/x/svc").to_string_lossy()]);
+}
+
+#[test]
+fn bare_name_exclude_never_removes_the_root_itself() {
+    let (_t, root) = tmp();
+    let r = root.join("legacy");
+    repo(&r);
+    assert_eq!(names(&discover(&[r], 1, &["legacy".to_string()], &RealGit)), vec!["legacy"]);
+}
