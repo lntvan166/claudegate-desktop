@@ -107,7 +107,17 @@ pub struct Runner {
 }
 
 /// One pool slot, given back on drop.
-struct Permit<'a>(&'a Runner);
+pub(crate) struct Permit<'a>(&'a Runner);
+
+/// Which part of the pool a call waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Share {
+    /// Background reads (paging, a Combined Changes tree): `PARALLEL - RESERVED` slots at most.
+    Paging,
+    /// A click (a changed file, a message, a Combined Changes left side): the whole pool, so it
+    /// never waits behind paging.
+    Reserved,
+}
 
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
@@ -186,7 +196,7 @@ impl Runner {
         lock(&self.reg).children.get(tag).map(|v| v.iter().map(|(p, _)| *p).collect()).unwrap_or_default()
     }
 
-    fn acquire(&self, tag: Option<&Tag>) -> Result<Permit<'_>, RunError> {
+    pub(crate) fn acquire(&self, tag: Option<&Tag>, share: Share) -> Result<Permit<'_>, RunError> {
         let mut n = lock(&self.running);
         loop {
             if tag.is_some_and(|t| !self.is_current(t)) {
@@ -194,7 +204,10 @@ impl Runner {
             }
             // Paging (tagged) leaves `RESERVED` slots free, so a click on a changed file or a
             // message never waits behind a page of dozens of repositories.
-            let limit = if tag.is_some() { PARALLEL - RESERVED } else { PARALLEL };
+            let limit = match share {
+                Share::Paging => PARALLEL - RESERVED,
+                Share::Reserved => PARALLEL,
+            };
             if *n < limit {
                 *n += 1;
                 return Ok(Permit(self));
@@ -204,12 +217,20 @@ impl Runner {
     }
 
     /// `git <args>` in `cwd`: its stdout bytes. With a `tag`, the child belongs to that query
-    /// and is killed when the query is superseded.
+    /// and is killed when the query is superseded. Tagged calls take the paging share of the
+    /// pool, untagged ones the whole pool.
     pub fn run(&self, tag: Option<&Tag>, cwd: &Path, args: &[&str]) -> Result<Vec<u8>, RunError> {
+        let share = if tag.is_some() { Share::Paging } else { Share::Reserved };
+        self.run_in(tag, share, cwd, args)
+    }
+
+    /// [`Runner::run`] waiting for the given `share` of the pool: a click that still belongs to
+    /// a query (killed with it) takes `Share::Reserved`.
+    pub fn run_in(&self, tag: Option<&Tag>, share: Share, cwd: &Path, args: &[&str]) -> Result<Vec<u8>, RunError> {
         if !cwd.is_dir() {
             return Err(RunError::Spawn(format!("The folder {} is missing", cwd.display())));
         }
-        let _permit = self.acquire(tag)?;
+        let _permit = self.acquire(tag, share)?;
         let mut cmd = Command::new(self.git.get_or_init(resolve_git));
         cmd.args(["--no-pager", "-c", "color.ui=never", "-c", "core.quotepath=off", "-c", "i18n.logOutputEncoding=UTF-8"]).args(args).current_dir(cwd);
         claudegate_core::gitlog::sanitize_git_env(&mut cmd);
@@ -1168,9 +1189,9 @@ mod tests {
         let r = Runner::lazy();
         assert!(r.set_current("w", 1));
         let tag = Tag { window: "w".into(), query: 1 };
-        let held: Vec<_> = (0..PARALLEL - RESERVED).map(|_| r.acquire(Some(&tag)).ok().expect("a paging slot")).collect();
+        let held: Vec<_> = (0..PARALLEL - RESERVED).map(|_| r.acquire(Some(&tag), Share::Paging).ok().expect("a paging slot")).collect();
         // Paging is out of slots, but an untagged call still gets one.
-        let extra: Vec<_> = (0..RESERVED).map(|_| r.acquire(None).ok().expect("a reserved slot")).collect();
+        let extra: Vec<_> = (0..RESERVED).map(|_| r.acquire(None, Share::Reserved).ok().expect("a reserved slot")).collect();
         assert_eq!(*lock(&r.running), PARALLEL);
         drop(extra);
         drop(held);
@@ -1196,6 +1217,27 @@ mod tests {
         assert!(!r.is_current(&w));
         assert!(!r.is_current(&wc));
         assert!(r.is_current(&other), "\"wx\" is another window");
+    }
+
+    /// Every child runs with the sanitized environment, lazy fetch off included.
+    #[cfg(unix)]
+    #[test]
+    fn children_never_lazy_fetch() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("envgit");
+        std::fs::write(&fake, "#!/bin/sh\nexec env\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let r = Runner::new(fake);
+        let env = r.text(None, dir.path(), &["status"]).unwrap();
+        for want in ["GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0"] {
+            assert!(env.lines().any(|l| l == want), "{want} missing from:\n{env}");
+        }
+        // The same helper builds core's `RealGit` command.
+        let mut cmd = Command::new("git");
+        claudegate_core::gitlog::sanitize_git_env(&mut cmd);
+        let set: Vec<_> = cmd.get_envs().filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string()))).collect();
+        assert!(set.contains(&("GIT_NO_LAZY_FETCH".to_string(), "1".to_string())), "{set:?}");
     }
 
     #[test]

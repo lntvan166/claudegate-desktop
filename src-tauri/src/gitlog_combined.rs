@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use claudegate_core::gitlog::{is_sha, left_side, par_map, read_combined, Blob, CombinedRead, Fallback, GitRead, LeftSide, Mode, NetStatus, ReadError, RepoRead, COMBINED_LIMIT};
 use serde::{Deserialize, Serialize};
 
-use crate::gitlog::{channel, tree_path_ok, GitLog, GitLogState, RunError, Runner, Tag, STALE};
+use crate::gitlog::{channel, tree_path_ok, GitLog, GitLogState, RunError, Runner, Share, Tag, STALE};
 
 /// The channel Combined Changes' queries run on.
 pub const CHANNEL: &str = "combined";
@@ -136,9 +136,12 @@ fn failed_view(repo: String, why: &str) -> CombinedRepoView {
 }
 
 /// [`GitRead`] over the pooled runner: every child belongs to `tag`, so a newer selection kills it.
+/// `share` is the part of the pool it waits for: the tree is a background read
+/// (`Share::Paging`); a left side is a click (`Share::Reserved`), never queued behind the tree.
 pub struct TaggedGit<'a> {
     pub runner: &'a Runner,
     pub tag: &'a Tag,
+    pub share: Share,
     pub cwd: &'a Path,
 }
 
@@ -151,14 +154,14 @@ fn read_error(e: RunError) -> ReadError {
 
 impl GitRead for TaggedGit<'_> {
     fn read(&self, args: &[&str]) -> Result<Vec<u8>, ReadError> {
-        self.runner.run(Some(self.tag), self.cwd, args).map_err(read_error)
+        self.runner.run_in(Some(self.tag), self.share, self.cwd, args).map_err(read_error)
     }
 
     /// The size first (`cat-file -s`), so a blob over `max` is never read. A failed size: no such
     /// object.
     fn blob(&self, spec: &str, max: u64) -> Result<Blob, ReadError> {
-        let size = match self.runner.text(Some(self.tag), self.cwd, &["cat-file", "-s", spec]) {
-            Ok(s) => s,
+        let size = match self.runner.run_in(Some(self.tag), self.share, self.cwd, &["cat-file", "-s", spec]) {
+            Ok(s) => String::from_utf8_lossy(&s).into_owned(),
             Err(RunError::Failed(_)) => return Ok(Blob::Missing),
             Err(e) => return Err(read_error(e)),
         };
@@ -168,6 +171,13 @@ impl GitRead for TaggedGit<'_> {
         }
         self.read(&["cat-file", "blob", spec]).map(Blob::Bytes)
     }
+}
+
+/// `combined_left` was asked to take one commit out twice.
+pub const TWICE: &str = "A commit is listed twice";
+
+fn too_many() -> String {
+    format!("Combined Changes shows up to {COMBINED_LIMIT} commits")
 }
 
 fn bad_sha() -> String {
@@ -188,7 +198,7 @@ impl GitLog {
         let mut seen: HashSet<&CommitRef> = HashSet::new();
         let distinct: Vec<&CommitRef> = items.iter().filter(|i| seen.insert(*i)).collect();
         if distinct.len() > COMBINED_LIMIT {
-            return Err(format!("Combined Changes shows up to {COMBINED_LIMIT} commits"));
+            return Err(too_many());
         }
         if distinct.iter().any(|i| !is_sha(&i.sha)) {
             return Err(bad_sha());
@@ -208,7 +218,7 @@ impl GitLog {
         if !self.runner.set_current(&tag.window, query_id) {
             return Err(STALE.into());
         }
-        let reads = par_map(&groups, |(_, cwd, shas)| read_combined(&TaggedGit { runner: &self.runner, tag: &tag, cwd }, shas));
+        let reads = par_map(&groups, |(_, cwd, shas)| read_combined(&TaggedGit { runner: &self.runner, tag: &tag, share: Share::Paging, cwd }, shas));
         let mut repos = Vec::new();
         for ((repo, _, _), r) in groups.into_iter().zip(reads) {
             match r {
@@ -228,8 +238,17 @@ impl GitLog {
     /// starts one, so opening a file never supersedes the tree; a superseded selection returns
     /// `Err(STALE)`.
     pub fn combined_left(&self, window: &str, query_id: u64, repo: &str, last: &str, path: &str, without: &[String]) -> Result<CombinedLeftView, String> {
+        // Each commit taken out is a few git reads in sequence: bounded like a selection, and
+        // each at most once.
+        if without.len() > COMBINED_LIMIT {
+            return Err(too_many());
+        }
         if !is_sha(last) || without.iter().any(|s| !is_sha(s)) {
             return Err(bad_sha());
+        }
+        let mut seen = HashSet::new();
+        if !without.iter().all(|s| seen.insert(s)) {
+            return Err(TWICE.into());
         }
         if !tree_path_ok(path) {
             return Err(bad_path());
@@ -239,7 +258,7 @@ impl GitLog {
         if !self.runner.is_current(&tag) {
             return Err(STALE.into());
         }
-        let git = TaggedGit { runner: &self.runner, tag: &tag, cwd: &cwd };
+        let git = TaggedGit { runner: &self.runner, tag: &tag, share: Share::Reserved, cwd: &cwd };
         let left = match left_side(&git, last, path, without) {
             Ok(l) => l,
             Err(ReadError::Cancelled) => return Err(STALE.into()),
@@ -284,6 +303,57 @@ pub async fn gitlog_combined_left(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=Ann Dev", "-c", "user.email=ann@example.com", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Opening a file is a click: with the tree's whole share of the pool held, its left side
+    /// still answers, and its children still belong to the selection.
+    #[test]
+    fn left_side_uses_the_reserved_share() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path().join("acme-web");
+        std::fs::create_dir_all(&d).unwrap();
+        git(&d, &["init", "-q", "-b", "main"]);
+        std::fs::write(d.join("a.txt"), "one\ntwo\n").unwrap();
+        git(&d, &["add", "-A"]);
+        git(&d, &["commit", "-q", "-m", "base"]);
+        std::fs::write(d.join("a.txt"), "ONE\ntwo\n").unwrap();
+        git(&d, &["commit", "-q", "-am", "s1"]);
+        let s1 = git(&d, &["rev-parse", "HEAD"]);
+        let path = d.to_string_lossy().into_owned();
+        let repo = claudegate_core::gitlog::Repo {
+            id: format!("{path}/.git"),
+            name: "acme-web".into(),
+            color: 0,
+            checkouts: vec![claudegate_core::gitlog::Checkout { path, head: s1.clone(), branch: Some("main".into()), is_main: true }],
+        };
+        let id = repo.id.clone();
+        let g = std::sync::Arc::new(GitLog::new(Runner::new(std::path::PathBuf::from("git"))));
+        g.set_repos(vec![repo]);
+        let tag = Tag { window: channel("main", CHANNEL), query: 1 };
+        assert!(g.runner.set_current(&tag.window, 1));
+        let held: Vec<_> = (0..claudegate_core::gitlog::PARALLEL - crate::gitlog::RESERVED).map(|_| g.runner.acquire(Some(&tag), Share::Paging).ok().expect("a paging slot")).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let g2 = g.clone();
+        let worker = std::thread::spawn(move || {
+            let _ = tx.send(g2.combined_left("main", 1, &id, &s1, "a.txt", std::slice::from_ref(&s1)));
+        });
+        let got = rx.recv_timeout(std::time::Duration::from_secs(10));
+        drop(held);
+        worker.join().unwrap();
+        assert_eq!(got.expect("the left side waited behind the paging share"), Ok(CombinedLeftView::Text("one\ntwo\n".into())));
+    }
 
     #[test]
     fn views_serialize_camel_case() {

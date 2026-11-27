@@ -33,7 +33,9 @@ pub fn sanitize_git_env(cmd: &mut Command) {
             cmd.env_remove(&k);
         }
     }
-    cmd.env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0");
+    // No lazy fetch: in a partial clone, reading a missing blob would otherwise fetch it from
+    // the promisor remote and write it into `.git/objects`.
+    cmd.env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0").env("GIT_NO_LAZY_FETCH", "1");
 }
 
 /// The real `git` binary: no pager, no colour, unquoted paths, never prompts.

@@ -472,6 +472,10 @@ fn combined_rejects_bad_input() {
     assert_eq!(fx.g.combined_left("main", 4, &fx.web, &fx.c, "src/header.ts", &[fx.c.clone(), "HEAD~1".into()]), Err("Not a commit id".to_string()));
     assert_eq!(fx.g.combined_left("main", 4, &fx.web, "HEAD", "src/header.ts", &ok), Err("Not a commit id".to_string()));
     assert_eq!(fx.g.combined_left("main", 4, &fx.web, &fx.c, "../x", &ok), Err("Not a path in the repository".to_string()));
+    // `without` is bounded like a selection, and names each commit once.
+    let too_many: Vec<String> = (0..101u32).map(|i| format!("{i:040x}")).collect();
+    assert_eq!(fx.g.combined_left("main", 4, &fx.web, &fx.c, "src/header.ts", &too_many), Err("Combined Changes shows up to 100 commits".to_string()));
+    assert_eq!(fx.g.combined_left("main", 4, &fx.web, &fx.c, "src/header.ts", &[fx.c.clone(), fx.a.clone(), fx.c.clone()]), Err("A commit is listed twice".to_string()));
     assert_eq!(fx.g.combined_left("main", 4, "/nowhere/.git", &fx.c, "src/header.ts", &ok), Err("Unknown repository; refresh the list".to_string()));
     // Refused requests superseded nothing.
     assert!(fx.g.combined_left("main", 4, &fx.web, &fx.c, "src/header.ts", &ok).is_ok());
