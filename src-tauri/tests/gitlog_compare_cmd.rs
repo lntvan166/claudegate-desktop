@@ -306,6 +306,7 @@ fn branches_counted_across_repos() {
     let v = fx.g.branches(&fx.all()).unwrap();
     let b = |name: &str, count: usize, remote: bool| BranchNameView { name: name.into(), count, remote };
     assert_eq!(v, [b("main", 5, false), b("release-1.4", 4, false), b("origin/main", 1, true)]);
+    // origin/HEAD is not a branch, and the local main is not origin's.
     let j = serde_json::to_value(&v).unwrap();
     assert_eq!(j[2], serde_json::json!({"name": "origin/main", "count": 1, "remote": true}));
 }
@@ -325,4 +326,145 @@ fn run_code_reports_exit() {
     // A failing command is an answer here, and still an error through `run`.
     assert_eq!(r.run_code(None, api, &["rev-parse", "--verify", "--quiet", "nope"]).unwrap().0, 1);
     assert!(r.run(None, api, &["rev-parse", "--verify", "--quiet", "nope"]).is_err());
+}
+
+/// An executable shell script `name` in `dir`.
+fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let p = dir.join(name);
+    std::fs::write(&p, format!("#!/bin/sh\n{body}")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// A GitLog over `git` that runs through `wrapper`, for the fixture's repositories.
+fn through(fx: &Fx, wrapper: PathBuf) -> GitLog {
+    let g = GitLog::new(Runner::new(wrapper));
+    g.set_repos(NAMES.iter().map(|n| repo_at(&fx.dirs[n])).collect());
+    g
+}
+
+#[test]
+fn nobase_runs_no_count() {
+    let fx = fixture();
+    let tools = tempfile::tempdir().unwrap();
+    let log = tools.path().join("calls.log");
+    // Each call's subcommand: the first argument after git's `-c` options.
+    let wrapper = script(
+        tools.path(),
+        "loggit",
+        &format!("for a in \"$@\"; do case \"$a\" in for-each-ref|merge-base|rev-list|log|diff) echo \"$a\" >> '{}'; break;; esac; done\nexec git \"$@\"\n", log.display()),
+    );
+    let g = through(&fx, wrapper);
+    let v = g.compare("main", 1, &[fx.id("acme-docs")], LEFT, RIGHT).unwrap();
+    assert_eq!(v.rows[0].result, RepoCompareView::Nobase);
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "for-each-ref\nmerge-base\n", "no rev-list --cherry-mark without a merge base");
+    // With a base, the counts follow it.
+    std::fs::remove_file(&log).unwrap();
+    g.compare("main", 2, &[fx.id("acme-api")], LEFT, RIGHT).unwrap();
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "for-each-ref\nmerge-base\nrev-list\nrev-list\n");
+}
+
+#[test]
+fn a_tag_never_shadows_a_branch() {
+    let fx = fixture();
+    let api = &fx.dirs["acme-api"];
+    // A tag named like the branch, on another commit: rev-parse's DWIM would take the tag.
+    git(api, &["tag", LEFT, &fx.m1]);
+    let v = fx.g.compare("main", 1, &[fx.id("acme-api")], LEFT, RIGHT).unwrap();
+    assert_eq!(differs(&v.rows[0].result).0, fx.r2, "the branch, not the tag");
+    // A tag alone is no branch.
+    git(api, &["tag", "v1.0", &fx.m1]);
+    let v = fx.g.compare("main", 2, &[fx.id("acme-api")], "v1.0", RIGHT).unwrap();
+    assert_eq!(v.rows[0].result, RepoCompareView::Missing);
+}
+
+#[test]
+fn a_local_origin_branch_is_not_the_remote_one() {
+    let fx = fixture();
+    let api = &fx.dirs["acme-api"];
+    git(api, &["update-ref", "refs/remotes/origin/x", &fx.r2]);
+    git(api, &["update-ref", "refs/remotes/origin/y", &fx.r1]);
+    // Only the remote: the remote-tracking branch is compared.
+    let v = fx.g.compare("main", 1, &[fx.id("acme-api")], "origin/x", RIGHT).unwrap();
+    assert_eq!(differs(&v.rows[0].result).0, fx.r2);
+    // A local branch of the same name wins, and the picker lists both, each where it belongs.
+    git(api, &["update-ref", "refs/heads/origin/x", &fx.r1]);
+    let v = fx.g.compare("main", 2, &[fx.id("acme-api")], "origin/x", RIGHT).unwrap();
+    assert_eq!(differs(&v.rows[0].result).0, fx.r1);
+    let b = fx.g.branches(&[fx.id("acme-api")]).unwrap();
+    let mut got: Vec<(String, bool)> = b.iter().map(|b| (b.name.clone(), b.remote)).collect();
+    got.sort();
+    let want: Vec<(String, bool)> = [("main", false), ("origin/x", false), ("origin/x", true), ("origin/y", true), ("release-1.4", false)].iter().map(|(n, r)| (n.to_string(), *r)).collect();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn a_merge_is_not_counted() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    init(&d);
+    let c0 = commit(&d, &[("a.go", Some(b"a\n"))], "base", BASE);
+    git(&d, &["branch", LEFT]);
+    git(&d, &["checkout", "-q", "-b", "feat"]);
+    let f1 = commit(&d, &[("b.go", Some(b"b\n"))], "feat: b", BASE + 10);
+    git(&d, &["checkout", "-q", RIGHT]);
+    let m0 = commit(&d, &[("c.go", Some(b"c\n"))], "feat: c", BASE + 20);
+    git(&d, &["merge", "-q", "--no-ff", "-m", "merge feat", "feat"]);
+    let merge = git(&d, &["rev-parse", "HEAD"]);
+    assert_ne!(merge, m0);
+
+    let g = GitLog::new(Runner::new(PathBuf::from("git")));
+    let r = repo_at(&d);
+    let id = r.id.clone();
+    g.set_repos(vec![r]);
+    let v = g.compare("main", 1, std::slice::from_ref(&id), LEFT, RIGHT).unwrap();
+    assert_eq!(v.rows[0].result, RepoCompareView::Differs { left_sha: c0.clone(), right_sha: merge.clone(), base: c0.clone(), left: 0, right: 2, same_left: 0, same_right: 0 });
+    let right = g.compare_commits("main", 1, &id, "right", &c0, &merge, 500).unwrap();
+    let mut shas: Vec<String> = right.iter().map(|c| c.sha.clone()).collect();
+    shas.sort();
+    let mut want = vec![f1, m0];
+    want.sort();
+    assert_eq!(shas, want, "the merge commit is not listed");
+}
+
+#[test]
+fn a_broken_repository_is_an_error_not_missing() {
+    let fx = fixture();
+    // The folder removed after discovery.
+    std::fs::remove_dir_all(&fx.dirs["acme-old"]).unwrap();
+    // A folder that is no git repository (any more).
+    std::fs::remove_dir_all(fx.dirs["svc-lib"].join(".git")).unwrap();
+    let v = fx.g.compare("main", 1, &[fx.id("acme-old"), fx.id("svc-lib")], LEFT, RIGHT).unwrap();
+    match &v.rows[0].result {
+        RepoCompareView::Error { reason } => assert!(reason.contains("is missing"), "{reason}"),
+        other => panic!("removed folder: {other:?}"),
+    }
+    match &v.rows[1].result {
+        RepoCompareView::Error { reason } => assert!(reason.contains("not a git repository"), "{reason}"),
+        other => panic!("not a repository: {other:?}"),
+    }
+}
+
+#[test]
+fn merge_base_failure_keeps_gits_reason() {
+    let fx = fixture();
+    let tools = tempfile::tempdir().unwrap();
+    let wrapper = script(tools.path(), "badbase", "for a in \"$@\"; do [ \"$a\" = merge-base ] && { echo 'fatal: merge-base broke' >&2; exit 2; }; done\nexec git \"$@\"\n");
+    let g = through(&fx, wrapper);
+    let v = g.compare("main", 1, &[fx.id("acme-api")], LEFT, RIGHT).unwrap();
+    assert_eq!(v.rows[0].result, RepoCompareView::Error { reason: "fatal: merge-base broke".into() });
+}
+
+#[test]
+fn a_signal_keeps_gits_reason() {
+    let tools = tempfile::tempdir().unwrap();
+    let wrapper = script(tools.path(), "killedgit", "echo 'fatal: out of memory' >&2\nkill -9 $$\n");
+    let r = Runner::new(wrapper);
+    assert_eq!(r.run(None, tools.path(), &["status"]), Err(claudegate_desktop_lib::gitlog::RunError::Failed("fatal: out of memory".into())));
+    assert_eq!(r.run_code(None, tools.path(), &["status"]), Err(claudegate_desktop_lib::gitlog::RunError::Failed("fatal: out of memory".into())));
+    // Nothing on stderr: the status says what happened.
+    let quiet = script(tools.path(), "quietgit", "kill -9 $$\n");
+    let e = Runner::new(quiet).run(None, tools.path(), &["status"]).unwrap_err();
+    assert!(e.reason().contains("signal"), "{e:?}");
 }

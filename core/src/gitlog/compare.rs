@@ -36,28 +36,45 @@ fn strings(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| s.to_string()).collect()
 }
 
-/// Both tips and their trees in one spawn: the same tree means the same files, whatever the
-/// commits.
-pub fn rev_parse_args(p: &Pair) -> Vec<String> {
-    vec![
-        "rev-parse".into(),
-        "--end-of-options".into(),
-        format!("{}^{{commit}}", p.left),
-        format!("{}^{{commit}}", p.right),
-        format!("{}^{{tree}}", p.left),
-        format!("{}^{{tree}}", p.right),
-        "--".into(),
-    ]
+/// Four NUL-terminated fields per ref: refname, object type, object id, tree id.
+pub const RESOLVE_FORMAT: &str = "--format=%(refname)%00%(objecttype)%00%(objectname)%00%(tree)%00";
+const RESOLVE_FIELDS: usize = 4;
+
+/// Both tips and their trees in one spawn, looked up by exact refname: `refs/heads/<name>` or
+/// `refs/remotes/<name>`, never a tag and never git's DWIM order (where `refs/tags/x` shadows a
+/// branch `x`, and a local `origin/x` shadows the remote one). for-each-ref matches its patterns
+/// as prefixes too, so [`parse_resolve`] keeps exact matches only.
+pub fn resolve_args(p: &Pair) -> Vec<String> {
+    let mut v: Vec<String> = vec!["for-each-ref".into(), RESOLVE_FORMAT.into(), "--end-of-options".into()];
+    for n in [&p.left, &p.right] {
+        v.push(format!("refs/heads/{n}"));
+        v.push(format!("refs/remotes/{n}"));
+    }
+    v
 }
 
-/// `(left, right, same_tree)`, or `None` unless git answered with exactly four object ids. The
-/// separators rev-parse echoes (`--end-of-options`, `--`) are skipped.
-pub fn parse_rev_parse(out: &str) -> Option<(String, String, bool)> {
-    let ids: Vec<&str> = out.lines().map(str::trim).filter(|l| !l.is_empty() && *l != "--" && *l != "--end-of-options").collect();
-    if ids.len() != 4 || !ids.iter().all(|id| is_sha(id)) {
-        return None;
+/// One name's `(commit, tree)` from `resolve_args` output: the local branch when there is one,
+/// else the remote-tracking one. A ref that is not a commit counts as absent.
+fn resolve_one(refs: &[(&str, &str, &str, &str)], name: &str) -> Option<(String, String)> {
+    for full in [format!("refs/heads/{name}"), format!("refs/remotes/{name}")] {
+        if let Some((_, kind, id, tree)) = refs.iter().find(|r| r.0 == full) {
+            if *kind == "commit" && is_sha(id) && is_sha(tree) {
+                return Some((id.to_string(), tree.to_string()));
+            }
+            return None;
+        }
     }
-    Some((ids[0].to_string(), ids[1].to_string(), ids[2] == ids[3]))
+    None
+}
+
+/// `(left, right, same_tree)`, or `None` when either name is no branch of the repository.
+pub fn parse_resolve(out: &str, p: &Pair) -> Option<(String, String, bool)> {
+    let mut fields: Vec<&str> = out.split('\0').collect();
+    fields.pop();
+    let refs: Vec<(&str, &str, &str, &str)> = fields.chunks_exact(RESOLVE_FIELDS).map(|f| (f[0].trim_start_matches('\n'), f[1], f[2], f[3])).collect();
+    let (l, lt) = resolve_one(&refs, &p.left)?;
+    let (r, rt) = resolve_one(&refs, &p.right)?;
+    Some((l, r, lt == rt))
 }
 
 /// The merge base of two commit ids. Exit 1 with no output: no common history.
@@ -255,30 +272,34 @@ pub fn branch_refs_args() -> Vec<String> {
     strings(&["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"])
 }
 
-/// `(names, remotes)`: each branch without `refs/heads/` or `refs/remotes/` (a remote one reads
-/// `origin/main`), and the remotes seen, in order. `refs/remotes/*/HEAD` is dropped, and so is
-/// any name git would not take as a branch.
-pub fn parse_branch_refs(out: &str) -> (Vec<String>, Vec<String>) {
-    let (mut names, mut remotes): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
-    let mut seen: HashSet<String> = HashSet::new();
+/// A branch for the picker: its name without `refs/heads/` or `refs/remotes/`, and which of the
+/// two it came from.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BranchRef {
+    pub name: String,
+    pub remote: bool,
+}
+
+/// Each branch once, in git's order, classified by its refname: a local `origin/x` is local.
+/// `refs/remotes/*/HEAD` is dropped, and so is any name git would not take as a branch.
+pub fn parse_branch_refs(out: &str) -> Vec<BranchRef> {
+    let mut v: Vec<BranchRef> = Vec::new();
+    let mut seen: HashSet<BranchRef> = HashSet::new();
     for line in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let name = if let Some(n) = line.strip_prefix("refs/heads/") {
-            n
+        let (name, remote) = if let Some(n) = line.strip_prefix("refs/heads/") {
+            (n, false)
         } else if let Some(n) = line.strip_prefix("refs/remotes/") {
-            let Some((remote, rest)) = n.split_once('/') else { continue };
-            if rest == "HEAD" {
+            if n.split_once('/').is_none_or(|(_, rest)| rest == "HEAD") {
                 continue;
             }
-            if !remotes.iter().any(|r| r == remote) {
-                remotes.push(remote.to_string());
-            }
-            n
+            (n, true)
         } else {
             continue;
         };
-        if is_valid_ref(name) && seen.insert(name.to_string()) {
-            names.push(name.to_string());
+        let b = BranchRef { name: name.to_string(), remote };
+        if is_valid_ref(name) && seen.insert(b.clone()) {
+            v.push(b);
         }
     }
-    (names, remotes)
+    v
 }

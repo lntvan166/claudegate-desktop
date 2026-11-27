@@ -2,8 +2,8 @@
 //! builders differ where this app's lessons apply: `--end-of-options`, a trailing `--`, no
 //! signatures, textconv or external diff, and NUL fields for the side log.
 use claudegate_core::gitlog::compare::{
-    both_paths, branch_refs_args, files_args, merge_base_args, pair_duplicates, parse_branch_refs, parse_diff_z, parse_rev_parse, parse_side_count, parse_side_log, rev_parse_args, side_count_args, side_log_args, tip_paths,
-    valid_pair, Duplicate, Pair, Side, SideCommit, COMMIT_PAGE, SIDE_FORMAT,
+    both_paths, branch_refs_args, files_args, merge_base_args, pair_duplicates, parse_branch_refs, parse_diff_z, parse_resolve, parse_side_count, parse_side_log, resolve_args, side_count_args, side_log_args, tip_paths,
+    valid_pair, BranchRef, Duplicate, Pair, Side, SideCommit, COMMIT_PAGE, RESOLVE_FORMAT, SIDE_FORMAT,
 };
 use claudegate_core::gitlog::{ChangedFile, FileStatus};
 
@@ -26,21 +26,36 @@ fn a_pair_is_two_branch_names() {
     }
 }
 
+/// One for-each-ref record as `RESOLVE_FORMAT` prints it.
+fn rec(refname: &str, kind: &str, id: &str, tree: &str) -> String {
+    format!("{refname}\0{kind}\0{id}\0{tree}\0\n")
+}
+
 #[test]
-fn rev_parse_same_tree_is_identical() {
-    let (a, b) = (rep('a'), rep('b'));
+fn resolve_same_tree_is_identical() {
+    let (a, b, c) = (rep('a'), rep('b'), rep('c'));
     let (t1, t2) = (rep('1'), rep('2'));
+    let p = pair("origin/release-1.4", "main");
     assert_eq!(
-        rev_parse_args(&pair("origin/release-1.4", "main")),
-        ["rev-parse", "--end-of-options", "origin/release-1.4^{commit}", "main^{commit}", "origin/release-1.4^{tree}", "main^{tree}", "--"]
+        resolve_args(&p),
+        ["for-each-ref", RESOLVE_FORMAT, "--end-of-options", "refs/heads/origin/release-1.4", "refs/remotes/origin/release-1.4", "refs/heads/main", "refs/remotes/main"]
     );
-    assert_eq!(parse_rev_parse(&format!("{a}\n{b}\n{t1}\n{t2}\n")), Some((a.clone(), b.clone(), false)));
-    assert_eq!(parse_rev_parse(&format!("{a}\n{b}\n{t1}\n{t1}\n")), Some((a.clone(), b.clone(), true)));
-    // git echoes the separators rev-parse is given.
-    assert_eq!(parse_rev_parse(&format!("--end-of-options\n{a}\n{b}\n{t1}\n{t2}\n--\n")), Some((a.clone(), b.clone(), false)));
-    assert_eq!(parse_rev_parse(&format!("{a}\n{b}\n")), None);
-    assert_eq!(parse_rev_parse("nope\nzz\nyy\nxx\n"), None);
-    assert_eq!(parse_rev_parse(&format!("{a}\n{b}\n{t1}\n{t2}\n{t2}\n")), None, "five ids is not an answer");
+    let out = rec("refs/heads/main", "commit", &b, &t2) + &rec("refs/remotes/origin/release-1.4", "commit", &a, &t1);
+    assert_eq!(parse_resolve(&out, &p), Some((a.clone(), b.clone(), false)));
+    let out = rec("refs/heads/main", "commit", &b, &t1) + &rec("refs/remotes/origin/release-1.4", "commit", &a, &t1);
+    assert_eq!(parse_resolve(&out, &p), Some((a.clone(), b.clone(), true)));
+    // A missing branch, or a ref that is not a commit: no answer.
+    assert_eq!(parse_resolve(&rec("refs/heads/main", "commit", &b, &t2), &p), None);
+    assert_eq!(parse_resolve(&(rec("refs/heads/main", "commit", &b, &t2) + &rec("refs/remotes/origin/release-1.4", "blob", &a, "")), &p), None);
+    assert_eq!(parse_resolve("", &p), None);
+    // A local branch wins over the remote-tracking one of the same name.
+    let p = pair("origin/x", "main");
+    let out = rec("refs/heads/main", "commit", &b, &t2) + &rec("refs/heads/origin/x", "commit", &c, &t1) + &rec("refs/remotes/origin/x", "commit", &a, &t1);
+    assert_eq!(parse_resolve(&out, &p), Some((c.clone(), b.clone(), false)));
+    // Prefix matches (refs/remotes/origin matches refs/remotes/origin/main) are not the name.
+    let p = pair("origin", "main");
+    let out = rec("refs/heads/main", "commit", &b, &t2) + &rec("refs/remotes/origin/main", "commit", &a, &t1);
+    assert_eq!(parse_resolve(&out, &p), None);
 }
 
 #[test]
@@ -148,11 +163,10 @@ fn duplicates_pair_by_subject() {
 #[test]
 fn branch_refs_skip_head() {
     assert_eq!(branch_refs_args(), ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"]);
-    let out = "refs/heads/main\nrefs/heads/feat/billing\nrefs/remotes/origin/HEAD\nrefs/remotes/origin/main\nrefs/remotes/origin/release-1.4\n";
-    let (names, remotes) = parse_branch_refs(out);
-    assert_eq!(names, ["main", "feat/billing", "origin/main", "origin/release-1.4"]);
-    assert_eq!(remotes, ["origin"]);
-    assert_eq!(parse_branch_refs(""), (vec![], vec![]));
+    let out = "refs/heads/main\nrefs/heads/feat/billing\nrefs/heads/origin/x\nrefs/remotes/origin/HEAD\nrefs/remotes/origin/main\nrefs/remotes/origin/x\nrefs/remotes/bare\n";
+    let b = |name: &str, remote: bool| BranchRef { name: s(name), remote };
+    assert_eq!(parse_branch_refs(out), [b("main", false), b("feat/billing", false), b("origin/x", false), b("origin/main", true), b("origin/x", true)]);
+    assert_eq!(parse_branch_refs(""), []);
 }
 
 #[test]

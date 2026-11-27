@@ -97,6 +97,11 @@ fn kill(slot: &Slot) {
     }
 }
 
+/// The first non-empty line of git's stderr.
+fn first_line(err: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(err).lines().map(str::trim).find(|l| !l.is_empty()).map(String::from)
+}
+
 /// Runs `git` with at most `PARALLEL` children alive, each tracked by its query.
 pub struct Runner {
     /// The git binary; resolved on the first run, so nothing is probed at app start.
@@ -227,13 +232,11 @@ impl Runner {
     /// [`Runner::run`] waiting for the given `share` of the pool: a click that still belongs to
     /// a query (killed with it) takes `Share::Reserved`.
     pub fn run_in(&self, tag: Option<&Tag>, share: Share, cwd: &Path, args: &[&str]) -> Result<Vec<u8>, RunError> {
-        let (code, out, err) = self.exec(tag, share, cwd, args)?;
-        if code == 0 {
+        let (status, out, err) = self.exec(tag, share, cwd, args)?;
+        if status.success() {
             return Ok(out);
         }
-        let msg = String::from_utf8_lossy(&err);
-        let line = msg.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from);
-        Err(RunError::Failed(line.unwrap_or_else(|| format!("git exited with exit status: {code}"))))
+        Err(RunError::Failed(first_line(&err).unwrap_or_else(|| format!("git exited with {status}"))))
     }
 
     /// `git <args>` in `cwd`: its exit code and stdout bytes, for a command whose exit code is an
@@ -241,12 +244,24 @@ impl Runner {
     /// a child killed by a newer query is `Cancelled`, and one killed by anything else `Failed`.
     /// The pool share is [`Runner::run`]'s.
     pub fn run_code(&self, tag: Option<&Tag>, cwd: &Path, args: &[&str]) -> Result<(i32, Vec<u8>), RunError> {
-        let share = if tag.is_some() { Share::Paging } else { Share::Reserved };
-        self.exec(tag, share, cwd, args).map(|(code, out, _)| (code, out))
+        self.run_code_err(tag, cwd, args).map(|(code, out, _)| (code, out))
     }
 
-    /// The one place a child is spawned: exit code, stdout, stderr.
-    fn exec(&self, tag: Option<&Tag>, share: Share, cwd: &Path, args: &[&str]) -> Result<(i32, Vec<u8>, Vec<u8>), RunError> {
+    /// [`Runner::run_code`] with git's first stderr line, if any, to explain an exit code that is
+    /// not an answer.
+    pub fn run_code_err(&self, tag: Option<&Tag>, cwd: &Path, args: &[&str]) -> Result<(i32, Vec<u8>, Option<String>), RunError> {
+        let share = if tag.is_some() { Share::Paging } else { Share::Reserved };
+        let (status, out, err) = self.exec(tag, share, cwd, args)?;
+        match status.code() {
+            Some(code) => Ok((code, out, first_line(&err))),
+            // Killed by a signal nobody here sent.
+            None => Err(RunError::Failed(first_line(&err).unwrap_or_else(|| format!("git exited with {status}")))),
+        }
+    }
+
+    /// The one place a child is spawned: exit status, stdout, stderr. `Cancelled` only when a
+    /// newer query killed it.
+    fn exec(&self, tag: Option<&Tag>, share: Share, cwd: &Path, args: &[&str]) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), RunError> {
         if !cwd.is_dir() {
             return Err(RunError::Spawn(format!("The folder {} is missing", cwd.display())));
         }
@@ -294,11 +309,7 @@ impl Runner {
         match status {
             // Killed by `set_current`, which reaped it.
             None => Err(RunError::Cancelled),
-            Some(s) => match s.code() {
-                Some(code) => Ok((code, out, err)),
-                // Killed by a signal nobody here sent.
-                None => Err(RunError::Failed(format!("git exited with {s}"))),
-            },
+            Some(s) => Ok((s, out, err)),
         }
     }
 
