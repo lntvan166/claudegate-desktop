@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pinned checkout of the ClaudeGate extension; the tag lives here and only here.
-EXT_TAG="v1.17.0"
+EXT_TAG="v1.18.0"
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [ ! -d .xcheck-cache/claudegate ]; then
