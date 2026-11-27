@@ -1,24 +1,31 @@
 <script lang="ts">
   import { keyStep } from "../lib/panes";
 
-  // A vertical drag handle between two columns. It reports widths; the caller clamps and stores.
+  // A drag handle between two columns (default) or two rows (`direction="row"`). It reports sizes
+  // (a width, or a height); the caller clamps and stores.
   let {
     label,
+    direction = "col",
     value,
     min,
     max,
-    left,
+    left = 0,
+    top = 0,
     onresize,
     oncommit,
     onreset,
   }: {
     label: string;
-    /** The width of the column to the handle's left. */
+    /** "col": a vertical handle between columns; "row": a horizontal one between rows. */
+    direction?: "col" | "row";
+    /** The size of the column to the handle's left (or of the row above it, for "row"). */
     value: number;
     min: number;
     max: number;
     /** The x of the 1px edge the handle sits on, in px from its positioned parent's left edge. */
-    left: number;
+    left?: number;
+    /** "row" only: the y of the 1px edge the handle sits on, in px from its positioned parent's top edge. */
+    top?: number;
     /** A new width for the left column, while dragging or from the keyboard. */
     onresize: (width: number) => void;
     /** The drag or key press is over: a good time to persist. */
@@ -27,6 +34,7 @@
   } = $props();
 
   let dragging = $state(false);
+  const row = $derived(direction === "row");
   let startX = 0;
   let startWidth = 0;
 
@@ -35,15 +43,15 @@
     e.preventDefault();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     (e.currentTarget as HTMLElement).focus();
-    startX = e.clientX;
+    startX = row ? e.clientY : e.clientX;
     startWidth = value;
     dragging = true;
-    document.documentElement.classList.add("col-resizing");
+    document.documentElement.classList.add(row ? "row-resizing" : "col-resizing");
   }
 
   function move(e: PointerEvent) {
     if (!dragging) return;
-    onresize(startWidth + e.clientX - startX);
+    onresize(startWidth + (row ? e.clientY : e.clientX) - startX);
   }
 
   function up(e: PointerEvent) {
@@ -51,13 +59,15 @@
     dragging = false;
     const el = e.currentTarget as HTMLElement;
     if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
-    document.documentElement.classList.remove("col-resizing");
+    document.documentElement.classList.remove("col-resizing", "row-resizing");
     oncommit();
   }
 
   function key(e: KeyboardEvent) {
     let next: number | null = null;
-    const step = keyStep(e.key, e.shiftKey);
+    // A row handle moves with the vertical arrows (Up shrinks the row above); a column handle with the horizontal ones.
+    const k = row ? (e.key === "ArrowUp" ? "ArrowLeft" : e.key === "ArrowDown" ? "ArrowRight" : "") : e.key;
+    const step = keyStep(k, e.shiftKey);
     if (step !== null) next = value + step;
     else if (e.key === "Home") next = min;
     else if (e.key === "End") next = max;
@@ -75,9 +85,11 @@
 <div
   class="splitter"
   class:dragging
-  style:left="{left}px"
+  class:row
+  style:left={row ? null : `${left}px`}
+  style:top={row ? `${top}px` : null}
   role="separator"
-  aria-orientation="vertical"
+  aria-orientation={row ? "horizontal" : "vertical"}
   aria-label={label}
   aria-valuenow={Math.round(value)}
   aria-valuemin={min}
@@ -127,9 +139,33 @@
   .splitter.dragging::after {
     background: var(--focus-ring);
   }
+  .splitter.row {
+    top: auto;
+    bottom: auto;
+    left: 0;
+    right: 0;
+    width: auto;
+    height: 8px;
+    margin-left: 0;
+    margin-top: -4px;
+    cursor: row-resize;
+  }
+  .splitter.row::after {
+    top: 4px;
+    bottom: auto;
+    left: 0;
+    right: 0;
+    width: auto;
+    height: 1px;
+  }
   :global(html.col-resizing),
   :global(html.col-resizing *) {
     cursor: col-resize !important;
+    user-select: none !important;
+  }
+  :global(html.row-resizing),
+  :global(html.row-resizing *) {
+    cursor: row-resize !important;
     user-select: none !important;
   }
 </style>

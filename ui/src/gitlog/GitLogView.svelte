@@ -42,7 +42,14 @@
     DEFAULT_GITLOG_CONFIG,
     PANE_DEFAULTS,
     PANE_MIN,
+    ROW_MIN,
+    TOP_DEFAULT,
+    clampTop,
     fitPanes,
+    fitTop,
+    topFrom,
+    topMax,
+    topToStored,
     isTicked,
     paneMax,
     panesFrom,
@@ -102,6 +109,10 @@
   let refreshing = $state(false);
   let cfg = $state<GitLogConfig>(structuredClone(DEFAULT_GITLOG_CONFIG));
   let preferred = $state<GitLogPanes>({ ...PANE_DEFAULTS });
+  /** The top row's share of the sheet (null: the default), and the sheet's height it is a share of. */
+  let topShare = $state<number | null>(null);
+  let sheetH = $state(0);
+  const topH = $derived(sheetH > 0 ? fitTop(topShare, sheetH) : 0);
   let collapsed = $state(readCollapsed());
   let innerWidth = $state(typeof window === "undefined" ? 1200 : window.innerWidth);
   const panes = $derived(fitPanes(preferred, innerWidth, collapsed));
@@ -316,7 +327,7 @@
     const f = activeFile;
     const empty = {
       title: selected ? "Select a file to see its diff" : "Select a commit to see its changes",
-      body: selected ? "Click a file in Changes, or press Enter on it." : "Pick one in the log above; its files appear on the left.",
+      body: selected ? "Click a file in Changes, or press Enter on it." : "Pick one in the log below; its files appear in Changes.",
     };
     return {
       payload: pane?.kind === "diff" ? pane.payload : null,
@@ -399,6 +410,7 @@
       cfg = await gitlogConfig();
       if (launchTicks) cfg = { ...cfg, ticked: launchTicks };
       preferred = panesFrom(cfg.panes);
+      topShare = topFrom(cfg.panes);
       filter = parseFilter(cfg.lastFilter);
       lastStored = JSON.stringify(filter);
       filtersRead = true;
@@ -422,6 +434,21 @@
   function resetPane(pane: keyof GitLogPanes) {
     preferred = { ...preferred, [pane]: PANE_DEFAULTS[pane] };
     storePane(pane);
+  }
+
+  function setTop(h: number) {
+    if (sheetH > 0) topShare = clampTop(h, sheetH) / sheetH;
+  }
+  function storeTop() {
+    if (topShare === null) return;
+    void gitlogPane("top", topToStored(topShare)).then(
+      (c) => (cfg = { ...cfg, panes: c.panes }),
+      () => {},
+    );
+  }
+  function resetTop() {
+    topShare = TOP_DEFAULT;
+    storeTop();
   }
 
   onMount(() => {
@@ -470,7 +497,8 @@
     </div>
   {/if}
 
-  <div class="sheet">
+  <div class="sheet" bind:clientHeight={sheetH}>
+    <!-- The commit list comes first in the DOM, so Tab runs list, tree, diff; the top row is drawn above it. -->
     <div class="log">
       <Filters bind:this={filters} bind:filter loading={logBusy} onrefresh={() => logList?.refresh()} onexit={() => logList?.focusList()} />
       {#if (repos === null && !reposError) || !configReady}
@@ -493,7 +521,7 @@
       {/if}
     </div>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="bottom" onkeydown={leaveBottom}>
+    <div class="top" style:height={topH > 0 ? `${topH}px` : `${TOP_DEFAULT * 100}%`} onkeydown={leaveBottom}>
       <Changes
         bind:this={changesTree}
         title={changesHeading}
@@ -536,6 +564,19 @@
         />
       </div>
     </div>
+    {#if topH > 0}
+      <Splitter
+        direction="row"
+        label="Resize diff and commit list"
+        value={topH}
+        min={ROW_MIN}
+        max={topMax(sheetH)}
+        top={topH - 1}
+        onresize={setTop}
+        oncommit={storeTop}
+        onreset={resetTop}
+      />
+    {/if}
   </div>
 </div>
 
@@ -567,8 +608,8 @@
 
   .sheet {
     position: relative;
-    display: grid;
-    grid-template-rows: minmax(0, 11fr) minmax(0, 9fr);
+    display: flex;
+    flex-direction: column;
     min-height: 0;
     margin: 0 var(--sheet-inset) var(--sheet-inset) 0;
     background: var(--surface);
@@ -577,19 +618,25 @@
     overflow: hidden;
     overflow: clip;
   }
+  /* Filters and the commit list: the bottom row, after the top row on screen though before it in the DOM. */
   .log {
+    order: 2;
+    flex: 1 1 0;
     display: flex;
     flex-direction: column;
     min-height: 0;
-    border-bottom: 1px solid var(--rule);
   }
-  .bottom {
+  /* Changes | diff: the top row, its height set from the splitter. */
+  .top {
+    order: 1;
+    flex: none;
     position: relative;
     display: grid;
     grid-template-columns: var(--changes-w) minmax(0, 1fr);
     min-height: 0;
+    border-bottom: 1px solid var(--rule);
   }
-  .bottom > :global(.changes) {
+  .top > :global(.changes) {
     border-right: 1px solid var(--rule);
   }
   .diffcol {
@@ -615,7 +662,7 @@
     background: var(--hover);
   }
 
-  /* A narrow window: repositories on top; the commit list, then the commit's files over its diff. */
+  /* A narrow window: repositories on top; then the commit's files over its diff, with the commit list below. */
   @media (max-width: 720px) {
     .gitlog-view {
       grid-template-columns: minmax(0, 1fr);
@@ -630,11 +677,11 @@
     .sheet {
       margin: 0 var(--sheet-inset) var(--sheet-inset);
     }
-    .bottom {
+    .top {
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: minmax(0, 2fr) minmax(0, 3fr);
     }
-    .bottom > :global(.changes) {
+    .top > :global(.changes) {
       border-right: 0;
       border-bottom: 1px solid var(--rule);
     }

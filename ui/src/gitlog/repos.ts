@@ -143,7 +143,7 @@ export function rangeOf(order: string[], anchor: string | null, target: string):
 
 export type GitLogPanes = { repos: number; changes: number };
 export const PANE_DEFAULTS: Readonly<GitLogPanes> = { repos: 240, changes: 320 };
-export const PANE_MIN = { repos: 180, changes: 220, diff: 360 } as const;
+export const PANE_MIN = { repos: 180, changes: 160, diff: 360 } as const;
 /** The collapsed Repositories column (the review's projects rail is as wide). */
 export const REPOS_RAIL = 44;
 /** The sheet's right inset and 1px borders: neither pane's. */
@@ -177,6 +177,42 @@ export function fitPanes(w: GitLogPanes, total: number, collapsed: boolean): Git
 export function paneMax(w: GitLogPanes, pane: keyof GitLogPanes, total: number): number {
   const other = pane === "repos" ? w.changes : w.repos;
   return Math.max(PANE_MIN[pane], total - PANE_CHROME - PANE_MIN.diff - other);
+}
+
+// ---- the two rows --------------------------------------------------------------------------------
+// The sheet splits into a top row (Changes | diff) and a bottom row (filters + commit list). The
+// top row's size is kept as a share of the sheet's height, in thousandths (`gitLog.panes.top`; the
+// backend stores whole numbers), so it stays proportional when the window is resized. Without one
+// it is 55%.
+
+/** Shortest a row may be, so neither can collapse out of reach. */
+export const ROW_MIN = 120;
+/** The top row's share of the sheet before the user has dragged. */
+export const TOP_DEFAULT = 0.55;
+
+/** The stored top-row share (0..1), or null (use the default). */
+export function topFrom(stored: Record<string, number>): number | null {
+  const n = stored.top;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 && n < 1000 ? n / 1000 : null;
+}
+
+/** A share in the whole thousandths the backend stores, never 0 or 1000. */
+export function topToStored(share: number): number {
+  return Math.min(999, Math.max(1, Math.round(share * 1000)));
+}
+
+/** The tallest the top row can be in a sheet `total` px high: the bottom row keeps its minimum. */
+export function topMax(total: number): number {
+  return Math.max(ROW_MIN, total - ROW_MIN);
+}
+
+export function clampTop(h: number, total: number): number {
+  return Math.min(topMax(total), Math.max(ROW_MIN, Math.round(h)));
+}
+
+/** The top row's height to draw: its share (or the default) of the sheet, kept within both rows' minimums. */
+export function fitTop(share: number | null, total: number): number {
+  return clampTop(total * (share ?? TOP_DEFAULT), total);
 }
 
 /** Whether a profile of that (trimmed) name exists. Own keys only: "constructor" is not a profile. */

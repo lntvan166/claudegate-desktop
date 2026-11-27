@@ -118,6 +118,32 @@ describe("pane widths", () => {
   });
 });
 
+describe("row heights", () => {
+  it("reads the stored top share, null when missing or invalid", async () => {
+    const { topFrom } = await import("./repos");
+    expect(topFrom({})).toBeNull();
+    expect(topFrom({ top: -1 })).toBeNull();
+    expect(topFrom({ top: 1000 })).toBeNull();
+    expect(topFrom({ top: 600 })).toBe(0.6);
+  });
+  it("stores a share as whole thousandths, never 0", async () => {
+    const { topToStored } = await import("./repos");
+    expect(topToStored(0.55)).toBe(550);
+    expect(topToStored(0)).toBe(1);
+    expect(topToStored(1)).toBe(999);
+  });
+  it("defaults to 55% and keeps both rows at their minimum", async () => {
+    const { fitTop, clampTop, ROW_MIN } = await import("./repos");
+    expect(fitTop(null, 800)).toBe(440);
+    expect(fitTop(0.5, 800)).toBe(400);
+    expect(fitTop(0.01, 800)).toBe(ROW_MIN);
+    expect(fitTop(0.99, 800)).toBe(800 - ROW_MIN);
+    expect(clampTop(300.4, 800)).toBe(300);
+    // A sheet too short for two rows: the top keeps its minimum, nothing goes to 0 or below.
+    expect(fitTop(null, 200)).toBeGreaterThanOrEqual(ROW_MIN);
+  });
+});
+
 describe("profile names", () => {
   it("matches own, trimmed names only", async () => {
     const { hasProfile } = await import("./repos");
