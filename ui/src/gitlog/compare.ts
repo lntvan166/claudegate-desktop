@@ -188,8 +188,9 @@ export function compareBanner(side: CompareSide, p: Pair): { tone: "info"; text:
   return { tone: "info", text: `merge base ↔ ${remote ? name.replace(/^origin\//, "") : name}` };
 }
 
-export type CompareState = { loading: boolean; view: CompareView | null; error: string | null };
-export const EMPTY_COMPARE: CompareState = { loading: false, view: null, error: null };
+/** `pair` is the pair `view` answers (it trails the toolbar while a newer read is in flight). */
+export type CompareState = { loading: boolean; view: CompareView | null; pair: Pair | null; error: string | null };
+export const EMPTY_COMPARE: CompareState = { loading: false, view: null, pair: null, error: null };
 export type CompareFetcher = (queryId: number, repos: string[], pair: Pair) => Promise<CompareView>;
 
 /**
@@ -219,15 +220,15 @@ export class CompareLoad {
   async start(repos: string[], pair: Pair): Promise<void> {
     const id = this.gate.begin();
     this.current = id;
-    // The old rows stay (dimmed) until the new ones land.
-    this.set({ loading: true, view: this.state.view, error: null });
+    // The old rows stay (dimmed, with the pair they answer) until the new ones land.
+    this.set({ ...this.state, loading: true, error: null });
     try {
       const view = await this.fetch(id, repos, pair);
       if (id !== this.current || view.queryId !== id) return;
-      this.set({ loading: false, view, error: null });
+      this.set({ loading: false, view, pair: { ...pair }, error: null });
     } catch (e) {
       if (id !== this.current) return;
-      this.set({ loading: false, view: null, error: isStale(e) ? "The comparison changed while it was being read" : String(e) });
+      this.set({ loading: false, view: null, pair: null, error: isStale(e) ? "The comparison changed while it was being read" : String(e) });
     }
   }
 
@@ -235,7 +236,7 @@ export class CompareLoad {
   mirror() {
     const v = this.state.view;
     if (!v) return;
-    this.set({ ...this.state, view: { queryId: v.queryId, rows: v.rows.map((r) => ({ repo: r.repo, ...mirror(r) })) } });
+    this.set({ ...this.state, view: { queryId: v.queryId, rows: v.rows.map((r) => ({ repo: r.repo, ...mirror(r) })) }, pair: this.state.pair && swapPair(this.state.pair) });
   }
 
   /** Nothing to compare: whatever is in flight is ignored. */
@@ -262,4 +263,66 @@ export function compareKey(p: Pair | null, repos: readonly string[]): string {
 /** Both names given, and two different refs. */
 export function comparable(p: Pair | null): p is Pair {
   return !!p && !!p.left && !!p.right && !sameKey({ name: p.left, remote: p.leftRemote }, { name: p.right, remote: p.rightRemote });
+}
+
+/** A repo row's counts in words, for a screen reader: "3 only on X, 1 only on Y, 1 on both". */
+export function repoCountsLabel(c: RepoCompare, p: Pair): string {
+  if (c.kind !== "differs") return repoCounts(c);
+  const parts = [c.left > 0 ? `${c.left} only on ${p.left}` : "", c.right > 0 ? `${c.right} only on ${p.right}` : "", c.sameLeft > 0 ? `${c.sameLeft} on both` : ""].filter(Boolean);
+  return parts.length ? parts.join(", ") : "no commits on either side";
+}
+
+export type ReadState<T> = { data: T | null; loading: boolean; error: string | null };
+export const EMPTY_READ: ReadState<never> = { data: null, loading: false, error: null };
+
+/**
+ * One column read (Files, or one side's commits) under a compare query. A newer `run`, `hit` or
+ * `reset` supersedes the one in flight. A STALE answer to the current run ends it with no data and
+ * no error, and remembers the query it was cut short under: `neededFor` is then true again for any
+ * other query (the next compare, even with the same tips), never for that one (no re-read loop).
+ */
+export class GatedRead<T> {
+  private seq = 0;
+  private staleQuery: number | null = null;
+  state: ReadState<T> = EMPTY_READ;
+
+  constructor(private readonly emit: (s: ReadState<T>) => void) {}
+
+  private set(s: ReadState<T>) {
+    this.state = s;
+    this.emit(s);
+  }
+
+  /** Nothing here, nothing in flight, nothing failed, and `query` did not already cut it short: a read is due. */
+  neededFor(query: number): boolean {
+    return this.state.data === null && !this.state.loading && this.state.error === null && this.staleQuery !== query;
+  }
+
+  reset() {
+    this.seq++;
+    this.staleQuery = null;
+    this.set(EMPTY_READ);
+  }
+
+  /** An answer already in hand (a cache hit). */
+  hit(v: T) {
+    this.seq++;
+    this.set({ data: v, loading: false, error: null });
+  }
+
+  /** Reads under `query`; what is shown stays (dimmed) until the answer lands. */
+  async run(query: number, fetch: () => Promise<T>): Promise<void> {
+    const seq = ++this.seq;
+    this.staleQuery = null;
+    this.set({ data: this.state.data, loading: true, error: null });
+    try {
+      const v = await fetch();
+      if (seq !== this.seq) return;
+      this.set({ data: v, loading: false, error: null });
+    } catch (e) {
+      if (seq !== this.seq) return;
+      if (isStale(e)) this.staleQuery = query;
+      this.set({ data: this.state.data, loading: false, error: isStale(e) ? null : String(e) });
+    }
+  }
 }

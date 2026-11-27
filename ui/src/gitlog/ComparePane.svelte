@@ -21,6 +21,8 @@
     listed,
     missingText,
     repoCounts,
+    repoCountsLabel,
+    samePair,
     summaryLabel,
     swapPair,
     type BranchName,
@@ -84,6 +86,10 @@
     !comparable(pair) || ticked === 0 ? "" : cs.loading ? `Reading ${ticked === 1 ? "1 repository" : `${ticked} repositories`}…` : cs.view ? summaryLabel(rows, ticked) : "",
   );
 
+  /** The pair the shown rows answer: it trails the toolbar while a newer read is in flight. */
+  const shownPair = $derived(cs.pair ?? pair);
+  /** Rows of an older pair under a newer pair's labels: dimmed and out of reach until the answer lands. */
+  const outdated = $derived(cs.loading && !!pair && !!cs.pair && !samePair(cs.pair, pair));
   const repoById = $derived(new Map(repos.map((r) => [r.id, r])));
   const nameOf = (id: string) => repoById.get(id)?.name ?? id.replace(/\/\.git\/?$/, "").split("/").pop() ?? id;
 
@@ -314,15 +320,15 @@
   {#if cs.error}
     <p class="message" role="alert">Couldn't compare the branches: {cs.error}</p>
   {:else if message}
-    <p class="message">{message}</p>
+    <p class="message" role="status">{message}</p>
     {#if cs.view && missingRows.length > 0 && pair && listedRows.length === 0}
       <details class="missing solo">
         <summary>{missingText(pair, missingRows.length)}</summary>
         <ul>{#each missingRows as r (r.repo)}<li>{nameOf(r.repo)}</li>{/each}</ul>
       </details>
     {/if}
-  {:else if pair}
-    <div class="cbody" class:stale={cs.loading}>
+  {:else if shownPair}
+    <div class="cbody" class:stale={cs.loading} inert={outdated} aria-busy={cs.loading}>
       <div class="side">
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
         <div
@@ -345,6 +351,7 @@
               data-repo={r.repo}
               aria-selected={r.repo === selected}
               tabindex="-1"
+              aria-label="{nameOf(r.repo)}: {repoCountsLabel(r, shownPair)}"
               title={r.kind === "error" ? r.reason : r.kind === "nobase" ? "The two branches share no ancestor here" : undefined}
               style:--c={colorVar(repo?.color ?? 0)}
               onclick={() => {
@@ -359,13 +366,13 @@
         </div>
         {#if missingRows.length > 0}
           <details class="missing">
-            <summary>{missingText(pair, missingRows.length)}</summary>
+            <summary>{missingText(shownPair, missingRows.length)}</summary>
             <ul>{#each missingRows as r (r.repo)}<li>{nameOf(r.repo)}</li>{/each}</ul>
           </details>
         {/if}
       </div>
       {#if selectedRow && cs.view}
-        <CompareColumns bind:this={columns} row={selectedRow} name={nameOf(selectedRow.repo)} {pair} {mode} queryId={cs.view.queryId} {theme} {open} {onopen} onescape={() => listEl?.focus()} />
+        <CompareColumns bind:this={columns} row={selectedRow} name={nameOf(selectedRow.repo)} pair={shownPair} {mode} queryId={cs.view.queryId} {theme} {open} {onopen} onescape={() => listEl?.focus()} />
       {/if}
     </div>
   {/if}
@@ -551,7 +558,8 @@
     overflow: auto;
     padding: 4px 0;
   }
-  .rlist:focus {
+  /* The ring is for the keyboard only: the focus-visible rule above draws it. */
+  .rlist:focus:not(:focus-visible) {
     outline: none;
   }
   .rrow {

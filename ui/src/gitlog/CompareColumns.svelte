@@ -23,6 +23,9 @@
   import { countsText, statusLetter, statusText } from "./changes";
   import {
     COMMIT_PAGE,
+    EMPTY_READ,
+    GatedRead,
+    type ReadState,
     bothStripText,
     columnHeader,
     emptyColumnText,
@@ -34,7 +37,7 @@
     type CompareSide,
     type Pair,
   } from "./compare";
-  import { commitAge, commitDate, isStale, shortSha } from "./log";
+  import { commitAge, commitDate, shortSha } from "./log";
 
   // The selected repository's two sides: what each branch has that the other has not, as a folder
   // tree of files (Files) or as commits (Commits), and the On both strip under them. Reads are tied
@@ -69,112 +72,99 @@
   const dupCount = $derived(d ? Math.max(d.sameLeft, d.sameRight) : 0);
 
   // ---- Files ----
-  let files = $state<CompareFiles | null>(null);
-  let filesError = $state<string | null>(null);
-  let filesLoading = $state(false);
-  let filesSeq = 0;
+  let filesSt = $state<ReadState<CompareFiles>>(EMPTY_READ);
+  const filesRead = new GatedRead<CompareFiles>((st) => (filesSt = st));
+  const files = $derived(filesSt.data);
   const filesKey = (l: string, r: string) => `${row.repo}\u0000${l}\u0000${r}`;
 
-  async function loadFiles() {
+  function loadFiles() {
     if (!d) return;
-    const seq = ++filesSeq;
-    const hit = filesCache.get(filesKey(d.leftSha, d.rightSha));
-    const flipped = filesCache.get(filesKey(d.rightSha, d.leftSha));
-    if (hit || flipped) {
-      files = hit ?? { left: flipped!.right, right: flipped!.left, both: flipped!.both };
-      filesError = null;
-      filesLoading = false;
-      return;
-    }
-    filesLoading = true;
-    filesError = null;
-    try {
-      const f = await gitlogCompareFiles(queryId, row.repo, d.leftSha, d.rightSha, d.base);
-      remember(filesCache, filesKey(d.leftSha, d.rightSha), f);
-      if (seq !== filesSeq) return;
-      files = f;
-      filesLoading = false;
-    } catch (e) {
-      // A newer compare took over: its answer brings the rows (and this read) again.
-      if (seq !== filesSeq || isStale(e)) return;
-      filesError = String(e);
-      filesLoading = false;
-    }
+    const { leftSha, rightSha, base } = d;
+    const hit = filesCache.get(filesKey(leftSha, rightSha));
+    const flipped = filesCache.get(filesKey(rightSha, leftSha));
+    if (hit || flipped) return filesRead.hit(hit ?? { left: flipped!.right, right: flipped!.left, both: flipped!.both });
+    const repo = row.repo;
+    const qid = queryId;
+    // A STALE answer (a newer compare took over) ends the read with nothing: the next query reads again.
+    void filesRead.run(qid, async () => {
+      const f = await gitlogCompareFiles(qid, repo, leftSha, rightSha, base);
+      remember(filesCache, `${repo}\u0000${leftSha}\u0000${rightSha}`, f);
+      return f;
+    });
   }
 
   // ---- Commits ----
-  type SideState = { commits: SideCommit[] | null; limit: number; loading: boolean; error: string | null };
-  const fresh = (): SideState => ({ commits: null, limit: COMMIT_PAGE, loading: false, error: null });
-  let sides = $state<Record<CompareSide, SideState>>({ left: fresh(), right: fresh() });
-  const commitSeq: Record<CompareSide, number> = { left: 0, right: 0 };
+  type SidePage = { commits: SideCommit[]; limit: number };
+  let sideSt = $state<Record<CompareSide, ReadState<SidePage>>>({ left: EMPTY_READ, right: EMPTY_READ });
+  const sideRead: Record<CompareSide, GatedRead<SidePage>> = {
+    left: new GatedRead<SidePage>((st) => {
+      sideSt.left = st;
+    }),
+    right: new GatedRead<SidePage>((st) => {
+      sideSt.right = st;
+    }),
+  };
   const commitsKey = (side: CompareSide, l: string, r: string, max: number) => `${row.repo}\u0000${side}\u0000${l}\u0000${r}\u0000${max}`;
 
-  async function loadCommits(side: CompareSide, limit: number) {
+  function loadCommits(side: CompareSide, limit: number) {
     if (!d) return;
-    const seq = ++commitSeq[side];
+    const { leftSha, rightSha } = d;
     const max = limit + 1;
     const other: CompareSide = side === "left" ? "right" : "left";
-    const hit = commitsCache.get(commitsKey(side, d.leftSha, d.rightSha, max)) ?? commitsCache.get(commitsKey(other, d.rightSha, d.leftSha, max));
-    if (hit) {
-      sides[side] = { commits: hit, limit, loading: false, error: null };
-      return;
-    }
-    sides[side] = { ...sides[side], loading: true, error: null };
-    try {
-      const list = await gitlogCompareCommits(queryId, row.repo, side, d.leftSha, d.rightSha, max);
-      remember(commitsCache, commitsKey(side, d.leftSha, d.rightSha, max), list);
-      if (seq !== commitSeq[side]) return;
-      sides[side] = { commits: list, limit, loading: false, error: null };
-    } catch (e) {
-      if (seq !== commitSeq[side] || isStale(e)) return;
-      sides[side] = { ...sides[side], loading: false, error: String(e) };
-    }
+    const hit = commitsCache.get(commitsKey(side, leftSha, rightSha, max)) ?? commitsCache.get(commitsKey(other, rightSha, leftSha, max));
+    if (hit) return sideRead[side].hit({ commits: hit, limit });
+    const repo = row.repo;
+    const key = commitsKey(side, leftSha, rightSha, max);
+    const qid = queryId;
+    void sideRead[side].run(qid, async () => {
+      const list = await gitlogCompareCommits(qid, repo, side, leftSha, rightSha, max);
+      remember(commitsCache, key, list);
+      return { commits: list, limit };
+    });
   }
 
   /** "Show 500 more": the whole list again, one page longer. */
   function more(side: CompareSide) {
-    void loadCommits(side, sides[side].limit + COMMIT_PAGE);
+    loadCommits(side, (sideSt[side].data?.limit ?? COMMIT_PAGE) + COMMIT_PAGE);
   }
 
   // The On both strip lists the duplicates; in Files mode their commits are read when it is unfolded.
   let stripOpen = $state(false);
-  const duplicates = $derived(
-    sides.left.commits && sides.right.commits
-      ? pairDuplicates(
-          sides.left.commits.filter((c) => c.mark === "="),
-          sides.right.commits.filter((c) => c.mark === "="),
-        )
-      : null,
-  );
+  const eqOf = (side: CompareSide) => sideSt[side].data?.commits.filter((c) => c.mark === "=") ?? null;
+  const duplicates = $derived.by(() => {
+    const l = eqOf("left");
+    const r = eqOf("right");
+    return l && r ? { rows: pairDuplicates(l, r), found: Math.max(l.length, r.length) } : null;
+  });
 
-  // A different repository, pair or tips: everything is read again (or found in the cache).
+  // A different repository, pair or tips: everything is read again (or found in the cache). A new
+  // compare query (↻, a tick change) with the same tips re-reads only what is due: a read it cut
+  // short ends empty, whether that happens before or after the new query lands, and must not spin
+  // forever. So the read states are dependencies too; `neededFor` keeps a cut-short read from
+  // being retried under the query that cut it.
   const readKey = $derived(d ? `${row.repo}\u0000${d.leftSha}\u0000${d.rightSha}\u0000${d.base}` : row.repo);
   let lastRead = "";
-  let lastMode: CompareMode | null = null;
   $effect(() => {
     const k = readKey;
     const m = mode;
     const strip = stripOpen;
-    untrack(() => read(k, m, strip));
+    const q = queryId;
+    void filesSt.loading;
+    void sideSt.left.loading;
+    void sideSt.right.loading;
+    untrack(() => read(k, m, strip, q));
   });
-  function read(k: string, m: CompareMode, strip: boolean) {
+  function read(k: string, m: CompareMode, strip: boolean, q: number) {
     if (k !== lastRead) {
       lastRead = k;
-      filesSeq++;
-      commitSeq.left++;
-      commitSeq.right++;
-      files = null;
-      filesError = null;
-      filesLoading = false;
-      sides = { left: fresh(), right: fresh() };
+      filesRead.reset();
+      for (const side of SIDES) sideRead[side].reset();
       expanded = { left: null, right: null };
-      lastMode = null;
+      cursor = { left: null, right: null };
     }
     if (!d) return;
-    if (m === "files" && lastMode !== "files") void loadFiles();
-    const wantCommits = m === "commits" || strip;
-    for (const s of SIDES) if (wantCommits && !sides[s].commits && !sides[s].loading && !sides[s].error) void loadCommits(s, sides[s].limit);
-    lastMode = m;
+    if (m === "files" && filesRead.neededFor(q)) loadFiles();
+    if (m === "commits" || strip) for (const side of SIDES) if (sideRead[side].neededFor(q)) loadCommits(side, COMMIT_PAGE);
   }
 
   // ---- a commit's files, one expanded per column ----
@@ -204,33 +194,80 @@
   const activeSidePath = (side: CompareSide) => (open?.kind === "side" && open.repo === row.repo && open.side === side ? open.file.path : null);
   const isOpenCommitFile = (c: SideCommit, f: ChangedFile) => open?.kind === "commit" && open.repo === row.repo && open.commit.sha === c.sha && open.file.path === f.path;
 
-  // ---- keyboard in a commit column: ↑/↓ over its rows, Enter, Esc ----
+  // ---- keyboard in a commit column ----
+  // One tab stop per column (roving): Tab goes list → left column → right column → On both strip.
+  // ↑/↓/Home/End move within a column, ←/→ jump to the other one, Esc goes back to the list.
   const cols: Partial<Record<CompareSide, HTMLDivElement>> = $state({});
-  function colRows(side: CompareSide): HTMLElement[] {
-    return Array.from(cols[side]?.querySelectorAll<HTMLElement>("[data-nav]") ?? []);
+  /** The row each column's tab stop is on (its `data-nav` key); null: the first row. */
+  let cursor = $state<Record<CompareSide, string | null>>({ left: null, right: null });
+  function navKeys(side: CompareSide): string[] {
+    const st = sideSt[side].data;
+    if (!st) return [];
+    const page = sidePage(st.commits, st.limit);
+    const keys: string[] = [];
+    for (const c of page.rows) {
+      keys.push(`c:${c.sha}`);
+      const ex = expanded[side];
+      if (ex?.sha === c.sha && ex.files) for (const f of ex.files) keys.push(`f:${c.sha}:${f.path}`);
+    }
+    if (page.more) keys.push("more");
+    return keys;
+  }
+  const tabKey = $derived(
+    Object.fromEntries(
+      SIDES.map((side) => {
+        const keys = navKeys(side);
+        const c = cursor[side];
+        return [side, c && keys.includes(c) ? c : (keys[0] ?? null)];
+      }),
+    ) as Record<CompareSide, string | null>,
+  );
+  function rowEl(side: CompareSide, key: string | null): HTMLElement | null {
+    return key ? (cols[side]?.querySelector<HTMLElement>(`[data-nav="${CSS.escape(key)}"]`) ?? null) : null;
+  }
+  async function focusKey(side: CompareSide, key: string | null) {
+    if (!key) return;
+    cursor[side] = key;
+    await tick();
+    rowEl(side, key)?.focus();
+  }
+  /** The other column's tab stop: its tree row in Files mode, its roving row in Commits. */
+  function focusColumn(side: CompareSide) {
+    if (mode === "commits") return void focusKey(side, tabKey[side]);
+    cols[side]?.querySelector<HTMLElement>("[role='treeitem'][tabindex='0']")?.focus();
   }
   function colKey(e: KeyboardEvent, side: CompareSide) {
     if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
-    const list = colRows(side);
-    const i = list.indexOf(document.activeElement as HTMLElement);
+    const keys = navKeys(side);
+    const cur = (document.activeElement as HTMLElement | null)?.dataset?.nav ?? tabKey[side];
+    const i = cur ? keys.indexOf(cur) : -1;
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      const to = Math.max(0, Math.min(list.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)));
-      list[to]?.focus();
+      void focusKey(side, keys[Math.max(0, Math.min(keys.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))] ?? null);
     } else if (e.key === "Home" || e.key === "End") {
       e.preventDefault();
-      list[e.key === "Home" ? 0 : list.length - 1]?.focus();
+      void focusKey(side, keys[e.key === "Home" ? 0 : keys.length - 1] ?? null);
+    } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      const to: CompareSide = e.key === "ArrowLeft" ? "left" : "right";
+      if (to === side) return;
+      e.preventDefault();
+      focusColumn(to);
     } else if (e.key === "Escape") {
       e.preventDefault();
       onescape();
     }
   }
-
-  /** The keyboard into the left column (its first row). */
+  /** The keyboard into the left column (its tab stop), else the right one. */
   export async function focus() {
     await tick();
-    const first = cols.left?.querySelector<HTMLElement>("[data-nav], button.row, [role='treeitem']") ?? cols.right?.querySelector<HTMLElement>("[data-nav], button.row, [role='treeitem']");
-    first?.focus();
+    const pick = (side: CompareSide) =>
+      mode === "commits" ? rowEl(side, tabKey[side]) : (cols[side]?.querySelector<HTMLElement>("[role='treeitem'][tabindex='0']") ?? null);
+    const el = pick("left") ?? pick("right");
+    if (el) {
+      const side: CompareSide = cols.left?.contains(el) ? "left" : "right";
+      if (mode === "commits") cursor[side] = el.dataset.nav ?? null;
+      el.focus();
+    }
   }
 </script>
 
@@ -238,11 +275,11 @@
   {#if row.kind === "nobase"}
     <p class="note pad">{name} has no common history for {pair.left} and {pair.right}: the two branches share no ancestor, so there is nothing to compare.</p>
   {:else if row.kind === "error"}
-    <p class="note pad" role="alert">git could not compare {name}: {row.reason}</p>
+    <p class="note pad">git could not compare {name}: {row.reason}</p>
   {:else if d}
     <div class="columns">
       {#each SIDES as side (side)}
-        {@const s = sides[side]}
+        {@const s = sideSt[side]}
         <div class="col {side}" bind:this={cols[side]} aria-label="{side === 'left' ? '◀' : '▶'} {sideName(side)} only">
           {#snippet header(n: number | null)}
             <div class="chead">
@@ -252,13 +289,14 @@
           {/snippet}
           {#if mode === "files"}
             {@const list = files ? files[side] : null}
+
             {#snippet fhead()}{@render header(list ? list.length : null)}{/snippet}
             <Changes
               title=""
               label="{sideName(side)} only, files"
-              files={filesError ? null : list}
-              loading={filesLoading}
-              error={filesError}
+              files={filesSt.error ? null : list}
+              loading={filesSt.loading}
+              error={filesSt.error}
               activePath={activeSidePath(side)}
               {theme}
               both={files ? new Set(files.both) : null}
@@ -268,7 +306,7 @@
               header={fhead}
             />
           {:else}
-            {@const page = s.commits ? sidePage(s.commits, s.limit) : null}
+            {@const page = s.data ? sidePage(s.data.commits, s.data.limit) : null}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div class="clist" onkeydown={(e) => colKey(e, side)}>
               {@render header(page ? (side === "left" ? d.left : d.right) : null)}
@@ -287,7 +325,9 @@
                     <li>
                       <button
                         class="crow"
-                        data-nav
+                        data-nav="c:{c.sha}"
+                        tabindex={tabKey[side] === `c:${c.sha}` ? 0 : -1}
+                        onfocus={() => (cursor[side] = `c:${c.sha}`)}
                         aria-expanded={!!ex}
                         title="{c.subject}&#10;{shortSha(c.sha)} · {c.author} · {commitDate(c.time)}"
                         onclick={() => void toggleCommit(side, c)}
@@ -313,7 +353,9 @@
                                 <button
                                   class="frow"
                                   class:selected={isOpenCommitFile(c, f)}
-                                  data-nav
+                                  data-nav="f:{c.sha}:{f.path}"
+                                  tabindex={tabKey[side] === `f:${c.sha}:${f.path}` ? 0 : -1}
+                                  onfocus={() => (cursor[side] = `f:${c.sha}:${f.path}`)}
                                   title="{f.path} · {statusText(f)}"
                                   aria-label="{base}, {statusText(f)}, {countsText(f)}"
                                   onclick={() => onopen({ kind: "commit", repo: row.repo, commit: c, file: f })}
@@ -336,7 +378,7 @@
                   {/each}
                 </ul>
                 {#if page.more}
-                  <button class="more" data-nav disabled={s.loading} onclick={() => more(side)}>{s.loading ? "Reading…" : `Show ${COMMIT_PAGE} more`}</button>
+                  <button class="more" data-nav="more" tabindex={tabKey[side] === "more" ? 0 : -1} onfocus={() => (cursor[side] = "more")} disabled={s.loading} onclick={() => more(side)}>{s.loading ? "Reading…" : `Show ${COMMIT_PAGE} more`}</button>
                 {/if}
               {/if}
             </div>
@@ -348,8 +390,11 @@
       <details class="strip" bind:open={stripOpen}>
         <summary>{bothStripText(dupCount)}</summary>
         {#if duplicates}
+          {#if duplicates.found < dupCount}
+            <p class="note capped">Showing the {duplicates.rows.length} found in the newest {COMMIT_PAGE} commits of each side.</p>
+          {/if}
           <ul class="dups">
-            {#each duplicates as dup, i (i)}
+            {#each duplicates.rows as dup, i (i)}
               <li>
                 <span class="dsha left">{#if dup.left}<span aria-hidden="true">◀</span> {shortSha(dup.left)}{/if}</span>
                 <span class="dsha right">{#if dup.right}<span aria-hidden="true">▶</span> {shortSha(dup.right)}{/if}</span>
@@ -357,8 +402,8 @@
               </li>
             {/each}
           </ul>
-        {:else if sides.left.error || sides.right.error}
-          <p class="note pad" role="alert">Couldn't read the commits: {sides.left.error ?? sides.right.error}</p>
+        {:else if sideSt.left.error || sideSt.right.error}
+          <p class="note pad" role="alert">Couldn't read the commits: {sideSt.left.error ?? sideSt.right.error}</p>
         {:else}
           <p class="note pad">Reading the commits…</p>
         {/if}
@@ -596,6 +641,10 @@
   .strip summary:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: -2px;
+  }
+  .capped {
+    padding: 0 var(--pad) 4px;
+    font-size: var(--fs-meta);
   }
   .dups li {
     display: flex;

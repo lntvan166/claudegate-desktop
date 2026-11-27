@@ -832,6 +832,8 @@ function glCompareRow(repo: string): RepoCompare {
 }
 const glFlipped = (leftSha: string) => leftSha.startsWith("b");
 let glCompareNewest = 0;
+/** `?gitlog=slowcolumns` keeps a Files/Commits read in flight long enough to supersede it with ↻. */
+const glColumnsDelay = () => (new URLSearchParams(location.search).get("gitlog") === "slowcolumns" ? 2500 : 60);
 async function mockCompare(queryId: number, repos: string[], p: Pair) {
   glCompareNewest = Math.max(glCompareNewest, queryId);
   // `?gitlog=slowcompare` keeps "Reading N repositories…" up for a while.
@@ -1101,11 +1103,11 @@ const gitlogMock: Pick<
   },
   gitlogCompare: mockCompare,
   gitlogCompareFiles: async (queryId, repo, leftSha) => {
-    await new Promise((r) => setTimeout(r, 60));
+    await new Promise((r) => setTimeout(r, glColumnsDelay()));
     return mockCompareFiles(queryId, repo, leftSha);
   },
   gitlogCompareCommits: async (queryId, repo, side, leftSha, _rightSha, max) => {
-    await new Promise((r) => setTimeout(r, 60));
+    await new Promise((r) => setTimeout(r, glColumnsDelay()));
     return mockCompareCommits(queryId, repo, side, leftSha, max);
   },
   gitlogBranches: async (repos) => {

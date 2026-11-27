@@ -154,11 +154,24 @@
       }
     });
   });
-  // Back from Compare: the list was display:none, so its scroll position and height are re-read.
+  // Back from Compare: display:none dropped the scroller's position, so the one it had (still in
+  // `scrollTop`) is put back and its height re-read; the place in the list is kept.
   let wasHidden = false;
+  /** The position when it was set aside (taken then: a hidden scroller may report 0 afterwards). */
+  let hiddenTop = 0;
   $effect(() => {
     const h = hidden;
-    if (wasHidden && !h) void tick().then(resync);
+    if (!wasHidden && h) hiddenTop = untrack(() => scrollTop);
+    if (wasHidden && !h) {
+      const keep = hiddenTop;
+      void tick().then(() => {
+        if (!scroller) return;
+        // Not `resync()`: that would scroll back to the selection, away from where the user was.
+        scroller.scrollTop = keep;
+        scrollTop = scroller.scrollTop;
+        viewH = scroller.clientHeight;
+      });
+    }
     wasHidden = h;
   });
   onDestroy(() => {

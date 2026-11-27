@@ -145,6 +145,8 @@
   async function setMode(m: "log" | "compare") {
     if (m === mode) return;
     mode = m;
+    // An "Open in editor" error belongs to the diff it was raised on, which the other mode does not show.
+    openError = null;
     await tick();
     if (m === "compare") comparePane?.focus();
     else logList?.focusList();
@@ -158,7 +160,13 @@
   /** The top row's share of the sheet (null: the default), and the sheet's height it is a share of. */
   let topShare = $state<number | null>(null);
   let sheetH = $state(0);
-  const topH = $derived(sheetH > 0 ? fitTop(topShare, sheetH) : 0);
+  /**
+   * Compare's own top share: its columns need more room than the log's Changes, so its diff row
+   * starts lower (COMPARE_TOP) and is sized apart from the log's. Not stored.
+   */
+  const COMPARE_TOP = 0.38;
+  let compareShare = $state<number | null>(null);
+  const topH = $derived(sheetH > 0 ? fitTop(mode === "compare" ? (compareShare ?? COMPARE_TOP) : topShare, sheetH) : 0);
   let collapsed = $state(readCollapsed());
   let innerWidth = $state(typeof window === "undefined" ? 1200 : window.innerWidth);
   const panes = $derived(fitPanes(preferred, innerWidth, collapsed));
@@ -883,16 +891,22 @@
   }
 
   function setTop(h: number) {
-    if (sheetH > 0) topShare = clampTop(h, sheetH) / sheetH;
+    if (sheetH <= 0) return;
+    if (mode === "compare") compareShare = clampTop(h, sheetH) / sheetH;
+    else topShare = clampTop(h, sheetH) / sheetH;
   }
   function storeTop() {
-    if (topShare === null) return;
+    if (mode === "compare" || topShare === null) return;
     void gitlogPane("top", topToStored(topShare)).then(
       (c) => (cfg = { ...cfg, panes: c.panes }),
       () => {},
     );
   }
   function resetTop() {
+    if (mode === "compare") {
+      compareShare = COMPARE_TOP;
+      return;
+    }
     topShare = TOP_DEFAULT;
     storeTop();
   }
@@ -1005,9 +1019,9 @@
     </div>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="top" class:solo={mode === "compare"} style:height={topH > 0 ? `${topH}px` : `${TOP_DEFAULT * 100}%`} onkeydown={leaveBottom}>
-      {#if mode === "compare"}
-        <!-- Compare: the diff alone; the files are in the columns below. -->
-      {:else if combinedOn}
+      <!-- In Compare the diff stands alone (the files are in the columns below); the tree stays mounted, hidden, so its folders are as they were when Log comes back. -->
+      <div class="chwrap" class:hidden={mode === "compare"}>
+      {#if combinedOn}
         <CombinedChanges
           bind:this={combinedTree}
           title={combinedHeading}
@@ -1041,6 +1055,7 @@
           onhistory={openHistory}
         />
       {/if}
+      </div>
       <div class="split split-changes" class:hidden={mode === "compare"}>
         <Splitter
           label="Resize changes"
@@ -1144,7 +1159,13 @@
     min-height: 0;
     border-bottom: 1px solid var(--rule);
   }
-  .top > :global(.changes) {
+  .chwrap {
+    display: contents;
+  }
+  .chwrap.hidden {
+    display: none;
+  }
+  .chwrap > :global(.changes) {
     border-right: 1px solid var(--rule);
   }
   .top.solo {
@@ -1280,7 +1301,7 @@
     .top.solo {
       grid-template-rows: minmax(0, 1fr);
     }
-    .top > :global(.changes) {
+    .chwrap > :global(.changes) {
       border-right: 0;
       border-bottom: 1px solid var(--rule);
     }

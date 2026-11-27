@@ -33,7 +33,7 @@
 
   const uid = `bp${++instances}`;
   let query = $state("");
-  let active = $state(0);
+
   let inputEl: HTMLInputElement | undefined = $state();
   let rootEl: HTMLDivElement | undefined = $state();
   let listEl: HTMLDivElement | undefined = $state();
@@ -43,24 +43,31 @@
   const items = $derived(groups.flatMap((g) => g.items));
   const emptyText = $derived(names === null ? "Reading branch names…" : names.length === 0 ? "No branches in the ticked repositories." : noMatchText(query.trim()));
 
-  /** Ctrl+D was pressed on this branch: the active row follows it once the Favorites group changes. */
-  let keep: BranchKey | null = null;
-  // The list shrinks as you type: the active row never points past its end. A favourite toggled
-  // from the keyboard adds or removes a Favorites row above it, so the row is found again by its
-  // branch (its own group's copy, the last one), or Enter would pick a different branch.
-  $effect(() => {
-    const list = items;
-    if (keep) {
-      const k = keep;
-      let at = -1;
-      list.forEach((it, i) => {
-        if (it.kind === "name" && it.name === k.name && it.remote === k.remote) at = i;
-      });
-      if (at >= 0) active = at;
-      keep = null;
+  // The active row is a row, not a position: a favourite toggled with Ctrl+D adds or removes a
+  // Favorites row above it, and typing reorders the list. It is kept by its key (the group and the
+  // each-key), and only when that row is gone does it fall back to the nearest position.
+  const itemKey = (it: PickerItem) => (it.kind === "pair" ? `p${it.pair.left}|${it.pair.leftRemote}|${it.pair.right}|${it.pair.rightRemote}` : `${it.remote}:${it.name}`);
+  const keys = $derived(groups.flatMap((g) => g.items.map((it) => `${g.title}\u0000${itemKey(it)}`)));
+  let activeKey = $state<string | null>(null);
+  /** The position last chosen: where the active row falls back to when its branch is gone. */
+  let lastIndex = 0;
+  const active = $derived.by(() => {
+    if (activeKey !== null) {
+      const at = keys.indexOf(activeKey);
+      if (at >= 0) return at;
+      // Its Favorites copy went (un-favourited there): the same branch in its own group.
+      const item = activeKey.slice(activeKey.indexOf("\u0000"));
+      const same = keys.findIndex((k) => k.endsWith(item));
+      if (same >= 0) return same;
     }
-    if (active >= list.length) active = Math.max(0, list.length - 1);
+    return Math.max(0, Math.min(lastIndex, keys.length - 1));
   });
+  // The pointer takes the active row only when it moves (mousemove, not mouseenter): rows that
+  // shift under a resting pointer, as a Ctrl+D toggle makes them, must not steal it from the keys.
+  function setActive(i: number) {
+    lastIndex = i;
+    activeKey = keys[i] ?? null;
+  }
 
   function place() {
     const r = anchor.getBoundingClientRect();
@@ -101,7 +108,7 @@
   }
 
   async function move(d: number) {
-    active = Math.max(0, Math.min(items.length - 1, active + d));
+    setActive(Math.max(0, Math.min(items.length - 1, active + d)));
     await tick();
     listEl?.querySelector(`[data-i="${active}"]`)?.scrollIntoView({ block: "nearest" });
   }
@@ -121,10 +128,7 @@
       // The keyboard way to ★: the star itself is not a tab stop.
       e.preventDefault();
       const it = items[active];
-      if (it?.kind === "name") {
-        keep = { name: it.name, remote: it.remote };
-        onfavorite({ name: it.name, remote: it.remote }, !it.favorite);
-      }
+      if (it?.kind === "name") onfavorite({ name: it.name, remote: it.remote }, !it.favorite);
     } else if (e.key === "Tab") {
       // Leaving the search box leaves the picker: focus goes back to the anchor, and the browser moves on from there.
       close();
@@ -138,7 +142,10 @@
   <input
     bind:this={inputEl}
     bind:value={query}
-    oninput={() => (active = 0)}
+    oninput={() => {
+      activeKey = null;
+      lastIndex = 0;
+    }}
     onkeydown={key}
     class="search"
     type="text"
@@ -164,7 +171,7 @@
         {#each g.items as it, k (it.kind === "pair" ? `p${it.pair.left}|${it.pair.leftRemote}|${it.pair.right}|${it.pair.rightRemote}` : `${it.remote}:${it.name}`)}
           {@const i = groups.slice(0, gi).reduce((n, x) => n + x.items.length, 0) + k}
           {#if it.kind === "pair"}
-            <div class="row" class:active={i === active} role="option" id="{uid}-pick-{i}" data-i={i} aria-selected={i === active} tabindex="-1" onclick={() => choose(it)} onmouseenter={() => (active = i)}>
+            <div class="row" class:active={i === active} role="option" id="{uid}-pick-{i}" data-i={i} aria-selected={i === active} tabindex="-1" onclick={() => choose(it)} onmousemove={() => i !== active && setActive(i)}>
               <span class="side left" aria-hidden="true">◀</span>
               <span class="name">{it.pair.left}</span>
               {#if it.pair.leftRemote}<span class="tag">remote</span>{/if}
@@ -174,7 +181,7 @@
             </div>
           {:else}
             {@const h = highlight(it.name, query)}
-            <div class="row" class:active={i === active} role="option" id="{uid}-pick-{i}" data-i={i} aria-selected={i === active} tabindex="-1" onclick={() => choose(it)} onmouseenter={() => (active = i)}>
+            <div class="row" class:active={i === active} role="option" id="{uid}-pick-{i}" data-i={i} aria-selected={i === active} tabindex="-1" onclick={() => choose(it)} onmousemove={() => i !== active && setActive(i)}>
               <button
                 class="star"
                 class:on={it.favorite}

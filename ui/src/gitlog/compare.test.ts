@@ -202,3 +202,83 @@ describe("compare mode", () => {
     expect(calls).toHaveLength(2);
   });
 });
+
+// ---- fix round 1 ------------------------------------------------------------------------------
+import { GatedRead, repoCountsLabel, type ReadState } from "./compare";
+
+describe("compare fix round 1", () => {
+  const deferred = <T>() => {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((a, b) => ((resolve = a), (reject = b)));
+    return { promise, resolve, reject };
+  };
+
+  it("a stale column read ends, and is due again for the next query", async () => {
+    const states: ReadState<string>[] = [];
+    const read = new GatedRead<string>((s) => states.push(s));
+    expect(read.neededFor(1)).toBe(true);
+    const d = deferred<string>();
+    const run = read.run(1, () => d.promise);
+    expect(read.state.loading).toBe(true);
+    // ↻ starts query 2 while this read runs: nothing is due yet, the read is still out.
+    expect(read.neededFor(2)).toBe(false);
+    // Then the backend answers it STALE (after query 2 already landed, with the same tips).
+    d.reject("stale query");
+    await run;
+    expect(read.state).toEqual({ data: null, loading: false, error: null });
+    // Due again for query 2 (no spinner forever), never again for query 1 (no re-read loop).
+    expect(read.neededFor(1)).toBe(false);
+    expect(read.neededFor(2)).toBe(true);
+    const d2 = deferred<string>();
+    const run2 = read.run(2, () => d2.promise);
+    d2.resolve("files");
+    await run2;
+    expect(read.state).toEqual({ data: "files", loading: false, error: null });
+    expect(read.neededFor(3)).toBe(false);
+  });
+
+  it("a superseded column read is dropped; a real failure is kept", async () => {
+    const read = new GatedRead<string>(() => {});
+    const a = deferred<string>();
+    const b = deferred<string>();
+    const ra = read.run(1, () => a.promise);
+    const rb = read.run(1, () => b.promise);
+    b.resolve("B");
+    await rb;
+    a.resolve("A");
+    await ra;
+    expect(read.state.data).toBe("B");
+    const c = deferred<string>();
+    const rc = read.run(1, () => c.promise);
+    c.reject("fatal: bad object");
+    await rc;
+    expect(read.state).toEqual({ data: "B", loading: false, error: "fatal: bad object" });
+    read.reset();
+    expect(read.neededFor(1)).toBe(true);
+  });
+
+  it("keeps the pair its rows answer, and mirrors it on swap", async () => {
+    const states: CompareState[] = [];
+    const d = deferred<CompareView>();
+    const load = new CompareLoad(() => d.promise, (s) => states.push(s), new QueryGate(5000));
+    const run = load.start(["r"], p1);
+    d.resolve({ queryId: load.id, rows: [{ repo: "r", ...differs(1, 2) }] });
+    await run;
+    expect(load.state.pair).toEqual(p1);
+    // A newer read in flight leaves the shown rows with their own pair.
+    void load.start(["r"], p2);
+    expect(load.state.loading).toBe(true);
+    expect(load.state.pair).toEqual(p1);
+    const m = new CompareLoad(async (id) => ({ queryId: id, rows: [] }), () => {}, new QueryGate(9000));
+    await m.start(["r"], p1);
+    m.mirror();
+    expect(m.state.pair).toEqual(pair("origin/main", "origin/release-1.4", true, true));
+  });
+
+  it("says a repo row's counts in words", () => {
+    expect(repoCountsLabel(differs(3, 1, 1), p1)).toBe("3 only on origin/release-1.4, 1 only on origin/main, 1 on both");
+    expect(repoCountsLabel(differs(0, 2), p1)).toBe("2 only on origin/main");
+    expect(repoCountsLabel({ kind: "nobase" }, p1)).toBe("no common history");
+  });
+});
