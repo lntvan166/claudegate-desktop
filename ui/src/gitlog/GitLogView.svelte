@@ -37,6 +37,7 @@
     type CombinedState,
     type CombinedLeft,
     combinedNotice,
+    bannerWhenSettled,
   } from "./combined";
   import {
     CHANGES_DEBOUNCE_MS,
@@ -542,9 +543,11 @@
       : null,
   );
   const diffRow = $derived(combinedOn ? combinedRow : singleRow);
-  // While the diff is being read a merge file may still turn out to fall back: say nothing yet.
   const cBanner = $derived(
-    cActive && !diffLoading ? combinedNotice(cActive.file, combinedRepos.find((r) => r.repo === cActive!.repo)?.subjects ?? {}, cLeft) : null,
+    bannerWhenSettled(
+      cActive ? combinedNotice(cActive.file, combinedRepos.find((r) => r.repo === cActive!.repo)?.subjects ?? {}, cLeft) : null,
+      { loading: diffLoading, error: diffError },
+    ),
   );
   const combinedExternal = $derived.by(() => {
     const pane = shownPane;

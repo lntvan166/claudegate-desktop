@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CombinedLoad,
+  bannerWhenSettled,
   combinedFirst,
   combinedNotice,
   combinedPlan,
@@ -262,5 +263,14 @@ describe("combinedNotice", () => {
       text: `${range} · includes 1 unselected commit: 9999999 header: wider title`,
     });
     expect(combinedNotice(f({ mode: "merge" }), subjects, { kind: "text", value: "" })?.tone).toBe("info");
+  });
+});
+
+describe("bannerWhenSettled", () => {
+  const b = { tone: "info" as const, text: "2 selected commits: a · b" };
+  it("hides the banner while loading and above an error", () => {
+    expect(bannerWhenSettled(b, { loading: false, error: null })).toBe(b);
+    expect(bannerWhenSettled(b, { loading: true, error: null })).toBeNull();
+    expect(bannerWhenSettled(b, { loading: false, error: "boom" })).toBeNull();
   });
 });

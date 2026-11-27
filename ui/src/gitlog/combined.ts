@@ -60,16 +60,15 @@ export function warnText(f: CombinedFile, subjects: Record<string, string>): str
   if (f.reason === "binary") return "Binary file: shown as one diff across the selection";
   if (f.reason === "tooLarge") return "Too large to take apart: shown as one diff across the selection";
   if (f.included.length === 0) return "The selected changes can't be shown apart here";
-  const list = f.included
-    .map((s) => {
-      const subject = subjects[s] ?? subjects[shortSha(s)];
-      return subject ? `${shortSha(s)} ${subject}` : shortSha(s);
-    })
-    .join("; ");
+  const list = includedList(f.included, subjects);
   return `Includes changes from ${f.included.length} unselected ${f.included.length === 1 ? "commit" : "commits"}: ${list}`;
 }
 
 export type Banner = { tone: "info" | "warn"; text: string };
+
+/** The banner only while the diff is settled: not while it is read (a merge file may still fall back), not above an error. */
+export const bannerWhenSettled = (b: Banner | null, o: { loading: boolean; error: string | null }): Banner | null =>
+  o.loading || o.error ? null : b;
 
 const commitsWord = (n: number) => (n === 1 ? "commit" : "commits");
 
