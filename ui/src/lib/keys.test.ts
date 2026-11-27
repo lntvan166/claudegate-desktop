@@ -237,3 +237,12 @@ describe("isUndoKey", () => {
     expect(isUndoKey(k("y", { ctrlKey: true }), false)).toBe(false);
   });
 });
+
+describe("isTypingTarget and the Not captured panel", () => {
+  it("claims keys pressed inside the panel, so a/r/j/k/n/p/o never reach the pending row", () => {
+    const inPanel = { tagName: "LI", closest: (sel: string) => (sel.includes("[data-audit-panel]") ? {} : null) };
+    const outside = { tagName: "LI", closest: () => null };
+    expect(isTypingTarget(inPanel as never)).toBe(true);
+    expect(isTypingTarget(outside as never)).toBe(false);
+  });
+});

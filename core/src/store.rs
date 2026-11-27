@@ -735,8 +735,9 @@ pub(crate) fn excludes_remove(home: &Path, root: &Path) -> Result<(), StoreError
 // removed only if this call created it and it is empty.
 
 use crate::capture::{
-    backups_to_prune, capture_status, compute_settings_patch, verify_settings_content, CaptureStatus, InstallError,
-    InstallReport, HOOK_PY_FILE, HOOK_SH_CONTENT, HOOK_SH_FILE, MARKER_FILE, SETTINGS_BACKUP_RETENTION,
+    audit_registered, backups_to_prune, capture_status, compute_settings_patch, verify_settings_content, CaptureStatus, InstallError,
+    InstallReport, AUDIT_PY_FILE, AUDIT_SH_CONTENT, AUDIT_SH_FILE, HOOK_PY_FILE, HOOK_SH_CONTENT, HOOK_SH_FILE,
+    MARKER_FILE, SETTINGS_BACKUP_RETENTION,
 };
 
 #[cfg(test)]
@@ -783,10 +784,13 @@ fn refused(what: &str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, format!("refusing to write {what}"))
 }
 
-/// The hook files may only be `<claudegate home>/{hook.py,hook.sh,.installed-by-desktop}`.
+/// The hook files may only be `<claudegate home>/{hook.py,hook.sh,audit.py,audit.sh,.installed-by-desktop}`.
 pub(crate) fn guard_hook_file(claudegate_home: &Path, path: &Path) -> io::Result<()> {
     let ok = path.parent() == Some(claudegate_home)
-        && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| [HOOK_PY_FILE, HOOK_SH_FILE, MARKER_FILE].contains(&n));
+        && path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| [HOOK_PY_FILE, HOOK_SH_FILE, AUDIT_PY_FILE, AUDIT_SH_FILE, MARKER_FILE].contains(&n));
     if ok { Ok(()) } else { Err(refused(&path.display().to_string())) }
 }
 
@@ -893,6 +897,9 @@ struct Undo {
     /// The settings file, once we wrote it. From then on the hook files go only when that file has
     /// no ClaudeGate entry (`hook_files_may_go`), whether or not its own undo succeeded.
     written: Option<PathBuf>,
+    /// The startup audit repair: the files it created are only audit.py and audit.sh, so they go
+    /// when settings.json has no audit entry (`audit_files_may_go`), capture registered or not.
+    audit_only: bool,
 }
 
 struct SettingsUndo {
@@ -944,6 +951,9 @@ fn registration_of(target: &Path) -> OnDisk {
 /// never left pointing at a deleted hook.
 fn hook_files_may_go(target: &Path) -> Result<(), String> {
     match registration_of(target) {
+        OnDisk::NotRegistered if fs::read(target).is_ok_and(|b| audit_registered(&String::from_utf8_lossy(&b))) => {
+            Err("the hook files and marker were kept, because settings.json still has the ClaudeGate audit entries".into())
+        }
         OnDisk::NotRegistered | OnDisk::Absent => Ok(()),
         OnDisk::Registered => {
             Err("the hook files and marker were kept, because settings.json still has a ClaudeGate entry".into())
@@ -951,6 +961,19 @@ fn hook_files_may_go(target: &Path) -> Result<(), String> {
         OnDisk::Unknown(r) => Err(format!(
             "the hook files and marker were kept, because settings.json could not be checked for a ClaudeGate entry ({r})"
         )),
+    }
+}
+
+/// `hook_files_may_go` for the audit repair's own files: only while settings.json has no audit
+/// entry (or is gone).
+fn audit_files_may_go(target: &Path) -> Result<(), String> {
+    match fs::read(target) {
+        Ok(b) if audit_registered(&String::from_utf8_lossy(&b)) => {
+            Err("audit.py and audit.sh were kept, because settings.json still has the audit entries".into())
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("audit.py and audit.sh were kept, because settings.json could not be checked ({e})")),
     }
 }
 
@@ -994,6 +1017,7 @@ impl Undo {
             }
         }
         let files_may_go = match &self.written {
+            Some(target) if self.audit_only => audit_files_may_go(target),
             Some(target) => hook_files_may_go(target),
             None => Ok(()),
         };
@@ -1105,11 +1129,14 @@ fn create_dir_tracked(dir: &Path, undo: &mut Undo) -> io::Result<()> {
 ///    `NotSetUp` (python3 present, settings strict JSON object or absent, no claudegate entry);
 ///    refuse an existing hook.py unless it is a plain file `adoptable_hook` accepts, and a
 ///    hook.sh that is not the extension's wrapper;
+///    refuse an audit.py other than the bundled one, and an audit.sh other than the extension's;
 /// 2. adopt that hook.py (replace it with the bundled hook, only while it holds the bytes read),
-///    or create hook.py; create hook.sh (0755) without replacing anything; then the marker;
+///    or create hook.py; create hook.sh (0755), audit.py and audit.sh (0755) without replacing
+///    anything; then the marker;
 /// 3. back up settings.json (refusing if it changed since it was read);
-/// 4. re-compare with what was read, then write `compute_settings_patch`'s content atomically
-///    to the realpath;
+/// 4. re-compare with what was read, then write `compute_settings_patch`'s content (the capture
+///    entry, and the audit entries under `AUDIT_EVENTS` beside the audit.sh now there)
+///    atomically to the realpath;
 /// 5. re-read: our bytes are verified with `verify_settings_content` (restored on failure);
 ///    anyone else's are left alone, and setup holds only if our entry survived in them;
 /// 6. prune the backup ring. On any failure from step 2 on, roll back what this call wrote.
@@ -1119,6 +1146,7 @@ fn create_dir_tracked(dir: &Path, undo: &mut Undo) -> io::Result<()> {
 pub(crate) fn install_capture(
     home: &Path,
     bundled_hook: &str,
+    bundled_audit: &str,
     python3: bool,
     read_only: bool,
 ) -> Result<InstallReport, InstallError> {
@@ -1132,25 +1160,33 @@ pub(crate) fn install_capture(
     if !home.is_absolute() || !home.is_dir() {
         return Err(InstallError::Failed { reason: format!("{} is not a home folder", home.display()), rollback: None });
     }
-    install_unix(home, bundled_hook, &version, python3)
+    install_unix(home, bundled_hook, bundled_audit, &version, python3)
 }
 
 #[cfg(not(unix))]
-fn install_unix(_: &Path, _: &str, _: &str, _: bool) -> Result<InstallReport, InstallError> {
+fn install_unix(_: &Path, _: &str, _: &str, _: &str, _: bool) -> Result<InstallReport, InstallError> {
     Err(InstallError::Unsupported)
 }
 
 #[cfg(unix)]
-fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -> Result<InstallReport, InstallError> {
+fn install_unix(
+    home: &Path,
+    bundled_hook: &str,
+    bundled_audit: &str,
+    version: &str,
+    python3: bool,
+) -> Result<InstallReport, InstallError> {
     let unreadable = |e: io::Error| InstallError::SettingsUnreadable(e.to_string());
     let cg = home.join(".claudegate");
     let (py, sh, marker) = (cg.join(HOOK_PY_FILE), cg.join(HOOK_SH_FILE), cg.join(MARKER_FILE));
+    let (audit_py, audit_sh) = (cg.join(AUDIT_PY_FILE), cg.join(AUDIT_SH_FILE));
     let claude_dir = home.join(".claude");
     let literal = settings_literal(home);
-    let hook_command = sh
-        .to_str()
-        .ok_or_else(|| InstallError::Failed { reason: "the home folder's path is not valid UTF-8".into(), rollback: None })?
-        .to_owned();
+    let not_utf8 = || InstallError::Failed { reason: "the home folder's path is not valid UTF-8".into(), rollback: None };
+    let hook_command = sh.to_str().ok_or_else(not_utf8)?.to_owned();
+    // The audit entries are registered only beside a wrapper that exists: this call creates
+    // audit.sh before it writes settings.json, and the write is refused if it is gone by then.
+    let audit_command = audit_sh.to_str().ok_or_else(not_utf8)?.to_owned();
 
     // 1. Read and decide. Only "not found" means a fresh install; any other read error refuses.
     let target = settings_target(home).map_err(unreadable)?;
@@ -1166,12 +1202,12 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
         CaptureStatus::SettingsUnreadable(r) => return Err(InstallError::SettingsUnreadable(r)),
         other => return Err(InstallError::AlreadySetUp(other)),
     }
-    let patch = compute_settings_patch(raw.as_deref().unwrap_or(""), &hook_command);
-    if patch.parse_error {
-        return Err(InstallError::SettingsUnreadable("not a JSON object".into()));
-    }
+    let patch = compute_settings_patch(raw.as_deref().unwrap_or(""), &hook_command, Some(&audit_command));
     if let Some(why) = patch.shape_error {
         return Err(InstallError::SettingsUnreadable(why));
+    }
+    if patch.parse_error {
+        return Err(InstallError::SettingsUnreadable("not a JSON object".into()));
     }
     if !patch.changed {
         return Err(InstallError::AlreadySetUp(CaptureStatus::NotSetUp));
@@ -1189,11 +1225,21 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
         },
         _ => return Err(leftover(fs::symlink_metadata(&marker).is_ok())),
     };
-    let write_sh = match fs::read(&sh) {
-        Ok(b) if b == HOOK_SH_CONTENT.as_bytes() => false,
-        Ok(_) => return Err(InstallError::ForeignWrapper),
-        Err(e) if e.kind() == io::ErrorKind::NotFound && fs::symlink_metadata(&sh).is_err() => true,
-        Err(_) => return Err(InstallError::ForeignWrapper),
+    // A wrapper (hook.sh, audit.sh) already there must be the extension's, byte for byte.
+    let write_wrapper = |path: &Path, content: &str| match fs::read(path) {
+        Ok(b) if b == content.as_bytes() => Ok(false),
+        Ok(_) => Err(InstallError::ForeignWrapper),
+        Err(e) if e.kind() == io::ErrorKind::NotFound && fs::symlink_metadata(path).is_err() => Ok(true),
+        Err(_) => Err(InstallError::ForeignWrapper),
+    };
+    let write_sh = write_wrapper(&sh, HOOK_SH_CONTENT)?;
+    let write_audit_sh = write_wrapper(&audit_sh, AUDIT_SH_CONTENT)?;
+    // audit.py carries no stamp: one already there must be the bundled copy byte for byte (the
+    // extension's at the same tag), or it is a leftover like any other hook.py.
+    let write_audit_py = match fs::symlink_metadata(&audit_py) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+        Ok(m) if m.file_type().is_file() && fs::read(&audit_py).is_ok_and(|b| b == bundled_audit.as_bytes()) => false,
+        _ => return Err(leftover(fs::symlink_metadata(&marker).is_ok())),
     };
     // The marker is replaced in place and restored on rollback; only a regular file can be.
     match fs::symlink_metadata(&marker) {
@@ -1240,16 +1286,19 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
             Err(e) => return Err(failed(undo, format!("could not write {}: {e}", py.display()))),
         }
     }
-    for (path, content, mode, wanted) in
-        [(&py, bundled_hook.as_bytes(), None, adopt.is_none()), (&sh, HOOK_SH_CONTENT.as_bytes(), Some(0o755), write_sh)]
-    {
+    for (path, content, mode, wanted) in [
+        (&py, bundled_hook.as_bytes(), None, adopt.is_none()),
+        (&sh, HOOK_SH_CONTENT.as_bytes(), Some(0o755), write_sh),
+        (&audit_py, bundled_audit.as_bytes(), None, write_audit_py),
+        (&audit_sh, AUDIT_SH_CONTENT.as_bytes(), Some(0o755), write_audit_sh),
+    ] {
         if !wanted {
             continue;
         }
         let res = guard_hook_file(&cg, path).and_then(|()| create_file_exclusive(path, content, mode));
         match res {
             Ok(()) => undo.created.push((path.clone(), content.to_vec())),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && path == &py => {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && (path == &py || path == &audit_py) => {
                 let marker_there = fs::symlink_metadata(&marker).is_ok();
                 return Err(match undo.run() {
                     None => leftover(marker_there),
@@ -1319,6 +1368,9 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
     corrupt_point(&mut ours);
     if let Err(e) = install_fault("before_write") {
         return Err(failed(undo, e));
+    }
+    if fs::symlink_metadata(&audit_sh).is_err() {
+        return Err(failed(undo, format!("{} is gone, so its entries were not registered", audit_sh.display())));
     }
     let refused_why = std::cell::RefCell::new(None);
     let check = || unchanged_since_read("while setting up").map_err(|why| {
@@ -1393,12 +1445,85 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
         }
     }
     let text = String::from_utf8_lossy(&after);
-    if let Some(problem) = verify_settings_content(&text, raw.as_deref().unwrap_or(""), &hook_command) {
+    if let Some(problem) = verify_settings_content(&text, raw.as_deref().unwrap_or(""), &hook_command, Some(&audit_command)) {
         return Err(failed(undo, format!("settings.json did not verify after the write: {problem}")));
     }
     // Prune only once setup has succeeded: a failed one never costs an older copy.
     prune_settings_backups(&literal);
     Ok(report(None))
+}
+
+// ---- Refreshing audit.py beside hook.py ------------------------------------------------------
+
+//
+// The startup update and Update hook bring audit.py to the bundled copy whenever they replace
+// hook.py, under the same guards: created when absent (never replacing anything), replaced
+// atomically (mode kept) when a regular file with other bytes, compared with what was read right
+// before the rename. A symlink, folder or anything else that is not a regular file is left alone.
+// audit.py is written first, so a hook.py write that then fails puts it back (`undo_audit_py`)
+// and leaves both as they were. Neither ever writes audit.sh or settings.json.
+
+/// What `<claudegate home>/audit.py` is, compared with the bundled copy.
+enum AuditPy {
+    Absent,
+    Current,
+    /// A regular file with other bytes: these.
+    Stale(Vec<u8>),
+    /// Not a regular file: left alone.
+    NotRegular,
+}
+
+fn audit_py_state(path: &Path, bundled_audit: &str) -> io::Result<AuditPy> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(AuditPy::Absent),
+        Err(e) => Err(e),
+        Ok(m) if !m.file_type().is_file() => Ok(AuditPy::NotRegular),
+        Ok(_) => {
+            let b = fs::read(path)?;
+            Ok(if b == bundled_audit.as_bytes() { AuditPy::Current } else { AuditPy::Stale(b) })
+        }
+    }
+}
+
+/// An audit.py write, to put back if the hook.py write after it fails.
+struct AuditWrite {
+    path: PathBuf,
+    /// The bytes it replaced; `None`: it was created.
+    old: Option<Vec<u8>>,
+    ours: Vec<u8>,
+}
+
+/// Brings audit.py to `bundled_audit` per `state` (read just before). `Ok(None)`: nothing written.
+fn write_audit_py(cg: &Path, state: &AuditPy, bundled_audit: &str) -> io::Result<Option<AuditWrite>> {
+    let path = cg.join(AUDIT_PY_FILE);
+    guard_hook_file(cg, &path)?;
+    let ours = bundled_audit.as_bytes().to_vec();
+    match state {
+        AuditPy::Current | AuditPy::NotRegular => return Ok(None),
+        AuditPy::Absent => create_file_exclusive(&path, &ours, None)?,
+        AuditPy::Stale(old) => {
+            let unchanged = || match (fs::symlink_metadata(&path), fs::read(&path)) {
+                (Ok(m), Ok(now)) if m.file_type().is_file() && &now == old => Ok(()),
+                _ => Err(io::Error::other("audit.py changed while it was being updated")),
+            };
+            atomic_write_checked(&path, &ours, true, unchanged)?
+        }
+    }
+    Ok(Some(AuditWrite { path, old: if let AuditPy::Stale(b) = state { Some(b.clone()) } else { None }, ours }))
+}
+
+/// Puts back an audit.py write, only while the file still holds our bytes. Best-effort: `Err`
+/// says what was left.
+fn undo_audit_py(w: &AuditWrite) -> Result<(), String> {
+    let still_ours = || match fs::read(&w.path) {
+        Ok(now) if now == w.ours => Ok(()),
+        _ => Err(io::Error::other("audit.py changed since")),
+    };
+    let res = match &w.old {
+        Some(old) => atomic_write_checked(&w.path, old, true, still_ours),
+        None => still_ours().and_then(|()| fs::remove_file(&w.path)),
+    };
+    res.map_err(|e| format!("audit.py was updated but could not be put back ({e})"))
 }
 
 // ---- Updating a stamped hook.py at startup ----------------------------------------------------
@@ -1417,11 +1542,13 @@ fn install_unix(home: &Path, bundled_hook: &str, version: &str, python3: bool) -
 //   marker can disagree with the file (a half-finished earlier update); the file is what runs.
 // hook.py is replaced atomically (its mode kept), comparing it with what was read right before
 // the rename (still a regular file); then the marker, only when there is one, gets the new
-// version. The marker is never created; settings.json and hook.sh are never written.
+// version. The marker is never created; settings.json, hook.sh and audit.sh are never written.
+// audit.py is refreshed first (see above).
 
 pub(crate) fn update_app_hook(
     home: &Path,
     bundled_hook: &str,
+    bundled_audit: &str,
     python3: bool,
     read_only: bool,
 ) -> Result<crate::capture::HookUpdate, String> {
@@ -1459,13 +1586,20 @@ pub(crate) fn update_app_hook(
         return skip(&format!("hook.py is {from}, the bundled one is {to}: not newer"));
     }
     guard_hook_file(&cg, &py).map_err(|e| e.to_string())?;
+    let audit_py = cg.join(AUDIT_PY_FILE);
+    let audit = audit_py_state(&audit_py, bundled_audit)
+        .and_then(|state| write_audit_py(&cg, &state, bundled_audit))
+        .map_err(|e| format!("could not update {}, so hook.py was left as is: {e}", audit_py.display()))?;
+    let _ = install_fault("after_audit_update");
     let unchanged = || match (fs::symlink_metadata(&py), fs::read(&py)) {
         (Ok(m), Ok(now)) if m.file_type().is_file() && now == installed => Ok(()),
         (_, Err(e)) => Err(e),
         _ => Err(io::Error::other("hook.py changed while it was being updated")),
     };
-    atomic_write_checked(&py, bundled_hook.as_bytes(), true, unchanged)
-        .map_err(|e| format!("could not update {}: {e}", py.display()))?;
+    if let Err(e) = atomic_write_checked(&py, bundled_hook.as_bytes(), true, unchanged) {
+        let undone = audit.as_ref().map_or(Ok(()), undo_audit_py).err().map(|r| format!("; {r}")).unwrap_or_default();
+        return Err(format!("could not update {}: {e}{undone}", py.display()));
+    }
     match fs::symlink_metadata(&marker) {
         Ok(m) if m.file_type().is_file() => guard_hook_file(&cg, &marker)
             .and_then(|()| atomic_write_bytes(&marker, to.as_bytes(), true))
@@ -1473,6 +1607,198 @@ pub(crate) fn update_app_hook(
         _ => {}
     }
     Ok(HookUpdate::Updated { from, to })
+}
+
+// ---- Startup repair of the audit registration --------------------------------------------------
+
+//
+// A machine that never runs the extension never gets its `syncSettingsIfNeeded`, so a setup made
+// before the capture audit existed (by either side) keeps a PreToolUse entry and no audit entries.
+// At launch, once, this adds them. Every one of these must hold, or nothing is written:
+// - read-only mode is off, python3 was found, the platform is unix;
+// - a ClaudeGate entry is registered in settings.json (`SetUpByApp` or `SetUpByExtension`): repair
+//   only, never a first-time install;
+// - `compute_audit_patch` changes something (the audit entries are missing or stale) and refuses
+//   nothing (a malformed `hooks` or post event is an error, the file untouched);
+// - audit.py and audit.sh are each a regular file or absent (absent ones are created first, audit.sh
+//   at 0755 with `AUDIT_SH_CONTENT`; existing ones keep their content, but an existing audit.sh
+//   without its owner execute bit is restored to 0755 first, since an entry naming a wrapper that
+//   cannot run fails on every Bash call; that chmod is not undone on a later failure).
+// settings.json is then written by the setup protocol: a timestamped backup beside it, the write to
+// its realpath compared with what was read right before the rename, a re-read verified with
+// `verify_audit_content` (the PreToolUse entries exactly as they were), and a restore on failure.
+// A failure puts back what this call wrote under the same rules as setup (`Undo`). hook.py, hook.sh,
+// the marker and the PreToolUse entry are never written.
+
+pub(crate) fn repair_audit_registration(
+    home: &Path,
+    bundled_audit: &str,
+    python3: bool,
+    read_only: bool,
+) -> Result<crate::capture::AuditRepair, String> {
+    use crate::capture::AuditRepair;
+    let skip = |why: &str| Ok(AuditRepair::Skipped(why.to_owned()));
+    if read_only {
+        return skip("read-only mode is on");
+    }
+    if !python3 {
+        return skip("python3 was not found");
+    }
+    if !cfg!(unix) {
+        return skip("not supported on this platform");
+    }
+    repair_audit_unix(home, bundled_audit)
+}
+
+#[cfg(not(unix))]
+fn repair_audit_unix(_: &Path, _: &str) -> Result<crate::capture::AuditRepair, String> {
+    Ok(crate::capture::AuditRepair::Skipped("not supported on this platform".into()))
+}
+
+#[cfg(unix)]
+fn repair_audit_unix(home: &Path, bundled_audit: &str) -> Result<crate::capture::AuditRepair, String> {
+    use crate::capture::{compute_audit_patch, verify_audit_content, AuditRepair};
+    let cg = home.join(".claudegate");
+    let (audit_py, audit_sh) = (cg.join(AUDIT_PY_FILE), cg.join(AUDIT_SH_FILE));
+    let literal = settings_literal(home);
+    let audit_command = audit_sh.to_str().ok_or("the home folder's path is not valid UTF-8")?.to_owned();
+
+    // 1. Read and decide.
+    let target = settings_target(home).map_err(|e| format!("settings.json could not be read: {e}"))?;
+    let raw = match fs::read(&target) {
+        Ok(b) => String::from_utf8(b).map_err(|_| "settings.json is not UTF-8 text".to_owned())?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(AuditRepair::Skipped("no settings.json".into())),
+        Err(e) => return Err(format!("settings.json could not be read: {e}")),
+    };
+    match capture_status(Some(&raw), false, true) {
+        CaptureStatus::SetUpByApp { .. } | CaptureStatus::SetUpByExtension { .. } => {}
+        CaptureStatus::SettingsUnreadable(r) => return Err(format!("settings.json can't be updated safely ({r})")),
+        other => return Ok(AuditRepair::Skipped(format!("capture status is {other:?}: nothing to repair"))),
+    }
+    let patch = compute_audit_patch(&raw, &audit_command);
+    if let Some(why) = patch.shape_error {
+        return Err(format!("settings.json can't be updated safely ({why})"));
+    }
+    if patch.parse_error {
+        return Err("settings.json can't be updated safely (not a JSON object)".into());
+    }
+    if !patch.changed {
+        return Ok(AuditRepair::Skipped("the audit entries are already registered".into()));
+    }
+    let wanted = |p: &Path| match fs::symlink_metadata(p) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
+        Ok(m) if m.file_type().is_file() => Ok(false),
+        Ok(_) => Err(format!("{} is not a regular file, so the audit entries were not added", p.display())),
+        Err(e) => Err(format!("could not check {}: {e}", p.display())),
+    };
+    let (write_py, write_sh) = (wanted(&audit_py)?, wanted(&audit_sh)?);
+
+    let mut undo = Undo { audit_only: true, ..Undo::default() };
+    let failed = |undo: Undo, why: String| match undo.run() {
+        None => why,
+        Some(r) => format!("{why}; putting things back also failed: {r}"),
+    };
+
+    // 2. The files the entries will run, before settings.json names them.
+    if let Err(e) = create_dir_tracked(&cg, &mut undo) {
+        return Err(failed(undo, format!("could not create {}: {e}", cg.display())));
+    }
+    for (path, content, mode, want) in [
+        (&audit_py, bundled_audit.as_bytes(), None, write_py),
+        (&audit_sh, AUDIT_SH_CONTENT.as_bytes(), Some(0o755), write_sh),
+    ] {
+        if !want {
+            continue;
+        }
+        match guard_hook_file(&cg, path).and_then(|()| create_file_exclusive(path, content, mode)) {
+            Ok(()) => undo.created.push((path.clone(), content.to_vec())),
+            Err(e) => return Err(failed(undo, format!("could not write {}: {e}", path.display()))),
+        }
+    }
+    if !write_sh {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::symlink_metadata(&audit_sh).map(|m| m.permissions().mode()).unwrap_or(0o755);
+        if mode & 0o100 == 0 {
+            let fixed = guard_hook_file(&cg, &audit_sh)
+                .and_then(|()| fs::set_permissions(&audit_sh, fs::Permissions::from_mode(0o755)));
+            if let Err(e) = fixed {
+                return Err(failed(undo, format!("{} is not executable and could not be made so: {e}", audit_sh.display())));
+            }
+        }
+    }
+    if let Err(e) = install_fault("repair_after_files") {
+        return Err(failed(undo, e.to_string()));
+    }
+
+    // 3. Back up what we read; refuse if it changed since.
+    let unchanged_since_read = || -> Result<(), String> {
+        match fs::read(&target) {
+            Ok(now) if now == raw.as_bytes() => Ok(()),
+            Ok(_) => Err("settings.json changed while the audit entries were being added; try again".into()),
+            Err(e) => Err(format!("could not re-read settings.json: {e}")),
+        }
+    };
+    if let Err(why) = unchanged_since_read() {
+        return Err(failed(undo, why));
+    }
+    let backup = match backup_settings(&literal, raw.as_bytes()) {
+        Ok(p) => p,
+        Err(e) => return Err(failed(undo, format!("could not back up settings.json, so it was not changed: {e}"))),
+    };
+
+    // 4. Write to the realpath, compared with what was read right before the rename.
+    if let Err(e) = guard_settings_target(home, &target) {
+        return Err(failed(undo, e.to_string()));
+    }
+    let mut ours = patch.content.into_bytes();
+    corrupt_point(&mut ours);
+    if let Err(e) = install_fault("repair_before_write") {
+        return Err(failed(undo, e.to_string()));
+    }
+    let refused_why = std::cell::RefCell::new(None);
+    let check = || {
+        unchanged_since_read().map_err(|why| {
+            *refused_why.borrow_mut() = Some(why.clone());
+            io::Error::other(why)
+        })
+    };
+    if let Err(e) = atomic_write_checked(&target, &ours, true, check) {
+        let why = refused_why.borrow_mut().take().unwrap_or_else(|| format!("could not write settings.json: {e}"));
+        return Err(failed(undo, why));
+    }
+    undo.settings = Some(SettingsUndo { home: home.to_path_buf(), target: target.clone(), backup: Some(backup.clone()), ours: ours.clone() });
+    undo.written = Some(target.clone());
+    if let Err(e) = install_fault("repair_after_write") {
+        return Err(failed(undo, e.to_string()));
+    }
+
+    // 5. Verify. Another program's bytes are never restored over: the repair held if they kept the
+    //    audit entries.
+    let created: Vec<PathBuf> = undo.created.iter().map(|(p, _)| p.clone()).collect();
+    let after = match fs::read(&target) {
+        Ok(b) => b,
+        Err(e) => {
+            return Ok(AuditRepair::Repaired {
+                created,
+                backup,
+                note: Some(format!("settings.json was written but could not be read back to check it ({e})")),
+            })
+        }
+    };
+    if after != ours {
+        let note = concurrent_note(Some(&backup));
+        if audit_registered(&String::from_utf8_lossy(&after)) {
+            prune_settings_backups(&literal);
+            return Ok(AuditRepair::Repaired { created, backup, note: Some(note) });
+        }
+        undo.settings = None;
+        return Err(failed(undo, format!("{note} It no longer has the audit entries")));
+    }
+    if let Some(problem) = verify_audit_content(&String::from_utf8_lossy(&after), &raw, &audit_command) {
+        return Err(failed(undo, format!("settings.json did not verify after the write: {problem}")));
+    }
+    prune_settings_backups(&literal);
+    Ok(AuditRepair::Repaired { created, backup, note: None })
 }
 
 // ---- "Update hook": replacing whichever hook.py is installed ----------------------------------
@@ -1487,13 +1813,15 @@ pub(crate) fn update_app_hook(
 //   already the bundled hook;
 // - the backup `<desktop_home>/backups/hook/hook-<stamp>.py` (mode kept) was written and synced.
 // hook.py is then replaced atomically, its mode kept, comparing it with the bytes read right
-// before the rename; any change since refuses. hook.sh, the marker and settings.json are never
-// written. If the extension later rewrites hook.py, nothing here undoes that.
+// before the rename; any change since refuses. hook.sh, audit.sh, the marker and settings.json are
+// never written. audit.py is refreshed first (see above), backed up beside hook.py when replaced
+// (`audit-<stamp>.py`). If the extension later rewrites hook.py, nothing here undoes that.
 
 pub(crate) fn replace_hook(
     home: &Path,
     desktop_home: &Path,
     bundled_hook: &str,
+    bundled_audit: &str,
     read_only: bool,
 ) -> Result<crate::capture::HookReplaced, crate::capture::HookReplaceError> {
     use crate::capture::HookReplaceError as E;
@@ -1504,11 +1832,17 @@ pub(crate) fn replace_hook(
         return Err(E::Unsupported);
     }
     let to = crate::capture::bundled_hook_version(bundled_hook).ok_or(E::BundledHook)?;
-    replace_hook_unix(home, desktop_home, bundled_hook, to)
+    replace_hook_unix(home, desktop_home, bundled_hook, bundled_audit, to)
 }
 
 #[cfg(not(unix))]
-fn replace_hook_unix(_: &Path, _: &Path, _: &str, _: String) -> Result<crate::capture::HookReplaced, crate::capture::HookReplaceError> {
+fn replace_hook_unix(
+    _: &Path,
+    _: &Path,
+    _: &str,
+    _: &str,
+    _: String,
+) -> Result<crate::capture::HookReplaced, crate::capture::HookReplaceError> {
     Err(crate::capture::HookReplaceError::Unsupported)
 }
 
@@ -1517,6 +1851,7 @@ fn replace_hook_unix(
     home: &Path,
     desktop_home: &Path,
     bundled_hook: &str,
+    bundled_audit: &str,
     to: String,
 ) -> Result<crate::capture::HookReplaced, crate::capture::HookReplaceError> {
     use crate::capture::{app_owns_hook, hook_version, HookReplaceError as E, HookReplaced, HookVersion};
@@ -1544,39 +1879,74 @@ fn replace_hook_unix(
         CaptureStatus::SetUpByApp { .. } | CaptureStatus::SetUpByExtension { .. } => {}
         other => return Err(E::NotRegistered(other)),
     }
+    let audit_py = cg.join(AUDIT_PY_FILE);
+    let audit_state = audit_py_state(&audit_py, bundled_audit)
+        .map_err(|e| E::Failed(format!("could not read {}: {e}", audit_py.display())))?;
+    let audit_outdated = matches!(audit_state, AuditPy::Absent | AuditPy::Stale(_));
     let from = hook_version(installed.as_deref(), bundled_hook);
     match &from {
-        HookVersion::UpToDate => return Err(E::UpToDate),
+        // hook.py is current: only a missing or stale audit.py is left to bring up to date.
+        HookVersion::UpToDate if !audit_outdated => return Err(E::UpToDate),
         HookVersion::Newer { installed } => return Err(E::Newer(installed.clone())),
         _ => {}
     }
+    let write_hook = from != HookVersion::UpToDate;
     // The marker beside an unstamped hook.py: the extension had taken the hook over. The stamped
     // bundled hook makes it this app's again (`app_owns_hook`); say so rather than leave it silent.
-    let app_owns_now = !ours && fs::symlink_metadata(&marker).is_ok();
+    let app_owns_now = write_hook && !ours && fs::symlink_metadata(&marker).is_ok();
     guard_hook_file(&cg, &py).map_err(|e| E::Failed(e.to_string()))?;
 
     let backup = match &installed {
-        None => None,
-        Some(bytes) => {
+        Some(bytes) if write_hook => {
             let mode = mode_of(&py).unwrap_or(0o644);
             Some(
-                backup_hook(desktop_home, bytes, mode)
+                backup_hook(desktop_home, "hook", bytes, mode)
                     .map_err(|e| E::Failed(format!("could not back up hook.py, so it was not changed: {e}")))?,
             )
         }
+        _ => None,
     };
-    // From here a failure leaves hook.py as it was, so the backup just made is a duplicate: it goes,
-    // and the folder never grows past `HOOK_BACKUPS_KEPT` from refused updates.
+    let audit_backup = match &audit_state {
+        AuditPy::Stale(bytes) => {
+            let mode = mode_of(&audit_py).unwrap_or(0o644);
+            match backup_hook(desktop_home, "audit", bytes, mode) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    if let Some(b) = &backup {
+                        let _ = fs::remove_file(b);
+                    }
+                    return Err(E::Failed(format!("could not back up audit.py, so nothing was changed: {e}")));
+                }
+            }
+        }
+        _ => None,
+    };
+    // From here a failure leaves hook.py as it was, so the backups just made are duplicates: they
+    // go, and the folder never grows past `HOOK_BACKUPS_KEPT` from refused updates.
     let drop_backup = |e: E| {
-        if let Some(b) = &backup {
+        for b in [&backup, &audit_backup].into_iter().flatten() {
             let _ = fs::remove_file(b);
         }
         e
     };
     install_fault("before_hook_replace").map_err(|e| drop_backup(E::Failed(e.to_string())))?;
+    let audit = write_audit_py(&cg, &audit_state, bundled_audit).map_err(|e| {
+        drop_backup(E::Failed(format!("could not update {}, so hook.py was left as is: {e}", audit_py.display())))
+    })?;
+    // A failure from here puts audit.py back too, so both are left as they were; if that fails too,
+    // the error says so.
+    let fail = |e: E| {
+        let e = match audit.as_ref().map(undo_audit_py) {
+            Some(Err(r)) => E::Failed(format!("{e} Also, {r}")),
+            _ => e,
+        };
+        drop_backup(e)
+    };
+    install_fault("after_audit_replace").map_err(|e| fail(E::Failed(e.to_string())))?;
 
     let changed = std::cell::Cell::new(false);
     let res = match &installed {
+        _ if !write_hook => Ok(()),
         Some(old) => {
             let unchanged = || match (fs::symlink_metadata(&py), fs::read(&py)) {
                 (Ok(m), Ok(now)) if m.file_type().is_file() && &now == old => Ok(()),
@@ -1589,7 +1959,7 @@ fn replace_hook_unix(
         }
         None => {
             if !cg.is_dir() {
-                return Err(drop_backup(E::Failed(format!("{} is not a folder", cg.display()))));
+                return Err(fail(E::Failed(format!("{} is not a folder", cg.display()))));
             }
             create_file_exclusive(&py, bundled_hook.as_bytes(), None).inspect_err(|e| {
                 if e.kind() == io::ErrorKind::AlreadyExists {
@@ -1600,30 +1970,34 @@ fn replace_hook_unix(
     };
     match res {
         Ok(()) => {}
-        Err(_) if changed.get() => return Err(drop_backup(E::Changed)),
-        Err(e) => return Err(drop_backup(E::Failed(format!("could not write {}: {e}", py.display())))),
+        Err(_) if changed.get() => return Err(fail(E::Changed)),
+        Err(e) => return Err(fail(E::Failed(format!("could not write {}: {e}", py.display())))),
     }
     // Prune only once the write succeeded: a failed update never costs an older copy.
-    prune_hook_backups(&desktop_home.join("backups").join("hook"));
-    Ok(HookReplaced { hook: py, backup, from, to, app_owns_now })
+    let dir = desktop_home.join("backups").join("hook");
+    prune_hook_backups(&dir, "hook");
+    prune_hook_backups(&dir, "audit");
+    let audit_refreshed = audit.is_some();
+    Ok(HookReplaced { hook: py, backup, from, to, app_owns_now, audit_refreshed, audit_backup })
 }
 
 /// `hook-<stamp>[-N].py`'s `(stamp, N)`.
-fn hook_backup_key(name: &str) -> Option<(String, u64)> {
-    stamp_key(name.strip_prefix("hook-")?.strip_suffix(".py")?)
+fn hook_backup_key(name: &str, prefix: &str) -> Option<(String, u64)> {
+    stamp_key(name.strip_prefix(prefix)?.strip_prefix('-')?.strip_suffix(".py")?)
 }
 
-/// Copy `bytes` (hook.py as read) to `<desktop_home>/backups/hook/hook-<stamp>[-N].py` with
-/// `mode`, never overwriting a backup, synced before it counts.
+/// Copy `bytes` (hook.py or audit.py as read; `prefix` is `hook` or `audit`) to
+/// `<desktop_home>/backups/hook/<prefix>-<stamp>[-N].py` with `mode`, never overwriting a backup,
+/// synced before it counts.
 #[cfg(unix)]
-fn backup_hook(desktop_home: &Path, bytes: &[u8], mode: u32) -> io::Result<PathBuf> {
+fn backup_hook(desktop_home: &Path, prefix: &str, bytes: &[u8], mode: u32) -> io::Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let dir = desktop_home.join("backups").join("hook");
     fs::create_dir_all(&dir)?;
     let stamp = backup_stamp(SystemTime::now());
     let mut n = 0u64;
     loop {
-        let name = if n == 0 { format!("hook-{stamp}.py") } else { format!("hook-{stamp}-{n}.py") };
+        let name = if n == 0 { format!("{prefix}-{stamp}.py") } else { format!("{prefix}-{stamp}-{n}.py") };
         let dest = dir.join(&name);
         match OpenOptions::new().write(true).create_new(true).open(&dest) {
             Ok(mut f) => {
@@ -1644,12 +2018,13 @@ fn backup_hook(desktop_home: &Path, bytes: &[u8], mode: u32) -> io::Result<PathB
     }
 }
 
-/// Keep the newest `HOOK_BACKUPS_KEPT` hook backups. Best-effort; other names are never touched.
-fn prune_hook_backups(dir: &Path) {
+/// Keep the newest `HOOK_BACKUPS_KEPT` `<prefix>-*.py` backups. Best-effort; other names are never
+/// touched.
+fn prune_hook_backups(dir: &Path, prefix: &str) {
     let Ok(rd) = fs::read_dir(dir) else { return };
     let mut all: Vec<((String, u64), PathBuf)> = rd
         .flatten()
-        .filter_map(|e| Some((hook_backup_key(&e.file_name().into_string().ok()?)?, e.path())))
+        .filter_map(|e| Some((hook_backup_key(&e.file_name().into_string().ok()?, prefix)?, e.path())))
         .collect();
     let keep = crate::capture::HOOK_BACKUPS_KEPT;
     if all.len() <= keep {

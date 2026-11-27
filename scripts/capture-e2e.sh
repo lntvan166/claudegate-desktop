@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Headless proof that "Set up capture" really captures: in a mktemp sandbox HOME, add a project
 # the way the app does, set capture up, then feed the INSTALLED hook (through the registered
-# command) a PreToolUse Write and check the pending entry lands in that project's session.
+# command) a PreToolUse Write and check the pending entry lands in that project's session; then a
+# Bash write through both registered commands, the capture hook and the capture-audit hook, and
+# check the audit line counts it as captured.
 # Also checks the startup update of the app's own hook.py, and Update hook replacing the
 # extension's. The real ~/.claude, ~/.claudegate and
 # ~/.claudegate-desktop are never touched. Prints "CAPTURE E2E OK" and exits 0.
@@ -67,6 +69,20 @@ ours=[h['command'] for e in pre if e.get('matcher')=='^(Write|Edit|MultiEdit|Bas
 assert len(ours)==1, pre
 print(ours[0])")" || fail "settings.json after setup"
 [ "$CMD" = "$HOME/.claudegate/hook.sh" ] || fail "registered command is $CMD"
+[ -f "$HOME/.claudegate/audit.py" ] && [ -x "$HOME/.claudegate/audit.sh" ] || fail "audit files not installed"
+cmp -s "$HOME/.claudegate/audit.py" "$REPO/src-tauri/resources/audit.py" || fail "audit.py not the bundled one"
+ACMD="$(py "
+import json,os
+s=json.load(open(os.path.expanduser('~/.claude/settings.json')))
+cmds=set()
+for ev in ('PostToolUse','PostToolUseFailure'):
+    ours=[h['command'] for e in s['hooks'][ev] if e.get('matcher')=='^Bash\$' for h in e['hooks']]
+    assert len(ours)==1, (ev, s['hooks'][ev])
+    cmds.add(ours[0])
+assert len(cmds)==1, cmds
+assert list(s['hooks']).index('PreToolUse') < list(s['hooks']).index('PostToolUse') < list(s['hooks']).index('PostToolUseFailure'), list(s['hooks'])
+print(cmds.pop())")" || fail "audit entries in settings.json after setup"
+[ "$ACMD" = "$HOME/.claudegate/audit.sh" ] || fail "registered audit command is $ACMD"
 set +e; "$BIN" setup >/dev/null 2>&1; rc=$?; set -e
 [ "$rc" -eq 1 ] || fail "a second setup was not refused (exit $rc)"
 
@@ -82,12 +98,31 @@ py "import json; s=json.load(open('$SESSION')); f=s['files']['$WS/a.txt']; asser
   || fail "a.txt is not pending with its original content"
 echo "capture: pending entry for a.txt in $(basename "$SESSION")"
 
+# 3b. A Bash write: the capture hook before it, the audit hook after it, both as registered.
+BASH_IN="$(printf '{"session_id":"cap-e2e","tool_use_id":"toolu_e2e_1","cwd":"%s","tool_name":"Bash","tool_input":{"command":"printf v2 > c.txt"}' "$WS")"
+printf '%s,"hook_event_name":"PreToolUse"}' "$BASH_IN" | "$CMD" || fail "the installed hook failed on Bash"
+printf 'v2' > "$WS/c.txt"
+OUT="$(printf '%s,"hook_event_name":"PostToolUse","tool_response":{}}' "$BASH_IN" | "$ACMD" 2>&1)" || fail "the audit hook failed"
+[ -z "$OUT" ] || fail "the audit hook printed: $OUT"
+py "
+import glob,json,os
+lines=[json.loads(l) for f in glob.glob(os.path.expanduser('~/.claudegate/audit/*.jsonl')) for l in open(f)]
+mine=[l for l in lines if l['toolUseId']=='toolu_e2e_1']
+assert len(mine)==1, lines
+assert mine[0]['captured']==1 and mine[0]['missedCount']==0, mine[0]
+" || fail "the audit line does not count c.txt as captured"
+echo "audit: c.txt captured and audited"
+
 # 4. Startup update: an older app-installed hook is replaced, settings.json is not touched.
 printf 'v1.0.0' > "$HOME/.claudegate/.installed-by-desktop"
 printf '#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.0.0\n' > "$HOME/.claudegate/hook.py"
+printf '# an older audit.py\n' > "$HOME/.claudegate/audit.py"
 SUM="$(md5sum < "$HOME/.claude/settings.json")"
+ASH="$(md5sum < "$HOME/.claudegate/audit.sh")"
 "$BIN" update | grep -q "Updated { from: \"v1.0.0\", to: \"$VER\" }" || fail "update did not run"
 cmp -s "$HOME/.claudegate/hook.py" "$REPO/src-tauri/resources/hook.py" || fail "hook.py not updated"
+cmp -s "$HOME/.claudegate/audit.py" "$REPO/src-tauri/resources/audit.py" || fail "audit.py not updated alongside"
+[ "$(md5sum < "$HOME/.claudegate/audit.sh")" = "$ASH" ] || fail "update touched audit.sh"
 [ "$(cat "$HOME/.claudegate/.installed-by-desktop")" = "$VER" ] || fail "marker not updated"
 [ "$(md5sum < "$HOME/.claude/settings.json")" = "$SUM" ] || fail "update touched settings.json"
 "$BIN" update | grep -q '^Skipped' || fail "a second update was not skipped"
@@ -97,7 +132,7 @@ cmp -s "$HOME/.claudegate/hook.py" "$REPO/src-tauri/resources/hook.py" || fail "
 rm "$HOME/.claudegate/.installed-by-desktop"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)  # the extension, older\n' > "$HOME/.claudegate/hook.py"
 chmod 0640 "$HOME/.claudegate/hook.py"
-"$BIN" status | py "import json,sys; v=json.load(sys.stdin); assert v['status']=='vscode' and v['hook']=={'state':'different','installed':None,'bundled':'$VER'}, v" \
+"$BIN" status | py "import json,sys; v=json.load(sys.stdin); assert v['status']=='vscode' and v['hook']=={'state':'different','installed':None,'bundled':'$VER','auditStale':False}, v" \
   || fail "status before Update hook"
 SH="$(md5sum < "$HOME/.claudegate/hook.sh")"
 OUT="$("$BIN" update-hook)" || fail "update-hook"
@@ -127,5 +162,25 @@ cmp -s "$HOME/.claudegate/hook.py" "$REPO/src-tauri/resources/hook.py" || fail "
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)  # the extension\n' > "$HOME/.claudegate/hook.py"
 "$BIN" update | grep -q '^Skipped' || fail "startup update touched an unstamped hook"
 grep -q 'the extension' "$HOME/.claudegate/hook.py" || fail "unstamped hook changed"
+
+# 7. Startup repair: a registered setup without the audit entries (and without audit.sh) gets the
+#    wrapper first, then the entries; the capture entry is left exactly as it was. Once.
+rm "$HOME/.claudegate/audit.sh"
+py "
+import json,os
+p=os.path.expanduser('~/.claude/settings.json')
+s=json.load(open(p))
+del s['hooks']['PostToolUse']; del s['hooks']['PostToolUseFailure']
+json.dump(s,open(p,'w'),indent=2)"
+export PRE="$(py "import json,os; print(json.dumps(json.load(open(os.path.expanduser('~/.claude/settings.json')))['hooks']['PreToolUse']))")"
+"$BIN" repair-audit | grep -q '^Repaired' || fail "repair-audit did not repair"
+[ -x "$HOME/.claudegate/audit.sh" ] || fail "repair-audit did not write audit.sh"
+py "
+import json,os
+s=json.load(open(os.path.expanduser('~/.claude/settings.json')))
+for ev in ('PostToolUse','PostToolUseFailure'):
+    assert s['hooks'][ev]==[{'matcher':'^Bash\$','hooks':[{'type':'command','command':os.path.expanduser('~/.claudegate/audit.sh')}]}], s['hooks'][ev]
+assert json.dumps(s['hooks']['PreToolUse'])==os.environ['PRE'], s['hooks']['PreToolUse']" || fail "settings.json after repair-audit"
+"$BIN" repair-audit | grep -q '^Skipped' || fail "a second repair-audit was not skipped"
 
 echo "CAPTURE E2E OK"

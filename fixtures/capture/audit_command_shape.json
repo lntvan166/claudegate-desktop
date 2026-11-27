@@ -1,0 +1,104 @@
+{
+  "cases": [
+    {
+      "command": "/home/u/.claudegate/audit.sh",
+      "ours": true
+    },
+    {
+      "command": "/home/u/.claudegate/audit.bat",
+      "ours": true
+    },
+    {
+      "command": "C:\\Users\\u\\.claudegate\\audit.bat",
+      "ours": true
+    },
+    {
+      "command": "C:\\Users\\u\\.claudegate\\audit.sh",
+      "ours": true
+    },
+    {
+      "command": "/home/u/.claudegate\\audit.sh",
+      "ours": true
+    },
+    {
+      "command": "~/.claudegate/audit.sh",
+      "ours": true
+    },
+    {
+      "command": "/.claudegate/audit.sh",
+      "ours": true
+    },
+    {
+      "command": ".claudegate/audit.sh",
+      "ours": false
+    },
+    {
+      "command": "/home/u/claudegate/audit.sh",
+      "ours": false
+    },
+    {
+      "command": "/home/u/x.claudegate/audit.sh",
+      "ours": false
+    },
+    {
+      "command": "/home/u/.claudegate/audit.sh ",
+      "ours": false
+    },
+    {
+      "command": "/home/u/.claudegate/audit.sh\n",
+      "ours": false
+    },
+    {
+      "command": "/home/u/.claudegate/audit.py",
+      "ours": false
+    },
+    {
+      "command": "/home/u/.claudegate/hook.sh",
+      "ours": false
+    },
+    {
+      "command": "/home/u/.claudegate/sub/audit.sh",
+      "ours": false
+    },
+    {
+      "command": "/home/u/.claudegate/xaudit.sh",
+      "ours": false
+    },
+    {
+      "command": "/home/u/.claudegate/audit.shx",
+      "ours": false
+    },
+    {
+      "command": "python3 /home/u/.claudegate/audit.sh",
+      "ours": true
+    },
+    {
+      "command": "bash /home/u/.claudegate/audit.sh --x",
+      "ours": false
+    },
+    {
+      "command": "",
+      "ours": false
+    },
+    {
+      "command": "audit.sh",
+      "ours": false
+    },
+    {
+      "command": "/home/u/.claudegate//audit.sh",
+      "ours": false
+    },
+    {
+      "command": "/home/u/.CLAUDEGATE/audit.sh",
+      "ours": false
+    },
+    {
+      "command": "/home/u/.claudegate/AUDIT.SH",
+      "ours": false
+    },
+    {
+      "command": "/日本/.claudegate/audit.sh",
+      "ours": true
+    }
+  ]
+}

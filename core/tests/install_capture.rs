@@ -6,14 +6,17 @@
 //! Every install runs against a temp HOME. Nothing here touches the real ~/.claude or ~/.claudegate.
 
 use claudegate_core::capture::{
-    adoptable_hook, backups_to_prune, bundled_hook_version, compute_settings_patch, set_up_capture, verify_settings_content,
-    CaptureStatus, InstallError, HOOK_SH_CONTENT, PRE_TOOL_MATCHER, SETTINGS_BACKUP_RETENTION,
+    adoptable_hook, audit_command_shape, backups_to_prune, bundled_hook_version, compute_audit_patch, compute_settings_patch,
+    set_up_capture,
+    verify_settings_content, CaptureStatus, InstallError, AUDIT_EVENTS, AUDIT_SH_CONTENT, HOOK_SH_CONTENT,
+    POST_TOOL_MATCHER, PRE_TOOL_MATCHER, SETTINGS_BACKUP_RETENTION,
 };
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const HOOK: &str = "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.16.1\nprint('hook')\n";
+const AUDIT: &str = "#!/usr/bin/env python3\nprint('audit')\n";
 
 fn fixture(name: &str) -> Value {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/capture").join(name);
@@ -26,10 +29,11 @@ fn fixture(name: &str) -> Value {
 fn settings_patch_matches_the_extension() {
     let fx = fixture("settings_patch.json");
     let cases = fx["cases"].as_array().unwrap();
-    assert!(cases.len() >= 15);
+    assert!(cases.len() >= 35);
+    assert!(cases.iter().filter(|c| c.get("auditCommand").is_some()).count() >= 15, "the audit cases are there");
     for c in cases {
         let name = c["name"].as_str().unwrap();
-        let p = compute_settings_patch(c["raw"].as_str().unwrap(), c["hookCommand"].as_str().unwrap());
+        let p = compute_settings_patch(c["raw"].as_str().unwrap(), c["hookCommand"].as_str().unwrap(), c["auditCommand"].as_str());
         assert_eq!(p.parse_error, c["expected"]["parseError"].as_bool().unwrap(), "{name}: parseError");
         assert_eq!(p.changed, c["expected"]["changed"].as_bool().unwrap(), "{name}: changed");
         assert!(p.shape_error.is_none(), "{name}: {:?}", p.shape_error);
@@ -37,14 +41,63 @@ fn settings_patch_matches_the_extension() {
     }
 }
 
+/// The startup repair writes `compute_audit_patch`; Setup writes `compute_settings_patch`. Where the
+/// capture entry is already correct the two must produce the same bytes, or a repaired settings.json
+/// would differ from a set-up one (and the extension's next sync would rewrite it).
 #[test]
-fn settings_patch_refuses_shapes_the_extension_would_throw_on() {
+fn audit_patch_is_byte_for_byte_the_settings_patch_when_capture_is_correct() {
+    let fx = fixture("settings_patch.json");
+    let mut compared = 0;
+    for c in fx["cases"].as_array().unwrap() {
+        let name = c["name"].as_str().unwrap();
+        let hook = c["hookCommand"].as_str().unwrap();
+        let audit = c["auditCommand"].as_str().unwrap_or("/home/u/.claudegate/audit.sh");
+        // The case's own input, then the same input with the capture entry made correct first.
+        let raw = c["raw"].as_str().unwrap().to_owned();
+        let capture_only = compute_settings_patch(&raw, hook, None);
+        if capture_only.parse_error {
+            continue;
+        }
+        let mut inputs = vec![capture_only.content.clone()];
+        if !capture_only.changed {
+            inputs.push(raw);
+        }
+        for input in inputs {
+            assert!(!compute_settings_patch(&input, hook, None).changed, "{name}: capture entry is correct");
+            let full = compute_settings_patch(&input, hook, Some(audit));
+            let repair = compute_audit_patch(&input, audit);
+            assert_eq!(repair.content, full.content, "{name}: content");
+            assert_eq!(repair.changed, full.changed, "{name}: changed");
+            assert_eq!(repair.parse_error, full.parse_error, "{name}: parseError");
+            assert_eq!(repair.shape_error, full.shape_error, "{name}: shapeError");
+            compared += 1;
+        }
+    }
+    assert!(compared >= 35, "only {compared} inputs compared");
+}
+
+#[test]
+fn settings_patch_refuses_the_shapes_the_extension_refuses() {
     let fx = fixture("settings_patch.json");
     for c in fx["refuse"].as_array().unwrap() {
         let name = c["name"].as_str().unwrap();
-        let p = compute_settings_patch(c["raw"].as_str().unwrap(), c["hookCommand"].as_str().unwrap());
+        let raw = c["raw"].as_str().unwrap();
+        let p = compute_settings_patch(raw, c["hookCommand"].as_str().unwrap(), c["auditCommand"].as_str());
         assert!(p.shape_error.is_some(), "{name}");
+        assert!(p.parse_error, "{name}: parseError too, as the extension");
         assert!(!p.changed, "{name}");
+        assert_eq!(p.content, raw, "{name}: the original bytes are kept");
+    }
+}
+
+#[test]
+fn audit_command_shape_matches_the_extension() {
+    let fx = fixture("audit_command_shape.json");
+    let cases = fx["cases"].as_array().unwrap();
+    assert!(cases.len() >= 20);
+    for c in cases {
+        let cmd = c["command"].as_str().unwrap();
+        assert_eq!(audit_command_shape(cmd), c["ours"].as_bool().unwrap(), "{cmd:?}");
     }
 }
 
@@ -67,6 +120,7 @@ fn verify_settings_matches_the_extension() {
             c["after"].as_str().unwrap(),
             c["previous"].as_str().unwrap(),
             c["hookCommand"].as_str().unwrap(),
+            c["auditCommand"].as_str(),
         );
         assert_eq!(got.as_deref(), c["expected"].as_str(), "{}", c["name"]);
     }
@@ -77,6 +131,12 @@ fn constants_are_the_extensions() {
     assert_eq!(PRE_TOOL_MATCHER, "^(Write|Edit|MultiEdit|Bash)$");
     assert_eq!(SETTINGS_BACKUP_RETENTION, 5);
     assert_eq!(HOOK_SH_CONTENT, "#!/usr/bin/env bash\npython3 \"$HOME/.claudegate/hook.py\"\n");
+    assert_eq!(POST_TOOL_MATCHER, "^Bash$");
+    assert_eq!(AUDIT_EVENTS, ["PostToolUse", "PostToolUseFailure"]);
+    assert_eq!(
+        AUDIT_SH_CONTENT,
+        "#!/usr/bin/env bash\n[ -f \"$HOME/.claudegate/audit.py\" ] || exit 0\npython3 \"$HOME/.claudegate/audit.py\"\n"
+    );
 }
 
 #[test]
@@ -115,6 +175,9 @@ impl Home {
     fn cmd(&self) -> String {
         self.cg("hook.sh").to_str().unwrap().to_owned()
     }
+    fn audit_cmd(&self) -> String {
+        self.cg("audit.sh").to_str().unwrap().to_owned()
+    }
     fn write_settings(&self, text: &str) {
         fs::create_dir_all(self.home.join(".claude")).unwrap();
         fs::write(self.settings(), text).unwrap();
@@ -130,12 +193,18 @@ impl Home {
         v
     }
     fn install(&self) -> Result<claudegate_core::capture::InstallReport, InstallError> {
-        set_up_capture(&self.home, HOOK, true, false)
+        set_up_capture(&self.home, HOOK, AUDIT, true, false)
     }
 }
 
 fn our_entry(cmd: &str) -> Value {
     json!({ "matcher": PRE_TOOL_MATCHER, "hooks": [{ "type": "command", "command": cmd }] })
+}
+
+/// What a fresh install writes: the capture entry, then the audit pair.
+fn fresh_hooks(h: &Home) -> Value {
+    let audit = json!({ "matcher": POST_TOOL_MATCHER, "hooks": [{ "type": "command", "command": h.audit_cmd() }] });
+    json!({ "hooks": { "PreToolUse": [our_entry(&h.cmd())], "PostToolUse": [audit], "PostToolUseFailure": [audit] } })
 }
 
 const EXISTING: &str = r#"{
@@ -176,22 +245,29 @@ fn fresh_install_appends_our_entry_and_keeps_everything_else() {
             assert_eq!(&after[k], v, "{k}");
         }
     }
-    for ev in ["SessionStart", "PostToolUse"] {
-        assert_eq!(after["hooks"][ev], before["hooks"][ev], "{ev}");
-    }
+    assert_eq!(after["hooks"]["SessionStart"], before["hooks"]["SessionStart"]);
+    // The audit entries: after any foreign PostToolUse group, and a PostToolUseFailure of their own.
+    let audit = json!({ "matcher": POST_TOOL_MATCHER, "hooks": [{ "type": "command", "command": h.audit_cmd() }] });
+    assert_eq!(after["hooks"]["PostToolUse"], json!([before["hooks"]["PostToolUse"][0], audit]));
+    assert_eq!(after["hooks"]["PostToolUseFailure"], json!([audit]));
     let pre = after["hooks"]["PreToolUse"].as_array().unwrap();
     assert_eq!(pre.len(), 3);
     assert_eq!(pre[..2], before["hooks"]["PreToolUse"].as_array().unwrap()[..], "other matchers survive in order");
     assert_eq!(pre[2], our_entry(&h.cmd()));
     // The bytes are the extension's: JSON.stringify(_, null, 2), key order kept.
-    assert_eq!(fs::read_to_string(h.settings()).unwrap(), compute_settings_patch(EXISTING, &h.cmd()).content);
+    assert_eq!(fs::read_to_string(h.settings()).unwrap(), compute_settings_patch(EXISTING, &h.cmd(), Some(&h.audit_cmd())).content);
     assert_eq!(mode(&h.settings()), 0o600, "the file's mode is kept");
 
     // Hook files and the marker.
     assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), HOOK);
     assert_eq!(fs::read_to_string(h.cg("hook.sh")).unwrap(), HOOK_SH_CONTENT);
     assert_eq!(mode(&h.cg("hook.sh")), 0o755);
+    assert_eq!(fs::read_to_string(h.cg("audit.py")).unwrap(), AUDIT);
+    assert_eq!(fs::read_to_string(h.cg("audit.sh")).unwrap(), AUDIT_SH_CONTENT);
+    assert_eq!(mode(&h.cg("audit.sh")), 0o755);
     assert_eq!(fs::read_to_string(h.cg(".installed-by-desktop")).unwrap(), "v1.16.1");
+    let created: Vec<PathBuf> = ["hook.py", "hook.sh", "audit.py", "audit.sh"].iter().map(|f| h.cg(f)).collect();
+    assert_eq!(report.created, created);
 
     // One backup, the original bytes, beside the settings file, private like the original.
     let backups = h.backups();
@@ -269,7 +345,7 @@ fn a_symlinked_home_installs() {
     let h = Home::new();
     let link = h.home.parent().unwrap().join("linkhome");
     symlink(&h.home, &link).unwrap();
-    let report = set_up_capture(&link, HOOK, true, false).unwrap();
+    let report = set_up_capture(&link, HOOK, AUDIT, true, false).unwrap();
     assert_eq!(report.settings, fs::canonicalize(h.settings()).unwrap());
     assert!(fs::read_to_string(h.settings()).unwrap().contains("hook.sh"));
 }
@@ -279,7 +355,7 @@ fn missing_settings_gets_a_file_with_only_the_hooks_block() {
     let h = Home::new();
     let report = h.install().unwrap();
     let after: Value = serde_json::from_str(&fs::read_to_string(h.settings()).unwrap()).unwrap();
-    assert_eq!(after, json!({ "hooks": { "PreToolUse": [our_entry(&h.cmd())] } }));
+    assert_eq!(after, fresh_hooks(&h));
     assert!(report.backup.is_none(), "nothing to back up");
     assert!(h.backups().is_empty());
 }
@@ -290,7 +366,7 @@ fn empty_settings_is_a_fresh_install_but_still_backed_up() {
     h.write_settings("  \n");
     h.install().unwrap();
     let after: Value = serde_json::from_str(&fs::read_to_string(h.settings()).unwrap()).unwrap();
-    assert_eq!(after, json!({ "hooks": { "PreToolUse": [our_entry(&h.cmd())] } }));
+    assert_eq!(after, fresh_hooks(&h));
     assert_eq!(h.backups().len(), 1);
 }
 
@@ -345,7 +421,7 @@ fn assert_untouched(h: &Home, text: Option<&str>) {
         Some(t) => assert_eq!(fs::read_to_string(h.settings()).unwrap(), t),
         None => assert!(!h.settings().exists()),
     }
-    for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
+    for f in ["hook.py", "hook.sh", "audit.py", "audit.sh", ".installed-by-desktop"] {
         assert!(!h.cg(f).exists(), "{f}");
     }
     if h.home.join(".claude").exists() {
@@ -378,7 +454,7 @@ fn hooks_of_the_wrong_shape_are_refused() {
 fn python_missing_is_refused() {
     let h = Home::new();
     h.write_settings("{}");
-    let err = set_up_capture(&h.home, HOOK, false, false).unwrap_err();
+    let err = set_up_capture(&h.home, HOOK, AUDIT, false, false).unwrap_err();
     assert!(matches!(err, InstallError::PythonMissing), "{err:?}");
     assert_untouched(&h, Some("{}"));
 }
@@ -387,7 +463,7 @@ fn python_missing_is_refused() {
 fn read_only_is_refused() {
     let h = Home::new();
     h.write_settings("{}");
-    let err = set_up_capture(&h.home, HOOK, true, true).unwrap_err();
+    let err = set_up_capture(&h.home, HOOK, AUDIT, true, true).unwrap_err();
     assert!(matches!(err, InstallError::ReadOnly), "{err:?}");
     assert_untouched(&h, Some("{}"));
 }
@@ -395,7 +471,7 @@ fn read_only_is_refused() {
 #[test]
 fn bundled_hook_without_a_version_is_refused() {
     let h = Home::new();
-    let err = set_up_capture(&h.home, "print(1)\n", true, false).unwrap_err();
+    let err = set_up_capture(&h.home, "print(1)\n", AUDIT, true, false).unwrap_err();
     assert!(matches!(err, InstallError::BundledHook), "{err:?}");
     assert_untouched(&h, None);
 }
@@ -412,7 +488,7 @@ fn existing_hook_py_is_refused_and_left_alone() {
     assert_eq!(
         err.to_string(),
         "ClaudeGate's hook files already exist (likely from the VS Code extension). \
-         Run \"Claude Gate: Setup Hook\" in VS Code, or remove ~/.claudegate/hook.py if the extension is gone."
+         Run \"Claude Gate: Setup Hook\" in VS Code, or remove ~/.claudegate/hook.py and audit.py if the extension is gone."
     );
     assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), "the extension's hook");
     assert_eq!(fs::read_to_string(h.settings()).unwrap(), EXISTING);
@@ -434,7 +510,7 @@ fn leftover_hook_files_from_this_app_get_their_own_message() {
     assert_eq!(
         err.to_string(),
         "ClaudeGate's hook files from an earlier setup in this app already exist. \
-         Remove ~/.claudegate/hook.py, hook.sh and .installed-by-desktop to set up again."
+         Remove ~/.claudegate/hook.py, hook.sh, audit.py, audit.sh and .installed-by-desktop to set up again."
     );
     assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), OLDER);
     assert!(!h.settings().exists());
@@ -470,7 +546,7 @@ fn the_apps_own_leftover_hook_py_is_adopted() {
 
     let report = h.install().unwrap();
     assert!(report.adopted);
-    assert!(report.created.is_empty(), "{:?}", report.created);
+    assert_eq!(report.created, vec![h.cg("audit.py"), h.cg("audit.sh")], "only the audit files are new");
     assert_eq!(fs::read_to_string(h.cg("hook.py")).unwrap(), HOOK);
     assert!(h.settings().exists());
 }
@@ -586,4 +662,98 @@ fn the_stamp_is_removed_only_from_line_two() {
     assert!(adoptable_hook(b"#!/usr/bin/env python3\nprint('hook')\n", line2));
     // A stamp without its newline (the last line) is not "that line".
     assert!(!adoptable_hook(b"#!/usr/bin/env python3\n", "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1"));
+}
+
+// ---- the capture-audit hook ----
+
+#[cfg(unix)]
+#[test]
+fn the_audit_wrapper_exits_quietly_without_audit_py() {
+    let h = Home::new();
+    h.install().unwrap();
+    fs::remove_file(h.cg("audit.py")).unwrap();
+    let out = std::process::Command::new(h.cg("audit.sh")).env("HOME", &h.home).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(out.stderr.is_empty(), "{out:?}");
+}
+
+#[test]
+fn an_identical_audit_py_and_wrapper_are_kept_not_refused() {
+    let h = Home::new();
+    fs::create_dir_all(h.cg("")).unwrap();
+    fs::write(h.cg("audit.py"), AUDIT).unwrap();
+    fs::write(h.cg("audit.sh"), AUDIT_SH_CONTENT).unwrap();
+    let report = h.install().unwrap();
+    assert_eq!(report.created, vec![h.cg("hook.py"), h.cg("hook.sh")], "existing identical files are not ours to list");
+    let after: Value = serde_json::from_str(&fs::read_to_string(h.settings()).unwrap()).unwrap();
+    for ev in AUDIT_EVENTS {
+        assert_eq!(after["hooks"][ev][0]["hooks"][0]["command"], json!(h.audit_cmd()), "{ev}");
+    }
+}
+
+#[test]
+fn a_different_audit_py_or_wrapper_refuses_setup_and_writes_nothing() {
+    let h = Home::new();
+    h.write_settings("{}");
+    fs::create_dir_all(h.cg("")).unwrap();
+    fs::write(h.cg("audit.py"), "print('older audit')\n").unwrap();
+    assert!(matches!(h.install().unwrap_err(), InstallError::HookFilesExist));
+    fs::remove_file(h.cg("audit.py")).unwrap();
+    fs::write(h.cg("audit.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    assert!(matches!(h.install().unwrap_err(), InstallError::ForeignWrapper));
+    assert_eq!(fs::read_to_string(h.settings()).unwrap(), "{}");
+    assert!(!h.cg("hook.py").exists() && !h.cg("audit.py").exists());
+    assert!(h.backups().is_empty());
+}
+
+#[test]
+fn a_post_event_of_the_wrong_shape_refuses_setup() {
+    for raw in [r#"{"hooks":{"PostToolUse":{}}}"#, r#"{"hooks":{"PostToolUseFailure":"x"}}"#, r#"{"hooks":false}"#] {
+        let h = Home::new();
+        h.write_settings(raw);
+        let err = h.install().unwrap_err();
+        assert!(matches!(err, InstallError::SettingsUnreadable(_)), "{raw}: {err:?}");
+        assert_eq!(fs::read_to_string(h.settings()).unwrap(), raw);
+        assert!(!h.cg("hook.py").exists() && !h.cg("audit.sh").exists(), "{raw}");
+    }
+}
+
+#[test]
+fn audit_entries_alone_do_not_count_as_set_up() {
+    let h = Home::new();
+    let only_audit = json!({ "hooks": {
+        "PostToolUse": [{ "matcher": "^Bash$", "hooks": [{ "type": "command", "command": h.audit_cmd() }] }],
+        "PostToolUseFailure": [{ "matcher": "^Bash$", "hooks": [{ "type": "command", "command": h.audit_cmd() }] }],
+    }});
+    let text = only_audit.to_string();
+    for marker in [false, true] {
+        assert_eq!(claudegate_core::capture::capture_status(Some(&text), marker, true), CaptureStatus::NotSetUp);
+    }
+    // And with the capture entry, the status is what it was without post entries.
+    let mut both = only_audit.clone();
+    both["hooks"]["PreToolUse"] = json!([our_entry(&h.cmd())]);
+    let plain = json!({ "hooks": { "PreToolUse": [our_entry(&h.cmd())] } });
+    for marker in [false, true] {
+        assert_eq!(
+            claudegate_core::capture::capture_status(Some(&both.to_string()), marker, true),
+            claudegate_core::capture::capture_status(Some(&plain.to_string()), marker, true),
+        );
+    }
+    // Setup over audit-only entries keeps them as they are and adds the capture entry.
+    h.write_settings(&text);
+    h.install().unwrap();
+    let after: Value = serde_json::from_str(&fs::read_to_string(h.settings()).unwrap()).unwrap();
+    for ev in AUDIT_EVENTS {
+        assert_eq!(after["hooks"][ev], only_audit["hooks"][ev], "{ev}");
+    }
+    assert_eq!(after["hooks"]["PreToolUse"], json!([our_entry(&h.cmd())]));
+}
+
+#[test]
+fn audit_command_shape_spot_checks() {
+    assert!(audit_command_shape("/home/u/.claudegate/audit.sh"));
+    assert!(audit_command_shape("C:\\Users\\u\\.claudegate\\audit.bat"));
+    assert!(!audit_command_shape("/x/claudegate/lint.sh"));
+    assert!(!audit_command_shape("/home/u/.claudegate/audit.sh --flag"));
+    assert!(!audit_command_shape(".claudegate/audit.sh"));
 }

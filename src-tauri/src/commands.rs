@@ -356,6 +356,51 @@ pub fn max_attached_for(config_path: &Path, root: &Path, sources: &ExtSources) -
     effective(&app, Some(root), sources).max_attached.value as usize
 }
 
+/// `get_audit` minus Tauri: the project's scopes (primary, worktrees, nested roots) read for the
+/// last 7 days before `now_ms`, without what the user dismissed since the miss and without files
+/// that are pending now (the review panel already shows those). Stats are not filtered.
+pub fn get_audit_at(home: &Path, config_path: &Path, root: &str, sources: &ExtSources, now_ms: i64) -> claudegate_core::audit::AuditView {
+    use claudegate_core::audit::{read_audit, WINDOW_MS};
+    let primary = resolve_root(Path::new(root));
+    let view = load_project_max(home, &primary, max_attached_for(config_path, &primary, sources));
+    let mut roots: Vec<PathBuf> = vec![primary];
+    for s in &view.scopes {
+        let r = PathBuf::from(&s.root);
+        if !roots.contains(&r) {
+            roots.push(r);
+        }
+    }
+    let mut out = read_audit(home, &roots, now_ms - WINDOW_MS);
+    let dismissed = crate::config::read_audit_dismissed(config_path);
+    let pending: std::collections::HashSet<PathBuf> = view.pending.iter().map(|p| PathBuf::from(&p.path)).collect();
+    let keep = |i: &claudegate_core::audit::AuditItem| {
+        !pending.contains(Path::new(&i.path)) && !dismissed.get(&i.path).is_some_and(|d| *d >= i.at_ms)
+    };
+    out.missed.retain(keep);
+    out.uncertain.retain(keep);
+    out
+}
+
+#[tauri::command]
+pub async fn get_audit(root: String) -> Result<claudegate_core::audit::AuditView, String> {
+    blocking(move || get_audit_at(&claudegate_home(), &crate::config::config_path(), &root, &ext_sources(), claudegate_core::time::now_ms())).await
+}
+
+/// Hides audit items for these paths in this app (config.json only).
+#[tauri::command]
+pub async fn dismiss_audit(paths: Vec<String>) -> Result<(), String> {
+    blocking(move || {
+        crate::config::dismiss_audit_paths(
+            &crate::config::config_path(),
+            &paths,
+            claudegate_core::time::now_ms(),
+            claudegate_core::audit::WINDOW_MS,
+            Some(&claudegate_home()),
+        )
+    })
+    .await?
+}
+
 pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())
 }

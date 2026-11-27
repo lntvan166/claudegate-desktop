@@ -35,13 +35,20 @@ pub fn run() {
             window_state::save_as_it_changes(app.handle());
             // Bring the app's own ~/.claudegate/hook.py up to the bundled version (never the
             // extension's; never settings.json). Off the main thread: it runs python3 --version.
-            std::thread::spawn(capture::update_hook_at_startup);
+            // Then, once per launch, add the capture-audit entries to a registered setup that lacks
+            // them (repair only; a machine that never runs the extension gets them nowhere else).
+            std::thread::spawn(|| {
+                capture::update_hook_at_startup();
+                capture::repair_audit_at_startup();
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             launch::launch_path,
             commands::list_projects,
             commands::get_project,
+            commands::get_audit,
+            commands::dismiss_audit,
             commands::get_diff,
             commands::decide,
             commands::get_settings,

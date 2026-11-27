@@ -9,7 +9,7 @@ use crate::commands::{blocking, check_writable_for};
 use crate::editor::{fallback_dirs, is_executable};
 use claudegate_core::capture::{
     app_owns_hook, bundled_hook_version, capture_status as core_status, hook_version, CaptureStatus, HookReplaced,
-    HookUpdate, HookVersion, InstallError, InstallReport, HOOK_PY_FILE, MARKER_FILE,
+    AuditRepair, HookUpdate, HookVersion, InstallError, InstallReport, AUDIT_PY_FILE, HOOK_PY_FILE, MARKER_FILE,
 };
 use std::ffi::OsStr;
 use serde::Serialize;
@@ -22,6 +22,9 @@ use std::time::{Duration, Instant};
 
 /// The hook this build ships, stamped `# CLAUDEGATE_HOOK_VERSION=…` by the repo.
 pub const BUNDLED_HOOK: &str = include_str!("../resources/hook.py");
+/// The capture-audit hook (`hooks/audit.py` at the same extension ref), installed and refreshed
+/// beside hook.py.
+pub const BUNDLED_AUDIT: &str = include_str!("../resources/audit.py");
 
 /// `capture_status` for the UI. `status` is one of `vscode`, `app`, `not-set-up`,
 /// `settings-unreadable`, `python-missing`.
@@ -56,6 +59,9 @@ pub struct HookView {
     pub installed: Option<String>,
     /// The bundled hook's version, e.g. `v1.16.1`.
     pub bundled: String,
+    /// `~/.claudegate/audit.py` is missing or differs from the bundled copy: Update hook has that
+    /// to bring up to date even when hook.py is current. (A symlink is left alone, so never stale.)
+    pub audit_stale: bool,
 }
 
 pub fn hook_view_of(v: &HookVersion) -> HookView {
@@ -66,7 +72,12 @@ pub fn hook_view_of(v: &HookVersion) -> HookView {
         HookVersion::Different { installed } => ("different", installed.clone()),
         HookVersion::Missing => ("missing", None),
     };
-    HookView { state: state.to_owned(), installed, bundled: bundled_hook_version(BUNDLED_HOOK).unwrap_or_default() }
+    HookView {
+        state: state.to_owned(),
+        installed,
+        bundled: bundled_hook_version(BUNDLED_HOOK).unwrap_or_default(),
+        audit_stale: false,
+    }
 }
 
 /// A successful "Update hook", with the status read right after it.
@@ -74,9 +85,11 @@ pub fn hook_view_of(v: &HookVersion) -> HookView {
 #[serde(rename_all = "camelCase")]
 pub struct HookReplacedView {
     pub hook: String,
-    /// The previous hook.py's copy; `None` when there was none.
+    /// The previous hook.py's copy; `None` when there was none (or hook.py was already current).
     pub backup: Option<String>,
-    /// What was there before.
+    /// The previous audit.py's copy; `None` when none was replaced.
+    pub audit_backup: Option<String>,
+    /// What was there before (`from.auditStale`: audit.py was brought up to date).
     pub from: HookView,
     pub to: String,
     /// The marker was there beside the extension's unstamped hook: now stamped, this app keeps the
@@ -117,11 +130,14 @@ struct Read {
     hook: Option<HookVersion>,
     /// hook.py's stamp, if it has one.
     stamp: Option<String>,
+    /// audit.py is missing, or a regular file other than `BUNDLED_AUDIT`.
+    audit_stale: bool,
 }
 
 fn read_full(home: &Path, python3: bool) -> Read {
     let literal = home.join(".claude").join("settings.json");
-    let unreadable = |r: String| Read { status: CaptureStatus::SettingsUnreadable(r), taken_over: false, hook: None, stamp: None };
+    let unreadable =
+        |r: String| Read { status: CaptureStatus::SettingsUnreadable(r), taken_over: false, hook: None, stamp: None, audit_stale: false };
     let text = match fs::read(&literal) {
         Ok(b) => match String::from_utf8(b) {
             Ok(t) => Some(t),
@@ -155,7 +171,13 @@ fn read_full(home: &Path, python3: bool) -> Read {
     let hook = matches!(status, CaptureStatus::SetUpByApp { .. } | CaptureStatus::SetUpByExtension { .. })
         .then(|| hook_version(hook_py.as_deref(), BUNDLED_HOOK));
     let stamp = hook_py.as_deref().and_then(|b| bundled_hook_version(&String::from_utf8_lossy(b)));
-    Read { status, taken_over, hook, stamp }
+    let audit_py = cg.join(AUDIT_PY_FILE);
+    let audit_stale = match fs::symlink_metadata(&audit_py) {
+        Err(e) => e.kind() == io::ErrorKind::NotFound,
+        Ok(m) if m.file_type().is_file() => fs::read(&audit_py).map_or(true, |b| b != BUNDLED_AUDIT.as_bytes()),
+        Ok(_) => false,
+    };
+    Read { status, taken_over, hook, stamp, audit_stale }
 }
 
 /// The capture status under `home`, with the marker's version for `SetUpByApp`. Read only.
@@ -184,8 +206,8 @@ pub fn view_of(s: &CaptureStatus) -> CaptureView {
 pub fn capture_view_for(home: &Path, python3: bool) -> CaptureView {
     let r = read_full(home, python3);
     let hook = r.hook.as_ref().map(|v| match v {
-        HookVersion::UpToDate => HookView { installed: r.stamp.clone(), ..hook_view_of(v) },
-        _ => hook_view_of(v),
+        HookVersion::UpToDate => HookView { installed: r.stamp.clone(), audit_stale: r.audit_stale, ..hook_view_of(v) },
+        _ => HookView { audit_stale: r.audit_stale, ..hook_view_of(v) },
     });
     CaptureView { taken_over: r.taken_over, hook, ..view_of(&r.status) }
 }
@@ -294,7 +316,7 @@ pub fn install_view(r: &InstallReport, capture: CaptureView) -> InstallView {
 /// refuses anything but `NotSetUp`. The status is read again right after a success.
 pub fn set_up_capture_with(home: &Path, config_path: &Path, python3: bool) -> Result<InstallView, String> {
     check_writable_for(config_path, "set up capture")?;
-    let report = claudegate_core::capture::set_up_capture(home, BUNDLED_HOOK, python3, false)
+    let report = claudegate_core::capture::set_up_capture(home, BUNDLED_HOOK, BUNDLED_AUDIT, python3, false)
         .map_err(|e| install_error_text(&e))?;
     Ok(install_view(&report, capture_view_for(home, python3)))
 }
@@ -303,7 +325,8 @@ pub fn hook_replaced_view(r: &HookReplaced, capture: CaptureView) -> HookReplace
     HookReplacedView {
         hook: show(&r.hook),
         backup: r.backup.as_deref().map(show),
-        from: hook_view_of(&r.from),
+        audit_backup: r.audit_backup.as_deref().map(show),
+        from: HookView { audit_stale: r.audit_refreshed, ..hook_view_of(&r.from) },
         to: r.to.clone(),
         app_owns_now: r.app_owns_now,
         capture,
@@ -317,7 +340,7 @@ pub fn hook_replaced_view(r: &HookReplaced, capture: CaptureView) -> HookReplace
 pub fn update_capture_hook_with(home: &Path, config_path: &Path, python3: bool) -> Result<HookReplacedView, String> {
     check_writable_for(config_path, "update the hook")?;
     let desktop_home = crate::commands::desktop_home_for(config_path, &home.join(".claudegate"))?;
-    let r = claudegate_core::capture::replace_hook(home, &desktop_home, BUNDLED_HOOK, false).map_err(|e| e.to_string())?;
+    let r = claudegate_core::capture::replace_hook(home, &desktop_home, BUNDLED_HOOK, BUNDLED_AUDIT, false).map_err(|e| e.to_string())?;
     Ok(hook_replaced_view(&r, capture_view_for(home, python3)))
 }
 
@@ -325,7 +348,35 @@ pub fn update_capture_hook_with(home: &Path, config_path: &Path, python3: bool) 
 /// it; `claudegate_core::capture::update_app_hook` checks the rest.
 pub fn update_hook_with(home: &Path, config_path: &Path, python3: bool) -> Result<HookUpdate, String> {
     let read_only = !matches!(crate::config::read_only_strict(config_path), Ok(false));
-    claudegate_core::capture::update_app_hook(home, BUNDLED_HOOK, python3, read_only)
+    claudegate_core::capture::update_app_hook(home, BUNDLED_HOOK, BUNDLED_AUDIT, python3, read_only)
+}
+
+/// The startup repair of the audit registration minus Tauri. Read-only mode (or an unreadable
+/// config) skips it; `claudegate_core::capture::repair_audit_registration` checks the rest.
+pub fn repair_audit_with(home: &Path, config_path: &Path, python3: bool) -> Result<AuditRepair, String> {
+    let read_only = !matches!(crate::config::read_only_strict(config_path), Ok(false));
+    claudegate_core::capture::repair_audit_registration(home, BUNDLED_AUDIT, python3, read_only)
+}
+
+/// Latched on the first attempt: the repair runs at most once per launch, and a failure is never
+/// retried until the next one.
+static AUDIT_REPAIR_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Run once at startup, off the main thread, after `update_hook_at_startup`. Logs, never raises.
+pub fn repair_audit_at_startup() {
+    if AUDIT_REPAIR_TRIED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let Some(home) = dirs::home_dir() else { return };
+    match repair_audit_with(&home, &crate::config::config_path(), python3_cached(false)) {
+        Ok(AuditRepair::Repaired { created, backup, note }) => {
+            let made = if created.is_empty() { String::new() } else { format!(", created {}", created.iter().map(|p| show(p)).collect::<Vec<_>>().join(", ")) };
+            let note = note.map(|n| format!(" ({n})")).unwrap_or_default();
+            eprintln!("claudegate: added the capture audit entries to ~/.claude/settings.json (backup {}){made}{note}", backup.display());
+        }
+        Ok(AuditRepair::Skipped(_)) => {}
+        Err(e) => eprintln!("claudegate: couldn't add the capture audit entries: {e}"),
+    }
 }
 
 /// Run once at startup, off the main thread. Logs, never raises.

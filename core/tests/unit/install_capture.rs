@@ -9,6 +9,7 @@ use std::io;
 use std::path::PathBuf;
 
 const HOOK: &str = "#!/usr/bin/env python3\n# CLAUDEGATE_HOOK_VERSION=v1.16.1\nprint('hook')\n";
+const AUDIT: &str = "#!/usr/bin/env python3\nprint('audit')\n";
 const EXISTING: &str = "{\n    \"model\": \"opus\",\n    \"hooks\": { \"Stop\": [] }\n}\n";
 
 struct Home {
@@ -48,7 +49,7 @@ impl Home {
 /// Runs `install_capture` with `fault` called at each stage; clears the seam afterwards.
 fn install_with(h: &Home, fault: impl FnMut(&str) -> io::Result<()> + 'static) -> Result<crate::capture::InstallReport, InstallError> {
     set_install_fault(Some(Box::new(fault)));
-    let r = install_capture(&h.home, HOOK, true, false);
+    let r = install_capture(&h.home, HOOK, AUDIT, true, false);
     set_install_fault(None);
     r
 }
@@ -56,7 +57,7 @@ fn install_with(h: &Home, fault: impl FnMut(&str) -> io::Result<()> + 'static) -
 /// Runs `install_capture` with our settings bytes replaced by `bad` before they are written.
 fn install_corrupted(h: &Home, bad: &'static str) -> Result<crate::capture::InstallReport, InstallError> {
     set_install_corrupt(Some(Box::new(move |b: &mut Vec<u8>| *b = bad.as_bytes().to_vec())));
-    let r = install_capture(&h.home, HOOK, true, false);
+    let r = install_capture(&h.home, HOOK, AUDIT, true, false);
     set_install_corrupt(None);
     r
 }
@@ -75,7 +76,7 @@ fn forced_verification_failure_restores_the_backup_byte_for_byte() {
     assert!(matches!(err, InstallError::Failed { .. }), "{err:?}");
     assert!(err.to_string().contains("the claudegate hook entry is missing"), "{err}");
     assert_eq!(fs::read(h.settings()).unwrap(), EXISTING.as_bytes(), "restored byte for byte");
-    for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
+    for f in ["hook.py", "hook.sh", "audit.py", "audit.sh", ".installed-by-desktop"] {
         assert!(!h.cg(f).exists(), "{f} left behind");
     }
     assert!(!h.home.join(".claudegate").exists(), "the folder this call created is gone");
@@ -113,7 +114,7 @@ fn a_foreign_write_right_after_ours_is_never_restored_over() {
     assert!(msg.contains("Your pre-setup copy is"), "{msg}");
     assert!(msg.contains("capture is not set up"), "{msg}");
     assert_eq!(fs::read_to_string(h.settings()).unwrap(), theirs, "their write survives untouched");
-    for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
+    for f in ["hook.py", "hook.sh", "audit.py", "audit.sh", ".installed-by-desktop"] {
         assert!(!h.cg(f).exists(), "{f}: the entry is gone, so the files this call made go too");
     }
     assert_eq!(h.backups().len(), 1);
@@ -155,7 +156,7 @@ fn a_foreign_write_with_a_differently_spelled_entry_keeps_the_files() {
     .unwrap();
     assert!(report.note.as_deref().is_some_and(|n| n.contains("left as is")), "{report:?}");
     assert_eq!(fs::read_to_string(h.settings()).unwrap(), theirs);
-    for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
+    for f in ["hook.py", "hook.sh", "audit.py", "audit.sh", ".installed-by-desktop"] {
         assert!(h.cg(f).exists(), "{f}: an entry is registered, so its files stay");
     }
 }
@@ -176,7 +177,7 @@ fn a_read_error_after_our_write_keeps_the_files_and_says_so() {
     let note = report.note.unwrap_or_default();
     assert!(note.contains("could not read it back to check it"), "{note}");
     assert!(!note.contains("another program"), "{note}");
-    for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
+    for f in ["hook.py", "hook.sh", "audit.py", "audit.sh", ".installed-by-desktop"] {
         assert!(h.cg(f).exists(), "{f}");
     }
 }
@@ -189,7 +190,7 @@ fn a_symlinked_home_does_not_trip_the_guard_on_rollback() {
     let link = h.home.parent().unwrap().join("linkhome");
     symlink(&h.home, &link).unwrap();
     set_install_corrupt(Some(Box::new(|b: &mut Vec<u8>| *b = b"[]".to_vec())));
-    let r = install_capture(&link, HOOK, true, false);
+    let r = install_capture(&link, HOOK, AUDIT, true, false);
     set_install_corrupt(None);
     let err = r.unwrap_err();
     assert!(matches!(err, InstallError::Failed { rollback: None, .. }), "{err:?}");
@@ -226,7 +227,7 @@ fn a_failed_restore_keeps_the_files_while_the_entry_is_registered() {
     let rollback = rollback.as_deref().unwrap_or_default();
     assert!(rollback.contains("could not read the backup"), "{rollback}");
     assert!(rollback.contains("the hook files and marker were kept"), "{rollback}");
-    for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
+    for f in ["hook.py", "hook.sh", "audit.py", "audit.sh", ".installed-by-desktop"] {
         assert!(h.cg(f).exists(), "{f}");
     }
 }
@@ -253,7 +254,7 @@ fn a_foreign_rewrite_before_undo_that_keeps_an_entry_keeps_the_files() {
     assert!(rollback.contains("was changed by another program right after setup; it was left as is"), "{rollback}");
     assert!(rollback.contains("the hook files and marker were kept"), "{rollback}");
     assert_eq!(fs::read_to_string(h.settings()).unwrap(), theirs);
-    for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
+    for f in ["hook.py", "hook.sh", "audit.py", "audit.sh", ".installed-by-desktop"] {
         assert!(h.cg(f).exists(), "{f}");
     }
 }
@@ -274,7 +275,7 @@ fn settings_deleted_after_our_write_is_not_set_up() {
     assert!(reason.contains("removed by another program"), "{reason}");
     assert_eq!(rollback, &None);
     assert!(!h.settings().exists(), "not recreated");
-    for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
+    for f in ["hook.py", "hook.sh", "audit.py", "audit.sh", ".installed-by-desktop"] {
         assert!(!h.cg(f).exists(), "{f}");
     }
     assert_eq!(h.backups().len(), 1);
@@ -539,4 +540,145 @@ fn a_replaced_file_that_cannot_be_read_at_rollback_is_a_rollback_problem() {
         other => panic!("{other:?}"),
     }
     assert!(h.cg(".installed-by-desktop").is_dir(), "left as found");
+}
+
+#[test]
+fn a_write_missing_an_audit_entry_fails_verification_and_rolls_back() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    let cmd = h.cg("hook.sh").to_str().unwrap().to_owned();
+    let only_capture = format!(
+        "{{\"model\":\"opus\",\"hooks\":{{\"Stop\":[],\"PreToolUse\":[{{\"matcher\":\"x\",\"hooks\":[{{\"command\":\"{cmd}\"}}]}}]}}}}"
+    );
+    let err = install_corrupted(&h, Box::leak(only_capture.into_boxed_str())).unwrap_err();
+    assert!(err.to_string().contains("the claudegate PostToolUse audit entry is missing"), "{err}");
+    assert_eq!(fs::read(h.settings()).unwrap(), EXISTING.as_bytes(), "restored byte for byte");
+    for f in ["hook.py", "hook.sh", "audit.py", "audit.sh", ".installed-by-desktop"] {
+        assert!(!h.cg(f).exists(), "{f} left behind");
+    }
+}
+
+#[test]
+fn rollback_keeps_audit_files_this_call_did_not_create() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    fs::create_dir_all(h.cg("")).unwrap();
+    fs::write(h.cg("audit.py"), AUDIT).unwrap();
+    fs::write(h.cg("audit.sh"), crate::capture::AUDIT_SH_CONTENT).unwrap();
+    let err = install_with(&h, |stage| if stage == "before_write" { Err(io::Error::other("boom")) } else { Ok(()) }).unwrap_err();
+    assert!(matches!(err, InstallError::Failed { rollback: None, .. }), "{err:?}");
+    assert_eq!(fs::read_to_string(h.cg("audit.py")).unwrap(), AUDIT, "not ours: kept");
+    assert_eq!(fs::read_to_string(h.cg("audit.sh")).unwrap(), crate::capture::AUDIT_SH_CONTENT, "not ours: kept");
+    for f in ["hook.py", "hook.sh", ".installed-by-desktop"] {
+        assert!(!h.cg(f).exists(), "{f} left behind");
+    }
+    assert_eq!(fs::read(h.settings()).unwrap(), EXISTING.as_bytes());
+}
+
+#[test]
+fn audit_files_stay_while_settings_still_registers_capture() {
+    // Settings written, our undo of it refused (another program's write kept our entry): every hook
+    // file stays, audit files included, by the one rule `hook_files_may_go`.
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    let t = h.settings();
+    let err = install_with(&h, move |stage| match stage {
+        "after_settings_write" => Err(io::Error::other("boom")),
+        "before_undo" => {
+            let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&t).unwrap()).unwrap();
+            v["model"] = "sonnet".into();
+            fs::write(&t, serde_json::to_string(&v).unwrap()).unwrap();
+            Ok(())
+        }
+        _ => Ok(()),
+    })
+    .unwrap_err();
+    assert!(matches!(err, InstallError::Failed { rollback: Some(_), .. }), "{err:?}");
+    for f in ["hook.py", "hook.sh", "audit.py", "audit.sh", ".installed-by-desktop"] {
+        assert!(h.cg(f).exists(), "{f} removed under a registered entry");
+    }
+}
+
+#[test]
+fn hook_files_stay_while_only_the_audit_entries_are_left() {
+    // Another program drops only the PreToolUse entry right after our write: capture is not set up,
+    // but the audit entries still name audit.sh, so no hook file goes.
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    let t = h.settings();
+    let err = install_with(&h, move |stage| {
+        if stage == "after_settings_write" {
+            let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&t).unwrap()).unwrap();
+            v["hooks"].as_object_mut().unwrap().remove("PreToolUse");
+            fs::write(&t, serde_json::to_string(&v).unwrap()).unwrap();
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("still has the ClaudeGate audit entries"), "{msg}");
+    for f in ["hook.py", "hook.sh", "audit.py", "audit.sh", ".installed-by-desktop"] {
+        assert!(h.cg(f).exists(), "{f} removed while an audit entry names it");
+    }
+}
+
+#[test]
+fn an_audit_sh_gone_before_the_write_refuses_it() {
+    let h = Home::new();
+    h.write_settings(EXISTING);
+    let sh = h.cg("audit.sh");
+    let err = install_with(&h, move |stage| {
+        if stage == "before_write" {
+            fs::remove_file(&sh).unwrap();
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(matches!(err, InstallError::Failed { rollback: None, .. }), "{err:?}");
+    assert!(err.to_string().contains("audit.sh is gone, so its entries were not registered"), "{err}");
+    assert_eq!(fs::read(h.settings()).unwrap(), EXISTING.as_bytes(), "settings.json never written");
+    for f in ["hook.py", "hook.sh", "audit.py", ".installed-by-desktop"] {
+        assert!(!h.cg(f).exists(), "{f} left behind");
+    }
+}
+
+// ---- the startup repair of the audit registration ----
+
+fn registered_without_audit(h: &Home) -> String {
+    let s = format!(
+        "{{\n  \"model\": \"opus\",\n  \"hooks\": {{\"PreToolUse\": [{{\"matcher\": \"x\", \"hooks\": [{{\"type\": \"command\", \"command\": \"{}\"}}]}}]}}\n}}\n",
+        h.cg("hook.sh").display()
+    );
+    h.write_settings(&s);
+    s
+}
+
+#[test]
+fn a_repair_whose_write_does_not_verify_restores_and_removes_what_it_created() {
+    let h = Home::new();
+    let before = registered_without_audit(&h);
+    set_install_corrupt(Some(Box::new(|b: &mut Vec<u8>| *b = b"{\"model\":\"opus\",\"hooks\":{}}".to_vec())));
+    let r = crate::store::repair_audit_registration(&h.home, AUDIT, true, false);
+    set_install_corrupt(None);
+    let err = r.unwrap_err();
+    assert!(err.contains("did not verify"), "{err}");
+    assert!(!err.contains("also failed"), "{err}");
+    assert_eq!(fs::read_to_string(h.settings()).unwrap(), before, "restored byte for byte");
+    assert!(!h.cg("audit.py").exists() && !h.cg("audit.sh").exists(), "created files go with the entries");
+}
+
+#[test]
+fn a_repair_that_changes_the_capture_entry_does_not_verify() {
+    let h = Home::new();
+    let before = registered_without_audit(&h);
+    let audit_sh = h.cg("audit.sh").display().to_string();
+    let bad = format!(
+        "{{\"model\":\"opus\",\"hooks\":{{\"PreToolUse\":[],\"PostToolUse\":[{{\"hooks\":[{{\"command\":\"{audit_sh}\"}}]}}],\"PostToolUseFailure\":[{{\"hooks\":[{{\"command\":\"{audit_sh}\"}}]}}]}}}}"
+    );
+    let bad: &'static str = Box::leak(bad.into_boxed_str());
+    set_install_corrupt(Some(Box::new(move |b: &mut Vec<u8>| *b = bad.as_bytes().to_vec())));
+    let r = crate::store::repair_audit_registration(&h.home, AUDIT, true, false);
+    set_install_corrupt(None);
+    assert!(r.unwrap_err().contains("the PreToolUse entries changed"));
+    assert_eq!(fs::read_to_string(h.settings()).unwrap(), before);
 }

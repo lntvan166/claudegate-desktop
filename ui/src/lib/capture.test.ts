@@ -37,10 +37,10 @@ const v = (status: CaptureView["status"], extra: Partial<CaptureView> = {}): Cap
 describe("chipLabel", () => {
   it("names every state", () => {
     expect(chipLabel(v("vscode"))).toBe("Capturing");
-    const stale = { hook: { state: "different" as const, installed: null, bundled: "v1.17.0" } };
+    const stale = { hook: { state: "different" as const, installed: null, bundled: "v1.17.0", auditStale: false } };
     expect(chipLabel(v("vscode", stale))).toBe("Capturing · update hook");
     expect(chipLabel(v("vscode", stale), false, true)).toBe("Capturing");
-    expect(chipLabel(v("app", { hook: { state: "newer" as const, installed: "v9.0.0", bundled: "v1.17.0" } }))).toBe("Capturing");
+    expect(chipLabel(v("app", { hook: { state: "newer" as const, installed: "v9.0.0", bundled: "v1.17.0", auditStale: false } }))).toBe("Capturing");
     expect(chipLabel(v("app", { version: "v1.16.1" }))).toBe("Capturing");
     expect(chipLabel(v("not-set-up"))).toBe("Not capturing — Set up");
     expect(chipLabel(v("not-set-up", { setupSupported: false }))).toBe("Not capturing");
@@ -204,7 +204,12 @@ describe("setupResult", () => {
   });
 });
 
-const hk = (state: HookView["state"], installed: string | null = null): HookView => ({ state, installed, bundled: "v1.17.0" });
+const hk = (state: HookView["state"], installed: string | null = null, auditStale = false): HookView => ({
+  state,
+  installed,
+  bundled: "v1.17.0",
+  auditStale,
+});
 
 describe("the hook line and Update hook", () => {
   it("says which hook is installed and which this app has, for each state", () => {
@@ -260,6 +265,7 @@ describe("the hook line and Update hook", () => {
     const r = (backup: string | null, after: HookView["state"]): HookReplacedView => ({
       hook: "/h/.claudegate/hook.py",
       backup,
+      auditBackup: null,
       from: hk("different"),
       to: "v1.17.0",
       appOwnsNow: false,
@@ -305,6 +311,7 @@ describe("a newer hook, a modified copy, and taking the hook back", () => {
     const r: HookReplacedView = {
       hook: "/h/.claudegate/hook.py",
       backup: "/b.py",
+      auditBackup: null,
       from: hk("different"),
       to: "v1.17.0",
       appOwnsNow: true,
@@ -338,5 +345,34 @@ describe("who registered the hook, and who keeps it current", () => {
     expect(detail(v("app", { hook: hk("older", "v1.16.1") }))).toContain(app);
     expect(detail(v("vscode", { hook: hk("upToDate") }))).not.toContain(app);
     expect(detail(v("app"))).toBe("This app registered the hook, so Claude Code's edits are captured.");
+  });
+});
+
+describe("a stale audit.py beside a current hook.py", () => {
+  const m = v("app", { hook: hk("upToDate", "v1.17.0", true) });
+  it("counts as outdated and offers Update hook for audit.py only", () => {
+    expect(hookOutdated(m)).toBe(true);
+    expect(canUpdateHook(m, false)).toBe(true);
+    expect(hookUpdateBlocked(m, true)).not.toBeNull();
+    expect(hookLine(m)).toBe("Hook: v1.17.0, but audit.py differs from this app's copy");
+    expect(updateHookConfirm(hk("upToDate", "v1.17.0", true))).toContain("Write ~/.claudegate/audit.py");
+    expect(hookOutdated(v("app", { hook: hk("upToDate", "v1.17.0") }))).toBe(false);
+  });
+  it("reports the audit.py backup", () => {
+    const r: HookReplacedView = {
+      hook: "/h/.claudegate/hook.py",
+      backup: null,
+      auditBackup: "/h/.claudegate-desktop/backups/hook/audit-x.py",
+      from: hk("upToDate", "v1.17.0", true),
+      to: "v1.17.0",
+      appOwnsNow: false,
+      capture: v("app", { hook: hk("upToDate", "v1.17.0") }),
+    };
+    expect(hookUpdateResult(r)).toEqual({
+      tone: "success",
+      text: "audit.py is now this app's copy (v1.17.0). The previous audit.py is in /h/.claudegate-desktop/backups/hook/audit-x.py.",
+    });
+    const both = { ...r, backup: "/b.py", from: hk("older", "v1.16.1", true) };
+    expect(hookUpdateResult(both).text).toContain("The previous file is in /b.py. The previous audit.py is in /h/.claudegate-desktop/backups/hook/audit-x.py.");
   });
 });

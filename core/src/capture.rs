@@ -3,8 +3,8 @@
 //! `set_up_capture`, which hands the writes to `store::install_capture`.
 //!
 //! `compute_settings_patch`, `backups_to_prune` and `verify_settings_content` are ports of the
-//! extension's `hookInstaller.ts` (v1.16.1), checked against its own TypeScript by
-//! `fixtures/capture/*.json` and `xcheck/run.ts`.
+//! extension's `hookInstaller.ts` (v1.18.0, with the capture-audit registration), checked against
+//! its own TypeScript by `fixtures/capture/*.json` and `xcheck/run.ts`.
 
 use crate::ojson::OJson;
 use serde_json::Value;
@@ -115,9 +115,9 @@ pub fn adoptable_hook(existing: &[u8], bundled_hook: &str) -> bool {
     existing == lines.concat().as_bytes()
 }
 
-/// `computeSettingsPatch`'s result. `shape_error` is ours: a `hooks` or `hooks.PreToolUse` the
-/// extension would throw on (or, for an array `hooks`, silently drop our entry from). The app
-/// refuses those rather than guess.
+/// `computeSettingsPatch`'s result. `shape_error` says why: a `hooks` that is not a plain object,
+/// or an event we would touch that is not a list. The extension refuses those too
+/// (`parseError` + `shapeError`), echoing the original bytes, and so does the app.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsPatch {
     pub content: String,
@@ -126,15 +126,117 @@ pub struct SettingsPatch {
     pub shape_error: Option<String>,
 }
 
-fn refuse_shape(raw: &str, why: &str) -> SettingsPatch {
-    SettingsPatch { content: raw.to_owned(), changed: false, parse_error: false, shape_error: Some(why.to_owned()) }
+fn refuse_shape(raw: &str, why: String) -> SettingsPatch {
+    SettingsPatch { content: raw.to_owned(), changed: false, parse_error: true, shape_error: Some(why) }
+}
+
+/// The matcher the capture-audit hook (`audit.py`) is registered under (`POST_TOOL_MATCHER`).
+pub const POST_TOOL_MATCHER: &str = "^Bash$";
+/// The events the audit hook is registered under, in the order they are appended (`AUDIT_EVENTS`).
+pub const AUDIT_EVENTS: [&str; 2] = ["PostToolUse", "PostToolUseFailure"];
+/// The extension's POSIX audit wrapper (`installAuditWrapper`), written at mode 0755. It exits 0
+/// when audit.py is absent: a PostToolUse hook that exits 2 feeds its stderr to Claude.
+pub const AUDIT_SH_CONTENT: &str = "#!/usr/bin/env bash\n[ -f \"$HOME/.claudegate/audit.py\" ] || exit 0\npython3 \"$HOME/.claudegate/audit.py\"\n";
+pub const AUDIT_PY_FILE: &str = "audit.py";
+pub const AUDIT_SH_FILE: &str = "audit.sh";
+
+/// `AUDIT_COMMAND_SHAPE`, `/[\\/]\.claudegate[\\/]audit\.(sh|bat)$/`: whether an audit-event hook
+/// command is ours. Stricter than PreToolUse's substring rule, so a foreign
+/// `/x/claudegate/lint.sh` PostToolUse hook is never rewritten.
+pub fn audit_command_shape(command: &str) -> bool {
+    let is_sep = |c: Option<char>| matches!(c, Some('/') | Some('\\'));
+    let Some(rest) = command.strip_suffix("audit.sh").or_else(|| command.strip_suffix("audit.bat")) else {
+        return false;
+    };
+    let mut it = rest.chars();
+    if !is_sep(it.next_back()) {
+        return false;
+    }
+    let Some(rest) = it.as_str().strip_suffix(".claudegate") else { return false };
+    is_sep(rest.chars().next_back())
+}
+
+fn single_entry(matcher: &str, command: &str) -> OJson {
+    OJson::Obj(vec![
+        ("matcher".into(), OJson::Str(matcher.into())),
+        (
+            "hooks".into(),
+            OJson::Arr(vec![OJson::Obj(vec![
+                ("type".into(), OJson::Str("command".into())),
+                ("command".into(), OJson::Str(command.into())),
+            ])]),
+        ),
+    ])
+}
+
+/// Port of `ensureHookEntry`: make `hooks[event]` carry a correct entry of ours
+/// (`{matcher, hooks: [{type: "command", command}]}`). `group_owns` decides which groups are ours,
+/// `command_owns` which commands in them get repaired. True when that is a semantic change.
+/// The caller has already refused an `event` that is neither absent, null nor a list.
+fn ensure_hook_entry(
+    hooks: &mut OJson,
+    event: &str,
+    matcher: &str,
+    command: &str,
+    group_owns: &dyn Fn(&OJson) -> bool,
+    command_owns: &dyn Fn(&str) -> bool,
+) -> bool {
+    if !hooks.get(event).is_some_and(OJson::truthy) {
+        hooks.set(event, OJson::Arr(Vec::new()));
+    }
+    let Some(OJson::Arr(groups)) = hooks.get_mut(event) else { return false };
+
+    let correct = groups.iter().filter(|h| group_owns(h)).any(|h| {
+        h.get("matcher").and_then(OJson::as_str) == Some(matcher)
+            && matches!(h.get("hooks"), Some(OJson::Arr(xs)) if xs.iter().any(|x| x.get("command").and_then(OJson::as_str) == Some(command)))
+    });
+    if correct {
+        // Already registered: content is the reformatted text, but nothing changed.
+        return false;
+    }
+    let mut changed = false;
+    // Stale registration: repair the command and matcher of entries that carry ours.
+    for h in groups.iter_mut().filter(|h| group_owns(h)) {
+        let Some(OJson::Arr(xs)) = h.get_mut("hooks") else { continue };
+        let mut mine = false;
+        for x in xs.iter_mut() {
+            if x.get("command").and_then(OJson::as_str).is_some_and(command_owns) {
+                x.set("command", OJson::Str(command.to_owned()));
+                mine = true;
+            }
+        }
+        if !mine {
+            continue;
+        }
+        h.set("matcher", OJson::Str(matcher.to_owned()));
+        changed = true;
+    }
+    if changed {
+        return true;
+    }
+    // Nothing repaired (no group of ours, or ours mention claudegate only outside a command): our
+    // own entry goes beside them, or verification would fail on every attempt.
+    groups.push(single_entry(matcher, command));
+    true
 }
 
 /// Port of `computeSettingsPatch`: the settings text that should be on disk, and whether that is
 /// a semantic change. An absent/blank file is a fresh install; text that is not a JSON object
 /// sets `parse_error` and echoes `raw`, so the caller never overwrites it. Key order and layout
-/// are `JSON.stringify(settings, null, 2)`'s.
-pub fn compute_settings_patch(raw: &str, hook_command: &str) -> SettingsPatch {
+/// are `JSON.stringify(settings, null, 2)`'s. With `audit_command`, the audit hook is registered
+/// under each of `AUDIT_EVENTS` too, after PreToolUse.
+pub fn compute_settings_patch(raw: &str, hook_command: &str, audit_command: Option<&str>) -> SettingsPatch {
+    patch_settings(raw, Some(hook_command), audit_command)
+}
+
+/// The audit half of `compute_settings_patch` alone, for the startup repair of a registered
+/// setup: PreToolUse is neither checked nor touched. Where the capture entry is already correct,
+/// this is byte for byte what `compute_settings_patch` writes.
+pub fn compute_audit_patch(raw: &str, audit_command: &str) -> SettingsPatch {
+    patch_settings(raw, None, Some(audit_command))
+}
+
+fn patch_settings(raw: &str, hook_command: Option<&str>, audit_command: Option<&str>) -> SettingsPatch {
     let mut settings = if raw.trim().is_empty() {
         OJson::Obj(Vec::new())
     } else {
@@ -144,59 +246,52 @@ pub fn compute_settings_patch(raw: &str, hook_command: &str) -> SettingsPatch {
         }
     };
 
+    // A shape we cannot patch without discarding the user's data is refused; `null` holds no data
+    // and counts as absent.
+    let present = |v: Option<&OJson>| v.is_some_and(|v| !matches!(v, OJson::Null));
+    if present(settings.get("hooks")) && !matches!(settings.get("hooks"), Some(OJson::Obj(_))) {
+        return refuse_shape(raw, "\"hooks\" in settings.json is not an object".into());
+    }
+    let mut touched = Vec::new();
+    if hook_command.is_some() {
+        touched.push("PreToolUse");
+    }
+    if audit_command.is_some() {
+        touched.extend(AUDIT_EVENTS);
+    }
+    if let Some(existing) = settings.get("hooks") {
+        for event in &touched {
+            if present(existing.get(event)) && !matches!(existing.get(event), Some(OJson::Arr(_))) {
+                return refuse_shape(raw, format!("\"hooks.{event}\" in settings.json is not a list"));
+            }
+        }
+    }
+
     if !settings.get("hooks").is_some_and(OJson::truthy) {
         settings.set("hooks", OJson::Obj(Vec::new()));
     }
     let hooks = settings.get_mut("hooks").expect("set above");
-    if !matches!(hooks, OJson::Obj(_)) {
-        return refuse_shape(raw, "\"hooks\" in settings.json is not an object");
-    }
-    if !hooks.get("PreToolUse").is_some_and(OJson::truthy) {
-        hooks.set("PreToolUse", OJson::Arr(Vec::new()));
-    }
-    let Some(OJson::Arr(pre)) = hooks.get_mut("PreToolUse") else {
-        return refuse_shape(raw, "\"hooks.PreToolUse\" in settings.json is not a list");
-    };
 
-    let is_ours = |h: &OJson| h.to_compact().contains("claudegate");
-    let correct = pre.iter().filter(|h| is_ours(h)).any(|h| {
-        h.get("matcher").and_then(OJson::as_str) == Some(PRE_TOOL_MATCHER)
-            && matches!(h.get("hooks"), Some(OJson::Arr(xs)) if xs.iter().any(|x| x.get("command").and_then(OJson::as_str) == Some(hook_command)))
+    // PreToolUse: any group whose JSON mentions claudegate, as the extension (and `registered`).
+    let mut changed = hook_command.is_some_and(|hook_command| {
+        ensure_hook_entry(
+            hooks,
+            "PreToolUse",
+            PRE_TOOL_MATCHER,
+            hook_command,
+            &|h| h.to_compact().contains("claudegate"),
+            &|c| c.contains("claudegate"),
+        )
     });
-    let any_ours = pre.iter().any(is_ours);
-
-    let mut changed = false;
-    if correct {
-        // Already registered: content is the reformatted text, but nothing changed.
-    } else if any_ours {
-        // Stale registration: repair the command and matcher of entries that carry ours.
-        for h in pre.iter_mut().filter(|h| is_ours(h)) {
-            let Some(OJson::Arr(xs)) = h.get_mut("hooks") else { continue };
-            let mut mine = false;
-            for x in xs.iter_mut() {
-                if x.get("command").and_then(OJson::as_str).is_some_and(|c| c.contains("claudegate")) {
-                    x.set("command", OJson::Str(hook_command.to_owned()));
-                    mine = true;
-                }
+    if let Some(audit) = audit_command {
+        let group_owns = |h: &OJson| {
+            matches!(h.get("hooks"), Some(OJson::Arr(xs)) if xs.iter().any(|x| x.get("command").and_then(OJson::as_str).is_some_and(audit_command_shape)))
+        };
+        for event in AUDIT_EVENTS {
+            if ensure_hook_entry(hooks, event, POST_TOOL_MATCHER, audit, &group_owns, &audit_command_shape) {
+                changed = true;
             }
-            if !mine {
-                continue;
-            }
-            h.set("matcher", OJson::Str(PRE_TOOL_MATCHER.to_owned()));
-            changed = true;
         }
-    } else {
-        pre.push(OJson::Obj(vec![
-            ("matcher".into(), OJson::Str(PRE_TOOL_MATCHER.into())),
-            (
-                "hooks".into(),
-                OJson::Arr(vec![OJson::Obj(vec![
-                    ("type".into(), OJson::Str("command".into())),
-                    ("command".into(), OJson::Str(hook_command.into())),
-                ])]),
-            ),
-        ]));
-        changed = true;
     }
 
     SettingsPatch { content: settings.to_pretty(), changed, parse_error: false, shape_error: None }
@@ -218,8 +313,9 @@ pub fn backups_to_prune(names: &[String], base_name: &str, keep: usize) -> Vec<S
 
 /// Port of `verifySettingsContent`: `None` when `after` is an acceptable result of our patch, or
 /// the reason it is not (the caller then restores the backup). Every top-level key of `previous`
-/// must survive, and our entry must have landed.
-pub fn verify_settings_content(after: &str, previous: &str, hook_command: &str) -> Option<String> {
+/// must survive, and our entries must have landed: PreToolUse, and with `audit_command` the audit
+/// hook under each of `AUDIT_EVENTS`.
+pub fn verify_settings_content(after: &str, previous: &str, hook_command: &str, audit_command: Option<&str>) -> Option<String> {
     let Ok(parsed) = serde_json::from_str::<Value>(after) else {
         return Some("the file on disk is not valid JSON".into());
     };
@@ -234,23 +330,74 @@ pub fn verify_settings_content(after: &str, previous: &str, hook_command: &str) 
             }
         }
     }
-    let landed = entry_landed(&parsed, hook_command);
-    if !landed {
+    if !entry_landed(&parsed, "PreToolUse", hook_command) {
         return Some("the claudegate hook entry is missing".into());
+    }
+    if let Some(audit) = audit_command {
+        for event in AUDIT_EVENTS {
+            if !entry_landed(&parsed, event, audit) {
+                return Some(format!("the claudegate {event} audit entry is missing"));
+            }
+        }
     }
     None
 }
 
-fn entry_landed(settings: &Value, hook_command: &str) -> bool {
+/// `verify_settings_content` for the startup repair (`compute_audit_patch`): every top-level key
+/// of `previous` survives, `hooks.PreToolUse` is exactly what it was, and the audit entry landed
+/// under each of `AUDIT_EVENTS`.
+pub fn verify_audit_content(after: &str, previous: &str, audit_command: &str) -> Option<String> {
+    let Ok(parsed) = serde_json::from_str::<Value>(after) else {
+        return Some("the file on disk is not valid JSON".into());
+    };
+    let Some(after_obj) = parsed.as_object() else {
+        return Some("the file on disk is not a JSON object".into());
+    };
+    let before = serde_json::from_str::<Value>(previous).ok();
+    if let Ok(prev @ OJson::Obj(_)) = OJson::parse(previous) {
+        for key in prev.keys() {
+            if !after_obj.contains_key(key) {
+                return Some(format!("top-level key \"{key}\" was lost"));
+            }
+        }
+    }
+    let pre = |v: &Value| v.get("hooks").and_then(|h| h.get("PreToolUse")).cloned();
+    if before.as_ref().and_then(pre) != pre(&parsed) {
+        return Some("the PreToolUse entries changed".into());
+    }
+    for event in AUDIT_EVENTS {
+        if !entry_landed(&parsed, event, audit_command) {
+            return Some(format!("the claudegate {event} audit entry is missing"));
+        }
+    }
+    None
+}
+
+/// Whether any `PostToolUse`/`PostToolUseFailure` hook command has the audit wrapper's shape
+/// (`audit_command_shape`). Unparseable text has none.
+pub fn audit_registered(settings_text: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<Value>(settings_text) else { return false };
+    AUDIT_EVENTS.iter().any(|event| {
+        v.get("hooks").and_then(|h| h.get(event)).and_then(Value::as_array).is_some_and(|groups| {
+            groups.iter().any(|g| {
+                g.get("hooks").and_then(Value::as_array).is_some_and(|xs| {
+                    xs.iter().any(|x| x.get("command").and_then(Value::as_str).is_some_and(audit_command_shape))
+                })
+            })
+        })
+    })
+}
+
+fn entry_landed(settings: &Value, event: &str, command: &str) -> bool {
     settings
         .get("hooks")
-        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|h| h.get(event))
         .and_then(Value::as_array)
         .is_some_and(|entries| {
             entries.iter().any(|h| {
                 h.get("hooks")
                     .and_then(Value::as_array)
-                    .is_some_and(|xs| xs.iter().any(|x| x.get("command").and_then(Value::as_str) == Some(hook_command)))
+                    .is_some_and(|xs| xs.iter().any(|x| x.get("command").and_then(Value::as_str) == Some(command)))
             })
         })
 }
@@ -280,12 +427,13 @@ pub enum InstallError {
     PythonMissing,
     /// The bundled hook.py carries no `CLAUDEGATE_HOOK_VERSION` stamp.
     BundledHook,
-    /// `~/.claudegate/hook.py` is already there (most likely the extension's).
+    /// `~/.claudegate/hook.py` (or an audit.py other than the bundled one) is already there (most
+    /// likely the extension's).
     HookFilesExist,
-    /// `~/.claudegate/hook.py` is there next to the marker: left over from an earlier setup by
+    /// `~/.claudegate/hook.py` (or audit.py) is there next to the marker: left over from an earlier setup by
     /// this app whose settings entry was removed.
     HookFilesFromApp,
-    /// `~/.claudegate/hook.sh` is there with content other than the extension's wrapper.
+    /// `~/.claudegate/hook.sh` or `audit.sh` is there with content other than the extension's wrapper.
     ForeignWrapper,
     /// `~/.claudegate/.installed-by-desktop` is there but is not a regular file (a symlink, say).
     MarkerNotFile,
@@ -309,16 +457,16 @@ impl std::fmt::Display for InstallError {
             InstallError::HookFilesExist => write!(
                 f,
                 "ClaudeGate's hook files already exist (likely from the VS Code extension). \
-                 Run \"Claude Gate: Setup Hook\" in VS Code, or remove ~/.claudegate/hook.py if the extension is gone."
+                 Run \"Claude Gate: Setup Hook\" in VS Code, or remove ~/.claudegate/hook.py and audit.py if the extension is gone."
             ),
             InstallError::HookFilesFromApp => write!(
                 f,
                 "ClaudeGate's hook files from an earlier setup in this app already exist. \
-                 Remove ~/.claudegate/hook.py, hook.sh and .installed-by-desktop to set up again."
+                 Remove ~/.claudegate/hook.py, hook.sh, audit.py, audit.sh and .installed-by-desktop to set up again."
             ),
             InstallError::ForeignWrapper => write!(
                 f,
-                "~/.claudegate/hook.sh already exists with different content. Remove it, then try again."
+                "~/.claudegate/hook.sh or audit.sh already exists with different content. Remove it, then try again."
             ),
             InstallError::MarkerNotFile => write!(
                 f,
@@ -342,11 +490,18 @@ impl std::fmt::Display for InstallError {
 
 impl std::error::Error for InstallError {}
 
-/// Sets capture up under `home` (the user's HOME): `<home>/.claudegate/{hook.py,hook.sh}`, the
-/// marker, and one PreToolUse entry in `<home>/.claude/settings.json`. Refuses unless the status
-/// is exactly `NotSetUp`. See `store::install_capture` for the protocol.
-pub fn set_up_capture(home: &Path, bundled_hook: &str, python3: bool, read_only: bool) -> Result<InstallReport, InstallError> {
-    crate::store::install_capture(home, bundled_hook, python3, read_only)
+/// Sets capture up under `home` (the user's HOME): `<home>/.claudegate/{hook.py,hook.sh,audit.py,
+/// audit.sh}`, the marker, one PreToolUse entry in `<home>/.claude/settings.json`, and the audit
+/// entries under `AUDIT_EVENTS`. Refuses unless the status is exactly `NotSetUp`. See
+/// `store::install_capture` for the protocol.
+pub fn set_up_capture(
+    home: &Path,
+    bundled_hook: &str,
+    bundled_audit: &str,
+    python3: bool,
+    read_only: bool,
+) -> Result<InstallReport, InstallError> {
+    crate::store::install_capture(home, bundled_hook, bundled_audit, python3, read_only)
 }
 
 /// True when `candidate` is a strictly newer `vMAJOR.MINOR.PATCH` than `installed`. Anything that
@@ -373,10 +528,17 @@ pub enum HookUpdate {
 
 /// Rewrites `<home>/.claudegate/hook.py` with the bundled copy when a hook is registered (by
 /// either side), the installed hook.py carries our stamp on line 2, and the bundled version is
-/// newer than that stamp. No marker needed; an unstamped (extension) hook is never touched. Never
-/// touches settings.json or hook.sh, and never creates the marker. See `store::update_app_hook`.
-pub fn update_app_hook(home: &Path, bundled_hook: &str, python3: bool, read_only: bool) -> Result<HookUpdate, String> {
-    crate::store::update_app_hook(home, bundled_hook, python3, read_only)
+/// newer than that stamp. No marker needed; an unstamped (extension) hook is never touched.
+/// audit.py is brought to `bundled_audit` alongside. Never touches settings.json, hook.sh or
+/// audit.sh, and never creates the marker. See `store::update_app_hook`.
+pub fn update_app_hook(
+    home: &Path,
+    bundled_hook: &str,
+    bundled_audit: &str,
+    python3: bool,
+    read_only: bool,
+) -> Result<HookUpdate, String> {
+    crate::store::update_app_hook(home, bundled_hook, bundled_audit, python3, read_only)
 }
 
 /// How the installed hook.py compares with the bundled one.
@@ -426,6 +588,10 @@ pub struct HookReplaced {
     /// hook over): now stamped again, the app counts it as its own and its startup update keeps it
     /// current, until the extension replaces it again. The marker itself is not written.
     pub app_owns_now: bool,
+    /// audit.py was brought to the bundled copy (created, or replaced).
+    pub audit_refreshed: bool,
+    /// The copy of the audit.py it replaced; `None` when none was replaced.
+    pub audit_backup: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -473,12 +639,50 @@ impl std::fmt::Display for HookReplaceError {
 
 impl std::error::Error for HookReplaceError {}
 
+/// What the startup repair of the audit registration did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuditRepair {
+    /// The audit entries were added or repaired in settings.json.
+    Repaired {
+        /// audit.py / audit.sh created first because they were missing.
+        created: Vec<PathBuf>,
+        /// The pre-repair copy of settings.json.
+        backup: PathBuf,
+        /// Set when another program rewrote settings.json right after ours but kept the entries.
+        note: Option<String>,
+    },
+    /// Nothing was written; why.
+    Skipped(String),
+}
+
+/// At startup: when capture is registered (by either side) but the audit entries under
+/// `AUDIT_EVENTS` are missing or stale, create audit.py (bundled) and audit.sh (0755) if missing,
+/// then add or repair those entries through the guarded settings.json protocol. Repair only: never
+/// a first-time install, never hook.py, hook.sh, the marker or the PreToolUse entry. `Err` is a
+/// refusal or a failure (everything it wrote put back where it could). See
+/// `store::repair_audit_registration`.
+pub fn repair_audit_registration(
+    home: &Path,
+    bundled_audit: &str,
+    python3: bool,
+    read_only: bool,
+) -> Result<AuditRepair, String> {
+    crate::store::repair_audit_registration(home, bundled_audit, python3, read_only)
+}
+
 /// Hook backups kept in `<desktop_home>/backups/hook/`.
 pub const HOOK_BACKUPS_KEPT: usize = 10;
 
 /// "Update hook": replaces `<home>/.claudegate/hook.py` with the bundled hook, whoever installed
-/// it, after backing it up under `<desktop_home>/backups/hook/`. Never writes hook.sh, the marker
-/// or settings.json. See `store::replace_hook`.
-pub fn replace_hook(home: &Path, desktop_home: &Path, bundled_hook: &str, read_only: bool) -> Result<HookReplaced, HookReplaceError> {
-    crate::store::replace_hook(home, desktop_home, bundled_hook, read_only)
+/// it, after backing it up under `<desktop_home>/backups/hook/`, and brings audit.py to
+/// `bundled_audit` alongside. Never writes hook.sh, audit.sh, the marker or settings.json. See
+/// `store::replace_hook`.
+pub fn replace_hook(
+    home: &Path,
+    desktop_home: &Path,
+    bundled_hook: &str,
+    bundled_audit: &str,
+    read_only: bool,
+) -> Result<HookReplaced, HookReplaceError> {
+    crate::store::replace_hook(home, desktop_home, bundled_hook, bundled_audit, read_only)
 }

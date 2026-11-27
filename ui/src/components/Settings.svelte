@@ -2,11 +2,13 @@
   import { onMount, tick } from "svelte";
   import type { EditorConfig } from "../lib/editors";
   import { menuOptions } from "../lib/editors";
+  import { statsLine, type AuditStats } from "../lib/audit";
   import { appProtectedList, protectedChips, sourceLabel, type Resolved, type SettingKey, type SettingsView } from "../lib/settings";
 
   let {
     settings,
     config,
+    audit = null,
     project,
     onset,
     onhooklog,
@@ -21,6 +23,8 @@
   }: {
     settings: SettingsView;
     config: EditorConfig;
+    /** The selected project's 7-day capture audit stats; null until read. */
+    audit?: AuditStats | null;
     /** The selected project, whose exclude list and hide patterns are shown; null when none. */
     project: { root: string; name: string } | null;
     /** Saves one app override; `null` drops it. Resolves false when it failed (the app says why). */
@@ -399,6 +403,15 @@
     {/if}
 
     <h3 class="group">Capture</h3>
+
+    {#if audit}
+      <div class="row">
+        <div class="label">
+          <p class="title">Capture stats</p>
+          <p class="desc">{statsLine(audit)}</p>
+        </div>
+      </div>
+    {/if}
 
     <div class="row">
       <div class="label">

@@ -69,6 +69,61 @@
       "previous": "[1]",
       "hookCommand": "/home/u/.claudegate/hook.sh",
       "expected": null
+    },
+    {
+      "name": "audit: patched config with both audit entries",
+      "after": "{\n  \"model\": \"opus\",\n  \"hooks\": {\n    \"PostToolUse\": [\n      {\n        \"matcher\": \"*\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/x/post.sh\"\n          }\n        ]\n      },\n      {\n        \"matcher\": \"^Bash$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/audit.sh\"\n          }\n        ]\n      }\n    ],\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(Write|Edit|MultiEdit|Bash)$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/hook.sh\"\n          }\n        ]\n      }\n    ],\n    \"PostToolUseFailure\": [\n      {\n        \"matcher\": \"^Bash$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/home/u/.claudegate/audit.sh\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+      "previous": "{\"model\":\"opus\"}",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "auditCommand": "/home/u/.claudegate/audit.sh",
+      "expected": null
+    },
+    {
+      "name": "audit: PostToolUse entry missing",
+      "after": "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"^(Write|Edit|MultiEdit|Bash)$\",\"hooks\":[{\"type\":\"command\",\"command\":\"/home/u/.claudegate/hook.sh\"}]}],\"PostToolUse\":[{\"matcher\":\"^Bash$\",\"hooks\":[{\"type\":\"command\",\"command\":\"/x/post.sh\"}]}],\"PostToolUseFailure\":[{\"matcher\":\"^Bash$\",\"hooks\":[{\"type\":\"command\",\"command\":\"/home/u/.claudegate/audit.sh\"}]}]}}",
+      "previous": "",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "auditCommand": "/home/u/.claudegate/audit.sh",
+      "expected": "the claudegate PostToolUse audit entry is missing"
+    },
+    {
+      "name": "audit: PostToolUseFailure entry missing",
+      "after": "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"^(Write|Edit|MultiEdit|Bash)$\",\"hooks\":[{\"type\":\"command\",\"command\":\"/home/u/.claudegate/hook.sh\"}]}],\"PostToolUse\":[{\"matcher\":\"^Bash$\",\"hooks\":[{\"type\":\"command\",\"command\":\"/home/u/.claudegate/audit.sh\"}]}]}}",
+      "previous": "",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "auditCommand": "/home/u/.claudegate/audit.sh",
+      "expected": "the claudegate PostToolUseFailure audit entry is missing"
+    },
+    {
+      "name": "audit: capture entry missing is named first",
+      "after": "{\"hooks\":{\"PostToolUse\":[{\"matcher\":\"^Bash$\",\"hooks\":[{\"type\":\"command\",\"command\":\"/home/u/.claudegate/audit.sh\"}]}],\"PostToolUseFailure\":[{\"matcher\":\"^Bash$\",\"hooks\":[{\"type\":\"command\",\"command\":\"/home/u/.claudegate/audit.sh\"}]}]}}",
+      "previous": "",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "auditCommand": "/home/u/.claudegate/audit.sh",
+      "expected": "the claudegate hook entry is missing"
+    },
+    {
+      "name": "audit: no audit command, audit entries not required",
+      "after": "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"^(Write|Edit|MultiEdit|Bash)$\",\"hooks\":[{\"type\":\"command\",\"command\":\"/home/u/.claudegate/hook.sh\"}]}]}}",
+      "previous": "",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "expected": null
+    },
+    {
+      "name": "audit: null entries beside ours still verify",
+      "after": "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"x\",\"hooks\":[null,{\"command\":\"/home/u/.claudegate/hook.sh\"}]}],\"PostToolUse\":[null,{\"hooks\":[null,{\"command\":\"/home/u/.claudegate/audit.sh\"}]}],\"PostToolUseFailure\":[{\"hooks\":[1,{\"command\":\"/home/u/.claudegate/audit.sh\"}]}]}}",
+      "previous": "",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "auditCommand": "/home/u/.claudegate/audit.sh",
+      "expected": null
+    },
+    {
+      "name": "audit: matcher does not matter, only the command",
+      "after": "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"^(Write|Edit|MultiEdit|Bash)$\",\"hooks\":[{\"type\":\"command\",\"command\":\"/home/u/.claudegate/hook.sh\"}]}],\"PostToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"/home/u/.claudegate/audit.sh\"}]}],\"PostToolUseFailure\":[{\"matcher\":\"x\",\"hooks\":[{\"type\":\"command\",\"command\":\"/home/u/.claudegate/audit.sh\"}]}]}}",
+      "previous": "",
+      "hookCommand": "/home/u/.claudegate/hook.sh",
+      "auditCommand": "/home/u/.claudegate/audit.sh",
+      "expected": null
     }
   ]
 }
