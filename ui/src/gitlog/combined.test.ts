@@ -4,6 +4,9 @@ import {
   combinedFirst,
   combinedPlan,
   combinedTitle,
+  enterStep,
+  reconcileOpen,
+  staleStep,
   isCombined,
   itemsOf,
   noNetChangeText,
@@ -183,5 +186,33 @@ describe("CombinedLoad", () => {
     d.resolve(view(asked, "A"));
     await p;
     expect(states.at(-1)).toEqual({ loading: false, view: null, error: null });
+  });
+});
+
+describe("races of the open file", () => {
+  const a = file("a.ts");
+  it("re-reads a file whose read was cut short even when its entry is identical (I1)", () => {
+    expect(reconcileOpen(a, { ...a }, false)).toBe("keep");
+    expect(reconcileOpen(a, { ...a }, true)).toBe("reread");
+    expect(reconcileOpen(a, file("a.ts", { last: sha("b") }), false)).toBe("reread");
+  });
+  it("closes a file the new answer no longer has, whatever else is pending (I2)", () => {
+    expect(reconcileOpen(a, undefined, false)).toBe("close");
+    expect(reconcileOpen(a, undefined, true)).toBe("close");
+  });
+  it("does not open the old tree while a fetch waits or is in flight (M1)", () => {
+    expect(enterStep({ hasView: true, loading: true, pending: true })).toBe("flush");
+    expect(enterStep({ hasView: true, loading: false, pending: true })).toBe("flush");
+    expect(enterStep({ hasView: true, loading: true, pending: false })).toBe("wait");
+    expect(enterStep({ hasView: true, loading: false, pending: false })).toBe("open");
+    expect(enterStep({ hasView: false, loading: false, pending: false })).toBe("start");
+  });
+  it("retries a stale left read once, after the answer (M7)", () => {
+    expect(staleStep({ superseded: true, loading: true, retried: false })).toBe("wait");
+    // The newer answer landed while the read ran: nothing will re-read the file, so read it now.
+    expect(staleStep({ superseded: true, loading: false, retried: false })).toBe("retry");
+    expect(staleStep({ superseded: false, loading: true, retried: false })).toBe("wait");
+    expect(staleStep({ superseded: false, loading: false, retried: false })).toBe("retry");
+    expect(staleStep({ superseded: false, loading: false, retried: true })).toBe("fail");
   });
 });

@@ -38,6 +38,7 @@
     keepListed,
     pickedRows,
     samePicked,
+    single,
     type Gesture,
     type Selection,
   } from "./selection";
@@ -166,6 +167,10 @@
     emitted = pickedRows(rows, next);
     onselect(i >= 0 ? rows[i] : null, emitted);
     if (i >= 0 && scroll) revealIndex(i);
+  }
+  /** Narrows the selection to the one row `key` (Clear selection): the list stays the one place that selects and tells the parent. */
+  export function selectOnly(key: string) {
+    if (rows.some((r) => rowKey(r) === key)) commit(single(key), false);
   }
   /** A gesture on the list; a pick beyond the limit changes nothing and says why. */
   function gesture(g: Gesture, scroll = true) {

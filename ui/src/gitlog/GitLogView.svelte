@@ -25,6 +25,9 @@
     CombinedLoad,
     combinedFirst,
     combinedPlan,
+    enterStep,
+    reconcileOpen,
+    staleStep,
     combinedTitle,
     isCombined,
     itemsOf,
@@ -52,7 +55,7 @@
   } from "./changes";
   import Filters from "./Filters.svelte";
   import LogList from "./LogList.svelte";
-  import { EMPTY_SELECTION, single, type Selection } from "./selection";
+  import { EMPTY_SELECTION, type Selection } from "./selection";
   import RepoPane from "./RepoPane.svelte";
   import { reposForLaunch } from "../lib/launch";
   import { DEFAULT_FILTER, debounce, isStale, parseFilter, rowKey, type FilterState, type RowView } from "./log";
@@ -217,8 +220,12 @@
   let cFallback = $state<FallbackReason | null>(null);
   /** Enter was pressed before the answer landed: open the first file when it does. */
   let enterWanted = false;
+  /** The open file's read was cut short by a superseded query: read it again when the answer lands. */
+  let cRetry = false;
   const combinedRepos = $derived(combinedState.view ? orderRepos(combinedState.view.repos, (repos ?? []).map((r) => r.id)) : []);
   const combinedHeading = $derived(combinedTitle(picked.length, new Set(picked.map((r) => r.repo)).size));
+  /** The picked commits' subjects by sha, for the repo rows' tooltips. */
+  const commitSubjects = $derived(Object.fromEntries(picked.map((r) => [r.sha, r.subject])));
   const repoColor = (id: string) => repos?.find((r) => r.id === id)?.color ?? 0;
 
   // Declared before the commit effect below: when the selection goes back to one commit, the
@@ -258,27 +265,31 @@
       return;
     }
     if (!s.view) return;
+    // The open file follows the selection first (also when Enter is waiting on this answer):
+    // gone closes it, changed or cut short re-reads it, as it was keeps its diff.
+    const cur = cActive;
+    if (cur) {
+      const again = orderRepos(s.view.repos, (repos ?? []).map((r) => r.id))
+        .find((r) => r.repo === cur.repo)
+        ?.files.find((f) => f.path === cur.file.path);
+      const act = reconcileOpen(cur.file, again, cRetry);
+      if (act === "close") {
+        cActive = null;
+        cRetry = false;
+        clearDiff();
+      } else if (act === "reread" && again) void showCombinedFile(cur.repo, again);
+    }
     if (enterWanted) {
       enterWanted = false;
       openFirstCombined();
-      return;
     }
-    const cur = cActive;
-    if (!cur) return;
-    // The open file follows the selection: still there and unchanged keeps its diff, changed re-reads it, gone closes it.
-    const again = orderRepos(s.view.repos, (repos ?? []).map((r) => r.id))
-      .find((r) => r.repo === cur.repo)
-      ?.files.find((f) => f.path === cur.file.path);
-    if (!again) {
-      cActive = null;
-      clearDiff();
-    } else if (JSON.stringify(again) !== JSON.stringify(cur.file)) void showCombinedFile(cur.repo, again);
   }
 
   const asChanged = (f: CombinedFile): ChangedFile => ({ path: f.path, status: f.status, from: f.from, added: null, removed: null });
 
-  async function showCombinedFile(repo: string, f: CombinedFile) {
+  async function showCombinedFile(repo: string, f: CombinedFile, retried = false) {
     const g = fileGate.next();
+    cRetry = false;
     cActive = { repo, file: f };
     cFallback = null;
     shownPane = null;
@@ -310,8 +321,21 @@
       diffLoading = false;
     } catch (e) {
       if (!fileGate.isCurrent(g)) return;
-      // A newer selection superseded the query this read belongs to: its answer reopens the file.
-      if (isStale(e) && combinedLoad.id !== qid) return;
+      if (isStale(e)) {
+        const step = staleStep({ superseded: combinedLoad.id !== qid, loading: combinedState.loading || fetchCombined.hasPending(), retried });
+        if (step === "wait") {
+          // The answer that is coming reads the file again (`cRetry`), even if its entry is unchanged.
+          cRetry = true;
+          return;
+        }
+        if (step === "retry") {
+          // Against the answer now shown: the entry may have changed or be gone.
+          const now = combinedRepos.find((r) => r.repo === repo)?.files.find((x) => x.path === f.path);
+          if (now) return void showCombinedFile(repo, now, true);
+          cActive = null;
+          return clearDiff();
+        }
+      }
       diffError = String(e);
       diffLoading = false;
     }
@@ -327,18 +351,18 @@
 
   /** Enter with several commits picked: the first file of the combined tree, the keyboard in the tree. */
   function enterCombined() {
-    if (combinedState.view && !combinedState.loading) return openFirstCombined();
+    const step = enterStep({ hasView: !!combinedState.view, loading: combinedState.loading, pending: fetchCombined.hasPending() });
+    if (step === "open") return openFirstCombined();
     enterWanted = true;
-    if (fetchCombined.hasPending()) fetchCombined.flush();
-    else if (!combinedState.loading) void combinedLoad.start(itemsOf(picked));
+    if (step === "flush") fetchCombined.flush();
+    else if (step === "start") void combinedLoad.start(itemsOf(picked));
   }
 
   /** Back to the focused commit alone. */
   function clearSelection() {
-    const r = selected;
-    if (!r) return;
-    selection = single(rowKey(r));
-    picked = [r];
+    if (!selected) return;
+    // The list owns the selection and tells us (`onselect`), so `picked` follows from it.
+    logList?.selectOnly(rowKey(selected));
     logList?.focusList();
   }
 
@@ -758,6 +782,8 @@
           loadingText="Reading {picked.length} commits…"
           onopenfile={(repo, f) => void showCombinedFile(repo, f)}
           onclear={clearSelection}
+          canClear={!!selected}
+          {commitSubjects}
           onescape={() => logList?.focusList()}
           onhistory={() => {}}
         />

@@ -126,6 +126,40 @@ export function combinedPlan(f: CombinedFile): { left: "rev" | "merge" | "missin
   return { left: f.status === "added" || f.beforeRef === null ? "missing" : "rev", right };
 }
 
+// ---- races of the open file ---------------------------------------------------------------------
+
+/**
+ * What a new combined answer does to the file whose diff is open: it is gone (close), changed or
+ * its read was cut short by a superseded query (`retry`: read it again), or is as it was (keep).
+ */
+export function reconcileOpen(cur: CombinedFile, again: CombinedFile | undefined, retry: boolean): "close" | "reread" | "keep" {
+  if (!again) return "close";
+  return retry || JSON.stringify(again) !== JSON.stringify(cur) ? "reread" : "keep";
+}
+
+/**
+ * Enter with several commits picked. `open`: the answer is here and current. `flush`: a fetch is
+ * waiting out its debounce, run it now (the old tree must not open). `wait`: one is in flight.
+ * `start`: nothing is coming (e.g. after a failure).
+ */
+export function enterStep(o: { hasView: boolean; loading: boolean; pending: boolean }): "open" | "flush" | "wait" | "start" {
+  if (o.pending) return "flush";
+  if (o.loading) return "wait";
+  return o.hasView ? "open" : "start";
+}
+
+/**
+ * A left-side read refused as "stale query". A combined answer is still on its way: wait for it,
+ * it re-reads the file (`cRetry`). No answer is coming (it landed while the read was running, or
+ * the backend had not registered it yet): read again, once if the read is still current, then show
+ * the error.
+ */
+export function staleStep(o: { superseded: boolean; loading: boolean; retried: boolean }): "wait" | "retry" | "fail" {
+  if (o.loading) return "wait";
+  if (o.superseded) return "retry";
+  return o.retried ? "fail" : "retry";
+}
+
 // ---- the loader --------------------------------------------------------------------------------
 
 export type CombinedState = { loading: boolean; view: CombinedView | null; error: string | null };

@@ -21,6 +21,8 @@
     theme,
     onopenfile,
     onclear,
+    canClear = true,
+    commitSubjects = {},
     onescape,
     loadingText = "Reading the selected commits…",
   }: {
@@ -35,6 +37,10 @@
     theme: IconTheme;
     onopenfile: (repo: string, f: CombinedFile) => void;
     onclear: () => void;
+    /** False when there is no focused commit to go back to. */
+    canClear?: boolean;
+    /** The picked commits' subjects by sha, for the repo rows' tooltips. */
+    commitSubjects?: Record<string, string>;
     onescape: () => void;
     loadingText?: string;
     /** Wired in Task 8 (file history); a no-op until then. */
@@ -48,7 +54,7 @@
     | { kind: "note"; id: string; text: string }
     | { kind: "error"; id: string; text: string };
 
-  // Collapsed folders and repos, keyed `repo \0 rel` (a repo root: `repo \0`).
+  // Collapsed folders and repos, keyed `repo U+0001 rel` (a repo root: `repo U+0001`).
   let collapsed = $state(new Set<string>());
   let focusId = $state<string | null>(null);
   let treeEl: HTMLDivElement | undefined = $state();
@@ -71,7 +77,7 @@
         else if (node.item) out.push({ kind: "file", id, repo: r, node, file: node.item.file, depth: v.depth + 1 });
       }
       const note = noNetChangeText(r.noNetChange);
-      if (note) out.push({ kind: "note", id: `note:${r.repo}`, text: note });
+      if (note) out.push({ kind: "note", id: `note:${r.repo}`, text: repos.length > 1 ? `${repoName(r.repo)}: ${note}` : note });
     }
     return out;
   });
@@ -106,7 +112,12 @@
   });
 
   const pad = (depth: number) => 12 + depth * 14;
-  const subjectLine = (repo: CombinedRepo) => `${repoName(repo.repo)}: ${repo.commits.length} ${repo.commits.length === 1 ? "commit" : "commits"}`;
+  /** The repo row's tooltip: its name and count, then one `shortSha subject` line per selected commit. */
+  const repoTip = (repo: CombinedRepo) =>
+    [
+      `${repoName(repo.repo)}: ${repo.commits.length} ${repo.commits.length === 1 ? "commit" : "commits"}`,
+      ...repo.commits.map((c) => (commitSubjects[c] ? `${shortSha(c)} ${commitSubjects[c]}` : shortSha(c))),
+    ].join("\n");
 
   function rowEl(id: string): HTMLElement | null {
     return treeEl?.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`) ?? null;
@@ -178,7 +189,13 @@
 <section class="changes" aria-label="Changes" aria-busy={loading}>
   <div class="head">
     <p class="pane-title" {title}>{title}</p>
-    <button type="button" class="clear" title="Clear selection: back to the focused commit" onclick={onclear}>Clear selection</button>
+    <button
+      type="button"
+      class="clear"
+      disabled={!canClear}
+      title={canClear ? "Clear selection: back to the focused commit" : "Clear selection: no commit is focused"}
+      onclick={onclear}
+    >Clear selection</button>
   </div>
   {#if error}
     <p class="state-body pad" role="alert">Couldn't load the changes: {error}</p>
@@ -206,7 +223,7 @@
             data-id={r.id}
             tabindex={tabId === r.id ? 0 : -1}
             style:--c={colorVar(repoColor(r.repo.repo))}
-            title={subjectLine(r.repo)}
+            title={repoTip(r.repo)}
             onclick={() => {
               focusId = r.id;
               toggle(key(r.repo.repo, ""));
@@ -255,7 +272,7 @@
             data-id={r.id}
             tabindex={tabId === r.id ? 0 : -1}
             style:padding-left="{pad(r.depth)}px"
-            title="{f.path} · {statusText(asChanged(f))} · {f.shas.map(shortSha).join(', ')}"
+            title="{f.path} · {statusText(asChanged(f))} · {f.shas.map(shortSha).join(', ')}{warn ? ` · ${warn}` : ''}"
             aria-label="{r.node.name}, {statusText(asChanged(f))}, {f.shas.length} {f.shas.length === 1 ? 'commit' : 'commits'}{warn ? `, warning: ${warn}` : ''}"
             onclick={() => {
               focusId = r.id;
@@ -276,10 +293,14 @@
             <span class="shas num" aria-hidden="true">{shaList(f.shas)}</span>
             <span class="badge s-{f.status}" aria-hidden="true">{statusLetter(asChanged(f))}</span>
           </button>
-        {:else if r.kind === "note"}
-          <p class="note" style:padding-left="{pad(1)}px">{r.text}</p>
-        {:else}
-          <p class="note err" role="alert" style:padding-left="{pad(1)}px">{r.text}</p>
+        {/if}
+      {/each}
+    </div>
+    <!-- Not tree rows: a tree holds only items. One polite region says what the tree leaves out. -->
+    <div class="notes" role="status" aria-live="polite">
+      {#each rows as r (r.id)}
+        {#if r.kind === "note" || r.kind === "error"}
+          <p class="note" class:err={r.kind === "error"}>{r.text}</p>
         {/if}
       {/each}
     </div>
@@ -319,7 +340,10 @@
     font-size: var(--fs-meta);
     color: var(--muted);
   }
-  .clear:hover {
+  .clear:disabled {
+    opacity: 0.5;
+  }
+  .clear:hover:not(:disabled) {
     background: var(--hover);
     color: var(--text);
   }
@@ -347,7 +371,10 @@
     background: var(--hover);
   }
   .tree {
-    padding: 4px 0 16px;
+    padding: 4px 0 4px;
+  }
+  .notes {
+    padding: 0 0 16px;
   }
   .tree:focus {
     outline: none;
@@ -448,7 +475,7 @@
   }
   .note {
     margin: 0;
-    padding-right: 10px;
+    padding: 0 var(--pad);
     height: var(--row-h);
     line-height: var(--row-h);
     overflow: hidden;

@@ -897,7 +897,8 @@ const gitlogMock: Pick<
   },
   gitlogCombined: mockCombined,
   gitlogCombinedLeft: async (queryId, _repo, _last, path): Promise<CombinedLeft> => {
-    await new Promise((r) => setTimeout(r, 40));
+    // `?gitlog=slowleft` makes this read outlast a newer selection (to see a superseded read recover).
+    await new Promise((r) => setTimeout(r, new URLSearchParams(location.search).get("gitlog") === "slowleft" ? 1500 : 40));
     if (queryId < glCombinedNewest) throw "stale query";
     const { before } = sample(path, false);
     return before === null ? { kind: "text", value: "" } : { kind: "text", value: before };
