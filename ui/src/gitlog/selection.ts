@@ -83,3 +83,8 @@ export function pickedRows(rows: RowView[], s: Selection): RowView[] {
   const set = new Set(s.keys);
   return rows.filter((r) => set.has(rowKey(r)));
 }
+
+/** The same rows, by identity and order: false when a reload replaced the objects. */
+export function samePicked(a: readonly RowView[], b: readonly RowView[]): boolean {
+  return a.length === b.length && a.every((r, i) => r === b[i]);
+}

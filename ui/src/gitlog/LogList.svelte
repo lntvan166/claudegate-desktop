@@ -37,6 +37,7 @@
     clickGesture,
     keepListed,
     pickedRows,
+    samePicked,
     type Gesture,
     type Selection,
   } from "./selection";
@@ -146,14 +147,24 @@
     const cur = untrack(() => selection);
     const kept = keepListed(cur, rows.map(rowKey));
     const same = kept.focus === cur.focus && kept.anchor === cur.anchor && kept.keys.length === cur.keys.length;
-    if (!same) commit(kept, false);
+    if (!same) return commit(kept, false);
+    // Same keys, but a reload may hand back new row objects: the parent must not keep the old ones.
+    const picked = pickedRows(rows, kept);
+    if (!samePicked(picked, emitted)) {
+      const i = indexOfKey(rows, kept.focus);
+      emitted = picked;
+      onselect(i >= 0 ? rows[i] : null, picked);
+    }
   });
 
+  /** The picked rows last handed to the parent. */
+  let emitted: RowView[] = [];
   /** Sets the selection and tells the parent: the focused row and every picked row. */
   function commit(next: Selection, scroll = true) {
     selection = next;
     const i = indexOfKey(rows, next.focus);
-    onselect(i >= 0 ? rows[i] : null, pickedRows(rows, next));
+    emitted = pickedRows(rows, next);
+    onselect(i >= 0 ? rows[i] : null, emitted);
     if (i >= 0 && scroll) revealIndex(i);
   }
   /** A gesture on the list; a pick beyond the limit changes nothing and says why. */
@@ -312,7 +323,7 @@
     tabindex="0"
     data-loglist
     role="listbox"
-    aria-multiselectable="true"
+    aria-multiselectable={multi}
     aria-label="Commits, newest first"
     aria-busy={q.loading}
     aria-activedescendant={selIndex >= 0 ? `c-${selIndex}` : undefined}
@@ -424,13 +435,14 @@
     background: var(--hover);
   }
   .row.selected {
-    background: color-mix(in srgb, var(--active) 60%, transparent);
+    background: color-mix(in srgb, var(--focus-ring) 14%, transparent);
+    box-shadow: inset 2px 0 0 var(--focus-ring);
   }
   .row.selected.focused {
-    background: var(--active);
+    background: color-mix(in srgb, var(--focus-ring) 24%, transparent);
   }
   .scroller:focus-visible .row.focused {
-    box-shadow: inset 2px 0 0 var(--focus-ring);
+    box-shadow: inset 3px 0 0 var(--focus-ring);
   }
   .chip {
     display: inline-flex;

@@ -7,6 +7,7 @@ import {
   clickGesture,
   keepListed,
   pickedRows,
+  samePicked,
   single,
   type Selection,
 } from "./selection";
@@ -75,5 +76,11 @@ describe("selection", () => {
     const s: Selection = { keys: [rowKey(rows[2]), rowKey(rows[0])], focus: null, anchor: null };
     expect(pickedRows(rows, s).map((r) => r.sha)).toEqual(["a", "c"]);
     expect(single("k1")).toEqual(one("k1"));
+  });
+  it("samePicked sees a replaced row object", () => {
+    const a: RowView = { repo: "acme-api", sha: "a", time: 0, author: "x", email: "", subject: "a", parents: [], source: "" };
+    expect(samePicked([a], [a])).toBe(true);
+    expect(samePicked([a], [{ ...a }])).toBe(false);
+    expect(samePicked([a], [])).toBe(false);
   });
 });
