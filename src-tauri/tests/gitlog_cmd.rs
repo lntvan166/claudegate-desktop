@@ -240,6 +240,35 @@ fn mine_uses_each_repos_email() {
     assert!(p.rows.is_empty());
 }
 
+/// A user or repo `i18n.logOutputEncoding=UTF-16` would interleave NULs into the record framing.
+#[test]
+fn utf16_log_encoding_config_does_not_hide_commits() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    init(&d);
+    git(&d, &["config", "i18n.logOutputEncoding", "UTF-16"]);
+    let mut want = Vec::new();
+    for i in 0..7usize {
+        want.push(commit(&d, &[("a.txt", Some(format!("{i}").as_bytes()))], &format!("subject {i}"), BASE + i as i64 * 60));
+    }
+    let g = gl().with_page_size(3);
+    let ids = ids_of(&g, &[root]);
+    let mut all = Vec::new();
+    let mut p = first_page(&g, 11, &ids, &FilterView::default());
+    loop {
+        all.extend(p.rows.clone());
+        if p.done {
+            break;
+        }
+        p = g.page("main", 11, &ids, &FilterView::default(), true).unwrap();
+        assert!(all.len() < 50);
+    }
+    want.reverse();
+    let got: Vec<String> = all.iter().map(|r| r.sha.clone()).collect();
+    assert_eq!(got, want);
+    assert_eq!(all[0].subject, "subject 6");
+}
+
 #[test]
 fn file_before_after() {
     let (_t, root) = tmp();

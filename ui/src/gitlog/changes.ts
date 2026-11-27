@@ -99,6 +99,12 @@ export function pickFile(files: ChangedFile[], previous: string | null): Changed
   return (previous && files.find((f) => f.path === previous)) || treeOrder(files)[0];
 }
 
+/** The path to pass as `from` for the before side: a file that kept its path needs no rename lookup. */
+export function beforeFrom(f: ChangedFile): string | undefined {
+  if (f.status === "modified" || f.status === "deleted" || f.status === "typeChanged") return f.path;
+  return f.from ?? undefined;
+}
+
 /** The folders `path` sits in, outermost first, as the tree's `rel` keys (compacted chains included by the caller). */
 export function foldersOf(path: string): string[] {
   const parts = path.split("/");

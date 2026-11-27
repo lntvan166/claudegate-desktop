@@ -42,7 +42,7 @@ pub struct RealGit;
 impl GitRun for RealGit {
     fn run(&self, cwd: &Path, args: &[&str]) -> Option<String> {
         let mut cmd = Command::new("git");
-        cmd.args(["--no-pager", "-c", "color.ui=never", "-c", "core.quotepath=off"]).args(args).current_dir(cwd);
+        cmd.args(["--no-pager", "-c", "color.ui=never", "-c", "core.quotepath=off", "-c", "i18n.logOutputEncoding=UTF-8"]).args(args).current_dir(cwd);
         sanitize_git_env(&mut cmd);
         let out = cmd.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
         if !out.status.success() {

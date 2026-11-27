@@ -28,6 +28,7 @@
     type FileView,
     paneMessage,
     pickFile,
+    beforeFrom,
     statusText,
     type ChangedFile,
     type DiffPane,
@@ -252,10 +253,10 @@
     openError = null;
     try {
       const [before, after] = await Promise.all([
-        // An added file has no before; a rename's old path is already known, so no lookup runs.
+        // An added file has no before; every other status already knows its before path, so no lookup runs.
         f.status === "added"
           ? Promise.resolve<FileView>({ kind: "missing" })
-          : gitlogFile(r.repo, r.sha, f.path, "before", f.from ?? undefined),
+          : gitlogFile(r.repo, r.sha, f.path, "before", beforeFrom(f)),
         gitlogFile(r.repo, r.sha, f.path, "after"),
       ]);
       if (!fileGate.isCurrent(g)) return;

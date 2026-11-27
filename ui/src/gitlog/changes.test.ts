@@ -13,6 +13,7 @@ import {
   formatBytes,
   paneMessage,
   pickFile,
+  beforeFrom,
   statusLetter,
   statusText,
   treeOrder,
@@ -200,5 +201,17 @@ describe("Enter on a commit", () => {
     expect(enterAction({ loaded: false, inflight: false, pending: true })).toBe("flush");
     // a failed fetch leaves nothing pending or in flight: Enter retries rather than leaving a stale flag
     expect(enterAction({ loaded: false, inflight: false, pending: false })).toBe("load");
+  });
+});
+
+describe("beforeFrom", () => {
+  const f = (status: ChangedFile["status"], from: string | null = null): ChangedFile => ({ path: "a/b.ts", status, from } as ChangedFile);
+  it("uses the path itself when it did not move", () => {
+    for (const s of ["modified", "deleted", "typeChanged"] as const) expect(beforeFrom(f(s))).toBe("a/b.ts");
+  });
+  it("keeps the rename source for renames and copies", () => {
+    expect(beforeFrom(f("renamed", "old.ts"))).toBe("old.ts");
+    expect(beforeFrom(f("copied", "src.ts"))).toBe("src.ts");
+    expect(beforeFrom(f("renamed"))).toBeUndefined();
   });
 });

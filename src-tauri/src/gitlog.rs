@@ -201,7 +201,7 @@ impl Runner {
         }
         let _permit = self.acquire(tag)?;
         let mut cmd = Command::new(self.git.get_or_init(resolve_git));
-        cmd.args(["--no-pager", "-c", "color.ui=never", "-c", "core.quotepath=off"]).args(args).current_dir(cwd);
+        cmd.args(["--no-pager", "-c", "color.ui=never", "-c", "core.quotepath=off", "-c", "i18n.logOutputEncoding=UTF-8"]).args(args).current_dir(cwd);
         claudegate_core::gitlog::sanitize_git_env(&mut cmd);
         cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| RunError::Spawn(format!("Couldn't run git: {e}")))?;
