@@ -61,7 +61,14 @@ impl RunError {
     }
 }
 
-/// A query's identity: the window it belongs to and its id.
+/// The cancellation channel of one feature of a window (`<window>#<name>`): its queries supersede
+/// only each other, so a new Combined Changes selection never kills the log's paging.
+/// `Runner::forget_window` drops every channel of the window.
+pub fn channel(window: &str, name: &str) -> String {
+    format!("{window}#{name}")
+}
+
+/// A query's identity: the window (or a channel of it, see [`channel`]) it belongs to and its id.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Tag {
     pub window: String,
@@ -153,12 +160,15 @@ impl Runner {
         true
     }
 
-    /// A closed window: no query of it is current any more, and its children are killed.
+    /// A closed window: no query of it or of any of its channels (`<window>#…`) is current any
+    /// more, and their children are killed.
     pub fn forget_window(&self, window: &str) {
+        let prefix = format!("{window}#");
+        let mine = |w: &str| w == window || w.starts_with(&prefix);
         let doomed: Vec<Slot> = {
             let mut reg = lock(&self.reg);
-            reg.current.remove(window);
-            let old: Vec<Tag> = reg.children.keys().filter(|t| t.window == window).cloned().collect();
+            reg.current.retain(|w, _| !mine(w));
+            let old: Vec<Tag> = reg.children.keys().filter(|t| mine(&t.window)).cloned().collect();
             old.iter().flat_map(|t| reg.children.remove(t).unwrap_or_default()).map(|(_, s)| s).collect()
         };
         for s in &doomed {
@@ -252,7 +262,7 @@ impl Runner {
         }
     }
 
-    fn text(&self, tag: Option<&Tag>, cwd: &Path, args: &[&str]) -> Result<String, RunError> {
+    pub(crate) fn text(&self, tag: Option<&Tag>, cwd: &Path, args: &[&str]) -> Result<String, RunError> {
         self.run(tag, cwd, args).map(|b| String::from_utf8_lossy(&b).into_owned())
     }
 }
@@ -529,7 +539,7 @@ fn main_path(r: &Repo) -> PathBuf {
 /// A path as git reports it, relative to the repository root. Refused when `<rev>:<path>`
 /// would read it relative to the working directory instead (`./`, `../`), or it leaves the
 /// repository.
-fn tree_path_ok(p: &str) -> bool {
+pub(crate) fn tree_path_ok(p: &str) -> bool {
     // Every component must be a plain name: a Windows `C:\x` or `\\server\share` would otherwise
     // replace the root when joined, and a backslash is never a separator in a git path.
     !p.is_empty()
@@ -616,11 +626,11 @@ impl GitLog {
         lock(&self.queries).remove(window);
     }
 
-    fn cached(&self) -> Arc<Vec<Repo>> {
+    pub(crate) fn cached(&self) -> Arc<Vec<Repo>> {
         lock(&self.repos).as_ref().map(|(_, l)| l.clone()).unwrap_or_default()
     }
 
-    fn cwd_of(&self, repo: &str) -> Result<PathBuf, String> {
+    pub(crate) fn cwd_of(&self, repo: &str) -> Result<PathBuf, String> {
         self.cached().iter().find(|r| r.id == repo).map(main_path).ok_or_else(|| "Unknown repository; refresh the list".to_string())
     }
 
@@ -849,8 +859,24 @@ impl GitLog {
                 format!("{p0}:{name}")
             }
         };
-        // No such object at that side: missing. The size first, so a huge blob is never read.
-        let size = match self.runner.text(None, &cwd, &["cat-file", "-s", &spec]) {
+        self.blob_view(&cwd, &spec)
+    }
+
+    /// The file `path` at commit `rev` (`<rev>:<path>`): Combined Changes' right side.
+    pub fn rev_file(&self, repo: &str, rev: &str, path: &str) -> Result<FileView, String> {
+        if !is_sha(rev) {
+            return Err("Not a commit id".into());
+        }
+        if !tree_path_ok(path) {
+            return Err("Not a path in the repository".into());
+        }
+        let cwd = self.cwd_of(repo)?;
+        self.blob_view(&cwd, &format!("{rev}:{path}"))
+    }
+
+    /// The object `spec` names. No such object: missing. The size first, so a huge blob is never read.
+    fn blob_view(&self, cwd: &Path, spec: &str) -> Result<FileView, String> {
+        let size = match self.runner.text(None, cwd, &["cat-file", "-s", spec]) {
             Ok(s) => s,
             Err(RunError::Failed(_)) => return Ok(FileView::Missing),
             Err(e) => return Err(e.reason()),
@@ -859,7 +885,7 @@ impl GitLog {
         if size > MAX_FILE {
             return Ok(FileView::TooLarge(size));
         }
-        let bytes = self.runner.run(None, &cwd, &["cat-file", "blob", &spec]).map_err(|e| e.reason())?;
+        let bytes = self.runner.run(None, cwd, &["cat-file", "blob", spec]).map_err(|e| e.reason())?;
         Ok(file_view_of(bytes))
     }
 
@@ -1030,6 +1056,13 @@ pub fn worktree_file(root: &std::path::Path, path: &str) -> Result<String, Strin
     Ok(full.to_string_lossy().into_owned())
 }
 
+/// The file `path` at commit `rev`.
+#[tauri::command]
+pub async fn gitlog_rev_file(repo: String, rev: String, path: String, state: tauri::State<'_, GitLogState>) -> Result<FileView, String> {
+    let gl = state.inner().0.clone();
+    crate::commands::blocking(move || gl.rev_file(&repo, &rev, &path)).await?
+}
+
 #[tauri::command]
 pub async fn gitlog_message(repo: String, sha: String, state: tauri::State<'_, GitLogState>) -> Result<String, String> {
     let gl = state.inner().0.clone();
@@ -1142,6 +1175,27 @@ mod tests {
         drop(extra);
         drop(held);
         assert_eq!(*lock(&r.running), 0);
+    }
+
+    #[test]
+    fn forget_window_kills_every_channel() {
+        let r = Runner::lazy();
+        let w = Tag { window: "w".into(), query: 1 };
+        let wc = Tag { window: channel("w", "combined"), query: 2 };
+        let other = Tag { window: channel("wx", "combined"), query: 3 };
+        for t in [&w, &wc, &other] {
+            assert!(r.set_current(&t.window, t.query));
+            assert!(r.is_current(t));
+        }
+        // A query on one channel leaves the window's other channels current.
+        assert!(r.set_current(&wc.window, 4));
+        assert!(r.is_current(&w));
+        assert!(!r.set_current(&wc.window, 2), "an older id on the channel is late");
+        let wc = Tag { query: 4, ..wc };
+        r.forget_window("w");
+        assert!(!r.is_current(&w));
+        assert!(!r.is_current(&wc));
+        assert!(r.is_current(&other), "\"wx\" is another window");
     }
 
     #[test]
