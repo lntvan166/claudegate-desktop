@@ -19,7 +19,9 @@ fn rep(c: char) -> String {
     c.to_string().repeat(40)
 }
 fn ch(status: char, path: &str, old_blob: &str, new_blob: &str, old_path: Option<&str>) -> RawChange {
-    RawChange { status, path: s(path), old_path: old_path.map(s), old_blob: s(old_blob), new_blob: s(new_blob) }
+    let old_mode = if status == 'A' { "000000" } else { "100644" };
+    let new_mode = if status == 'D' { "000000" } else { "100644" };
+    RawChange { status, path: s(path), old_path: old_path.map(s), old_mode: s(old_mode), new_mode: s(new_mode), old_blob: s(old_blob), new_blob: s(new_blob) }
 }
 fn commit(sha: &str, parents: &[&str], changes: Vec<RawChange>) -> RangeCommit {
     RangeCommit { sha: s(sha), parents: parents.iter().map(|p| s(p)).collect(), subject: None, changes }
@@ -34,7 +36,7 @@ fn strings(xs: &[&str]) -> Vec<String> {
     xs.iter().map(|x| s(x)).collect()
 }
 
-const LOG_HEAD: [&str; 8] = ["log", "--topo-order", "--raw", "-z", "-M", "--no-abbrev", "--diff-merges=first-parent", RANGE_FORMAT];
+const LOG_HEAD: [&str; 10] = ["log", "--topo-order", "--raw", "-z", "-M", "--no-abbrev", "--diff-merges=first-parent", "--root", "--no-show-signature", RANGE_FORMAT];
 
 #[test]
 fn range_log_args_and_root() {
@@ -229,6 +231,41 @@ fn two_branches_take_slow_path() {
 }
 
 #[test]
+fn unselected_before_any_selected_is_named() {
+    // Side-branch merge: U (unselected, on the merge's first-parent side) comes before Sa in the
+    // log's order, and the plain diff F ↔ M carries U's change in.
+    let log = vec![
+        commit("m", &["u", "sa"], vec![ch('M', "f", &blob(3), &blob(4), None)]),
+        commit("sa", &["f0"], vec![ch('M', "f", &blob(1), &blob(2), None)]),
+        commit("u", &["f0"], vec![ch('M', "f", &blob(1), &blob(3), None)]),
+    ];
+    let (files, _) = combine_repo(&set(&["sa", "m"]), &log);
+    assert_eq!((files[0].included.clone(), files[0].fast), (strings(&["u"]), false));
+    // Two branches, the oldest selected commit (in the log's order) on the branch `last` is not
+    // on: the plain diff y ↔ s1 takes y's change back out, so y is named too.
+    let log = vec![
+        commit("s1", &["f0"], vec![ch('M', "f", &blob(1), &blob(5), None)]),
+        commit("s2", &["y"], vec![ch('M', "f", &blob(2), &blob(3), None)]),
+        commit("y", &["f0"], vec![ch('M', "f", &blob(1), &blob(2), None)]),
+    ];
+    let (files, _) = combine_repo(&set(&["s1", "s2"]), &log);
+    assert_eq!((files[0].last.as_str(), files[0].before_ref.as_deref()), ("s1", Some("y")));
+    assert_eq!((files[0].included.clone(), files[0].fast), (strings(&["y"]), false));
+    // Unselected commits before the selection, through a rename: y1 renames old.ts, y2 edits
+    // new.ts, s2 edits it after them; s1 sits on a branch from y1. The diff y2 ↔ s1 takes y2's
+    // change out (named); y1 is below both sides (not named).
+    let log = vec![
+        commit("s1", &["y1"], vec![ch('M', "new.ts", &blob(1), &blob(5), None)]),
+        commit("s2", &["y2"], vec![ch('M', "new.ts", &blob(2), &blob(3), None)]),
+        commit("y2", &["y1"], vec![ch('M', "new.ts", &blob(1), &blob(2), None)]),
+        commit("y1", &["f0"], vec![ch('R', "new.ts", &blob(1), &blob(1), Some("old.ts"))]),
+    ];
+    let (files, _) = combine_repo(&set(&["s1", "s2"]), &log);
+    assert_eq!(files.len(), 1);
+    assert_eq!((files[0].path.as_str(), files[0].before_ref.as_deref(), files[0].included.clone()), ("new.ts", Some("y2"), strings(&["y2"])));
+}
+
+#[test]
 fn later_unselected_rename_does_not_move_file() {
     // Renamed by an unselected commit after the last selected one that touched it: the file is
     // shown at the path that commit left it, not where it moved later.
@@ -264,6 +301,8 @@ struct FakeGit {
 impl GitRead for FakeGit {
     fn read(&self, args: &[&str]) -> Result<Vec<u8>, ReadError> {
         self.calls.lock().unwrap().push(args.iter().map(|a| s(a)).collect());
+        // The last argument before the closing `--`.
+        let args: Vec<&str> = args.iter().copied().filter(|a| *a != "--").collect();
         let target = args[args.len() - 1];
         match args[0] {
             "show" if args.contains(&"--raw") => self.commits.get(target).map(|t| t.as_bytes().to_vec()).ok_or_else(|| ReadError::Failed(format!("bad commit {target}"))),
@@ -274,6 +313,7 @@ impl GitRead for FakeGit {
         }
     }
     fn blob(&self, spec: &str, max: u64) -> Result<Blob, ReadError> {
+        self.calls.lock().unwrap().push(vec![s("blob"), s(spec)]);
         if self.cancel_blobs {
             return Err(ReadError::Cancelled);
         }
@@ -326,7 +366,7 @@ fn b(k: impl Into<String>, v: &str) -> (String, Vec<u8>) {
 #[test]
 fn show_raw_args_shape() {
     let c = rep('c');
-    assert_eq!(show_raw_args(&c), strings(&["show", "--raw", "-z", "-M", "--no-abbrev", "--diff-merges=first-parent", "--format=%x1e%H %P%x1f%s", &c]));
+    assert_eq!(show_raw_args(&c), strings(&["show", "--raw", "-z", "-M", "--no-abbrev", "--diff-merges=first-parent", "--root", "--no-show-signature", "--format=%x1e%H %P%x1f%s", &c, "--"]));
 }
 
 #[test]
@@ -384,7 +424,7 @@ fn left_side_follows_unselected_rename() {
     );
     assert_eq!(left_side(&git, &i.c, "new.ts", &[i.c.clone(), i.a.clone()]).unwrap(), text("1\n2\n3\n4\n"));
     let calls = git.calls.lock().unwrap();
-    assert!(calls.iter().any(|c| *c == strings(&["diff", "--raw", "-z", "-M", "--no-abbrev", &i.a, &bb])), "{calls:?}");
+    assert!(calls.iter().any(|c| *c == strings(&["diff", "--raw", "-z", "-M", "--no-abbrev", &i.a, &bb, "--"])), "{calls:?}");
 }
 
 #[test]
@@ -498,6 +538,62 @@ fn left_side_round_trips() {
 }
 
 #[test]
+fn left_side_matches_git_merge_file_on_distinct_lines() {
+    // An oracle independent of our merge: the left side must be v0 with only x's change (v1 → v2)
+    // applied, as `git merge-file -p v0 v1 v2` applies it. Every line is distinct and edits never
+    // move a line, so the alignment is unique and both must agree exactly wherever git is clean.
+    // (With repeated lines, Myers and xdiff may each place an insertion at a different one of
+    // two equal lines; both readings are right, so the repeated-line fuzz checks the round trip.)
+    if !git_available() {
+        return;
+    }
+    let i = ids();
+    let mut r = Lcg(23);
+    let mut fresh = 0;
+    let mut edit = |r: &mut Lcg, t: &[String]| -> Vec<String> {
+        let mut o = t.to_vec();
+        for _ in 0..1 + r.rand(3) {
+            let at = r.rand(o.len() + 1);
+            fresh += 1;
+            match r.rand(3) {
+                0 => o.insert(at, format!("new{fresh}")),
+                1 if o.len() > 1 => {
+                    o.remove(at.min(o.len() - 1));
+                }
+                _ => {
+                    let k = at.min(o.len() - 1);
+                    o[k] = format!("chg{fresh}");
+                }
+            }
+        }
+        o
+    };
+    let txt = |l: &[String]| l.iter().map(|x| format!("{x}\n")).collect::<String>();
+    let commits = vec![
+        (i.a.clone(), rec(&i.a, &i.p, &[m("f.ts", &blob(1), &blob(2))])),
+        (i.x.clone(), rec(&i.x, &i.a, &[m("f.ts", &blob(2), &blob(3))])),
+        (i.c.clone(), rec(&i.c, &i.x, &[m("f.ts", &blob(3), &blob(4))])),
+    ];
+    let (mut merged, mut agreed) = (0, 0);
+    for _ in 0..200 {
+        let n = 6 + r.rand(10);
+        let v0: Vec<String> = (0..n).map(|k| format!("l{k}")).collect();
+        let v1 = edit(&mut r, &v0);
+        let v2 = edit(&mut r, &v1);
+        let v3 = edit(&mut r, &v2);
+        let git = fake(&commits, &[b(blob(1), &txt(&v0)), b(blob(2), &txt(&v1)), b(blob(3), &txt(&v2)), b(blob(4), &txt(&v3)), b(format!("{}:f.ts", i.c), &txt(&v3))]);
+        let LeftSide::Text(left) = left_side(&git, &i.c, "f.ts", &[i.c.clone(), i.a.clone()]).unwrap() else { continue };
+        merged += 1;
+        if let Some(Some(want)) = merge_file(&txt(&v0), &txt(&v1), &txt(&v2)) {
+            assert_eq!(left, want, "left side is not v0 + x per git merge-file: {:?}", (&v0, &v1, &v2, &v3));
+            agreed += 1;
+        }
+    }
+    eprintln!("left side equals git merge-file's v0 + x on {agreed} of {merged} merged cases (200 generated)");
+    assert!(agreed > 20, "too few cases checked: {agreed}");
+}
+
+#[test]
 fn left_side_added_file_is_empty() {
     // Added by the oldest step: its "before" is empty.
     let i = ids();
@@ -518,9 +614,14 @@ const CSSC: &str = "h1 {\n  color: navy;\n  margin: 4px;\n}\n"; // c: line 3
 
 /// The spec's example as git would answer it: a, x (rin), c; a and c selected.
 fn example_git() -> (FakeGit, Ids) {
+    example_git_css_mode("100644")
+}
+
+/// The example, with header.css at `css_mode` after c (`160000`: c turned it into a submodule).
+fn example_git_css_mode(css_mode: &str) -> (FakeGit, Ids) {
     let i = ids();
     let (a, x, c, p) = (&i.a, &i.x, &i.c, &i.p);
-    let c_raw = [m("src/header.ts", &blob(3), &blob(4)), m("src/header.css", &blob(13), &blob(14)), format!(":100644 000000 {} {} D\0src/debug.ts\0", blob(21), z())];
+    let c_raw = [m("src/header.ts", &blob(3), &blob(4)), format!(":100644 {css_mode} {} {} {}\0src/header.css\0", blob(13), blob(14), if css_mode == "100644" { "M" } else { "T" }), format!(":100644 000000 {} {} D\0src/debug.ts\0", blob(21), z())];
     let x_raw = [m("src/header.ts", &blob(2), &blob(3)), m("src/header.css", &blob(12), &blob(13))];
     let a_raw = [m("src/header.ts", &blob(1), &blob(2)), m("src/header.css", &blob(11), &blob(12)), format!(":000000 100644 {} {} A\0src/debug.ts\0", z(), blob(21)), m("src/only-a.ts", &blob(31), &blob(32))];
     let with_subject = |sha: &str, parent: &str, subject: &str, raw: &[String]| format!("\x1e{sha} {parent}\x1f{subject}\0\n{}", raw.concat());
@@ -631,4 +732,271 @@ fn par_map_limit_keeps_order_and_limit() {
     assert_eq!(out, (0..20).map(|n| n * 10).collect::<Vec<_>>());
     let p = peak.load(Ordering::SeqCst);
     assert!(p <= 4 && p >= 1, "peak {p}");
+}
+
+#[test]
+fn gitlink_step_falls_back_and_names_included() {
+    // c turns header.css into a submodule: no text, so a fallback, never a failed repository.
+    let (git, i) = example_git_css_mode("160000");
+    let read = read_combined(&git, &[i.a.clone(), i.c.clone()]).unwrap();
+    let css = read.files.iter().find(|r| r.file.path == "src/header.css").unwrap();
+    assert_eq!((css.mode, css.reason), (Mode::Fallback, Some(Fallback::Binary)));
+    assert_eq!(css.file.included, vec![i.x.clone()]);
+    // An older step through a submodule falls back too.
+    let i = ids();
+    let git = fake(
+        &[
+            (i.c.clone(), rec(&i.c, &i.a, &[m("sub", &blob(2), &blob(3))])),
+            (i.a.clone(), rec(&i.a, &i.p, &[format!(":160000 100644 {} {} T\0sub\0", rep('7'), blob(2))])),
+        ],
+        &[b(blob(2), "a\n"), b(blob(3), "a\nb\n"), b(format!("{}:sub", i.c), "a\nb\n")],
+    );
+    assert_eq!(left_side(&git, &i.c, "sub", &[i.c.clone(), i.a.clone()]).unwrap(), LeftSide::Fallback(Fallback::Binary));
+}
+
+#[test]
+fn missing_right_side_is_empty_only_when_deleted() {
+    let i = ids();
+    // c deleted the file: the right side is empty, and taking c out gives back x's version.
+    let git = fake(&[(i.c.clone(), rec(&i.c, &i.x, &[format!(":100644 000000 {} {} D\0gone.ts\0", blob(1), z())]))], &[b(blob(1), "x\n")]);
+    assert_eq!(left_side(&git, &i.c, "gone.ts", &[i.c.clone()]).unwrap(), text("x\n"));
+    // Not deleted, yet unreadable (a path that did not survive the read): fall back.
+    let git = fake(&[(i.c.clone(), rec(&i.c, &i.x, &[m("lost.ts", &blob(1), &blob(2))]))], &[b(blob(1), "x\n"), b(blob(2), "y\n")]);
+    assert_eq!(left_side(&git, &i.c, "lost.ts", &[i.c.clone()]).unwrap(), LeftSide::Fallback(Fallback::Conflict));
+}
+
+#[test]
+fn read_combined_rejects_non_sha_selection() {
+    let (git, i) = example_git();
+    assert!(matches!(read_combined(&git, &[i.a.clone(), s("HEAD")]), Err(ReadError::Failed(_))));
+    assert!(matches!(read_combined(&git, &[i.a.clone(), s("--all")]), Err(ReadError::Failed(_))));
+    assert!(git.calls.lock().unwrap().is_empty(), "nothing reaches git");
+}
+
+#[test]
+fn right_side_is_read_once() {
+    let (git, i) = example_git();
+    read_combined(&git, &[i.a.clone(), i.c.clone()]).unwrap();
+    let calls = git.calls.lock().unwrap();
+    for path in ["src/header.ts", "src/header.css"] {
+        let spec = format!("{}:{path}", i.c);
+        assert_eq!(calls.iter().filter(|c| c[0] == "blob" && c[1] == spec).count(), 1, "{spec} read more than once");
+    }
+    // One show record per selected commit per slow file: `last` is not read twice either.
+    assert_eq!(calls.iter().filter(|c| c[0] == "show").count(), 4);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Real git, in throwaway repositories.
+
+/// `git` with no inherited repository and no user or system config.
+fn git_cmd(dir: &std::path::Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with("GIT_") {
+            cmd.env_remove(&k);
+        }
+    }
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_OPTIONAL_LOCKS", "0").current_dir(dir);
+    cmd
+}
+
+fn git_available() -> bool {
+    std::process::Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// `git merge-file -p ours base theirs` in a fresh temp dir. `None`: git could not be run;
+/// `Some(None)`: a conflict.
+fn merge_file(ours: &str, base: &str, theirs: &str) -> Option<Option<String>> {
+    if !git_available() {
+        return None;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    for (n, t) in [("ours", ours), ("base", base), ("theirs", theirs)] {
+        std::fs::write(dir.path().join(n), t).unwrap();
+    }
+    let out = git_cmd(dir.path()).args(["merge-file", "-p", "ours", "base", "theirs"]).output().ok()?;
+    match out.status.code() {
+        Some(0) => Some(Some(String::from_utf8(out.stdout).unwrap())),
+        Some(1..=127) => Some(None),
+        other => panic!("git merge-file failed ({other:?}): {}", String::from_utf8_lossy(&out.stderr)),
+    }
+}
+
+struct Repo {
+    dir: tempfile::TempDir,
+    tick: AtomicUsize,
+}
+
+impl Repo {
+    fn new() -> Repo {
+        let r = Repo { dir: tempfile::tempdir().unwrap(), tick: AtomicUsize::new(0) };
+        r.git(&["init", "-q", "-b", "main"]);
+        r
+    }
+    fn path(&self) -> &std::path::Path {
+        self.dir.path()
+    }
+    fn git(&self, args: &[&str]) -> String {
+        let t = self.tick.fetch_add(1, Ordering::SeqCst) + 1;
+        let date = format!("{} +0000", 1_700_000_000 + t * 60);
+        let out = git_cmd(self.path())
+            .args(["-c", "user.name=Dev", "-c", "user.email=dev@example.com", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+    /// Writes `f` and commits it; the new commit's id.
+    fn commit(&self, f: &str, content: &str, msg: &str) -> String {
+        std::fs::write(self.path().join(f), content).unwrap();
+        self.git(&["add", f]);
+        self.git(&["commit", "-q", "-m", msg]);
+        self.git(&["rev-parse", "HEAD"])
+    }
+    /// Every file under `.git/objects`, to show a read wrote none.
+    fn objects(&self) -> Vec<std::path::PathBuf> {
+        fn walk(d: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(d).unwrap().flatten() {
+                if e.file_type().unwrap().is_dir() {
+                    walk(&e.path(), out);
+                } else {
+                    out.push(e.path());
+                }
+            }
+        }
+        let mut v = Vec::new();
+        walk(&self.path().join(".git/objects"), &mut v);
+        v.sort();
+        v
+    }
+}
+
+/// [`GitRead`] over real git: `cat-file -s` first, so a blob over `max` is never read.
+impl GitRead for Repo {
+    fn read(&self, args: &[&str]) -> Result<Vec<u8>, ReadError> {
+        let out = git_cmd(self.path()).args(["--no-pager", "-c", "core.quotepath=off"]).args(args).output().map_err(|e| ReadError::Failed(e.to_string()))?;
+        if out.status.success() {
+            Ok(out.stdout)
+        } else {
+            Err(ReadError::Failed(String::from_utf8_lossy(&out.stderr).into_owned()))
+        }
+    }
+    fn blob(&self, spec: &str, max: u64) -> Result<Blob, ReadError> {
+        let size = git_cmd(self.path()).args(["cat-file", "-s", spec]).output().map_err(|e| ReadError::Failed(e.to_string()))?;
+        if !size.status.success() {
+            return Ok(Blob::Missing);
+        }
+        let n: u64 = String::from_utf8_lossy(&size.stdout).trim().parse().map_err(|_| ReadError::Failed(s("bad size")))?;
+        if n > max {
+            return Ok(Blob::TooLarge(n));
+        }
+        let out = git_cmd(self.path()).args(["cat-file", "blob", spec]).output().map_err(|e| ReadError::Failed(e.to_string()))?;
+        Ok(if out.status.success() { Blob::Bytes(out.stdout) } else { Blob::Missing })
+    }
+}
+
+/// `read_combined` against `repo`, checking it wrote no object.
+fn read_real(repo: &Repo, selected: &[String]) -> claudegate_core::gitlog::RepoRead {
+    let before = repo.objects();
+    let read = read_combined(repo, selected).unwrap();
+    assert_eq!(repo.objects(), before, "the read wrote into .git/objects");
+    read
+}
+
+const SIX: &str = "1\n2\n3\n4\n5\n6\n";
+
+#[test]
+fn real_unselected_side_branch_merged_by_selected_merge() {
+    if !git_available() {
+        return;
+    }
+    // F; on side, U edits line 5; on main, Sa edits line 1; on side, merging main gives M, first
+    // parent U. Selecting Sa and M: M's first-parent diff is Sa's change, and U sits below it.
+    let r = Repo::new();
+    let _f = r.commit("f", SIX, "F");
+    r.git(&["checkout", "-q", "-b", "side"]);
+    let u = r.commit("f", "1\n2\n3\n4\nU5\n6\n", "U");
+    r.git(&["checkout", "-q", "main"]);
+    let sa = r.commit("f", "S1\n2\n3\n4\n5\n6\n", "Sa");
+    r.git(&["checkout", "-q", "side"]);
+    r.git(&["merge", "-q", "--no-edit", "main"]);
+    let m = r.git(&["rev-parse", "HEAD"]);
+    let read = read_real(&r, &[sa.clone(), m.clone()]);
+    assert_eq!(read.files.len(), 1);
+    let f = &read.files[0];
+    assert_eq!(f.file.included, vec![u.clone()], "U's change is in the plain diff, so it is named");
+    assert!(!f.file.fast);
+    // The left side keeps U's line: only the selected change (line 1) shows.
+    assert_eq!(f.mode, Mode::Merge);
+    assert_eq!(left_side(&r, &m, "f", &[m.clone(), sa.clone()]).unwrap(), text("1\n2\n3\n4\nU5\n6\n"));
+    assert_eq!(read.subjects.get(&u).map(String::as_str), Some("U"));
+    assert_eq!(read.commits, vec![sa, m]);
+}
+
+#[test]
+fn real_two_branches_name_the_skipped_commit_in_any_order() {
+    if !git_available() {
+        return;
+    }
+    // F; S1 on branch a; Y then S2 on main. However the selection is passed, Y is named.
+    let r = Repo::new();
+    r.commit("f", SIX, "F");
+    r.git(&["checkout", "-q", "-b", "a"]);
+    let s1 = r.commit("f", "S1\n2\n3\n4\n5\n6\n", "S1");
+    r.git(&["checkout", "-q", "main"]);
+    let y = r.commit("f", "1\n2\nY3\n4\n5\n6\n", "Y");
+    let s2 = r.commit("f", "1\n2\nY3\n4\n5\nS6\n", "S2");
+    let one = read_real(&r, &[s1.clone(), s2.clone()]);
+    let two = read_real(&r, &[s2.clone(), s1.clone()]);
+    assert_eq!(one, two, "the result depends on the set, not the order");
+    let f = &one.files[0];
+    assert_eq!(f.file.included, vec![y.clone()]);
+    assert!(!f.file.fast);
+    assert_eq!(f.mode, Mode::Fallback);
+}
+
+#[test]
+fn real_root_commit_selected() {
+    if !git_available() {
+        return;
+    }
+    // The base is the root itself: `<root>^@` excludes nothing, and the root's files are listed.
+    let r = Repo::new();
+    let root = r.commit("f", "a\n", "root");
+    let next = r.commit("f", "a\nb\n", "next");
+    let read = read_real(&r, &[next.clone(), root.clone()]);
+    assert_eq!(read.commits, vec![root.clone(), next.clone()]);
+    assert_eq!(read.files.len(), 1);
+    let f = &read.files[0];
+    assert_eq!((f.file.status, f.file.before_ref.clone(), f.mode), (NetStatus::Added, None, Mode::Fast));
+    assert_eq!(f.file.shas, vec![root, next]);
+}
+
+#[test]
+fn real_selected_merge_with_selected_side() {
+    if !git_available() {
+        return;
+    }
+    // A merge in the selection along with the side commit it brings in: nothing unselected
+    // touched the file, so its diff is the fast one.
+    let r = Repo::new();
+    r.commit("f", SIX, "F");
+    r.git(&["checkout", "-q", "-b", "side"]);
+    let t = r.commit("f", "1\n2\n3\n4\nT5\n6\n", "T");
+    r.git(&["checkout", "-q", "main"]);
+    let a = r.commit("f", "A1\n2\n3\n4\n5\n6\n", "A");
+    r.git(&["merge", "-q", "--no-edit", "side"]);
+    let m = r.git(&["rev-parse", "HEAD"]);
+    let read = read_real(&r, &[a.clone(), t.clone(), m.clone()]);
+    let f = &read.files[0];
+    assert_eq!(f.file.included, Vec::<String>::new());
+    assert_eq!(f.mode, Mode::Fast);
+    assert_eq!(*read.commits.last().unwrap(), m);
+    // Without T selected, the merge carries T's change in: T is named.
+    let read = read_real(&r, &[a.clone(), m.clone()]);
+    assert_eq!(read.files[0].file.included, vec![t.clone()]);
 }

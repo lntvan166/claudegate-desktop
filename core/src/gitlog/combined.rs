@@ -5,8 +5,21 @@
 //! in memory.
 //!
 //! Read-only: git is only read through [`GitRead`], nothing is written to the repository (no
-//! objects, no index) and nothing is cached. Ported rule for rule from Polylog's
-//! `combinedModel.ts` and `combinedRead.ts`.
+//! objects, no index) and nothing is cached. Ported from Polylog's `combinedModel.ts` and
+//! `combinedRead.ts`, with these deliberate differences:
+//!
+//! - **Which unselected commits a file includes.** Polylog only counted unselected commits that
+//!   touched the file after the first selected one in the range log's order, so one that came
+//!   earlier (a side branch merged in by a selected merge, or a commit below the oldest selected
+//!   one on another branch) was passed off on the fast path or left unnamed by the fallback. Here
+//!   every unselected commit in range that touched the file counts when the plain diff
+//!   `before_ref ↔ last` carries its change: it is an ancestor of `last` and not of `before_ref`
+//!   (brought in), or of `before_ref` and not of `last` (taken back out).
+//! - **The selection is sorted** before git sees it, so the range log's order, and with it `last`
+//!   on two branches, depends on the set of commits and never on the order they were passed in.
+//! - **Submodules** (mode 160000) have no text: a step through one falls back as binary.
+//! - A missing right side is an empty file only when the newest selected commit deleted it; a
+//!   commit `git show` does not describe falls back instead of being skipped.
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::OnceLock;
 
@@ -34,6 +47,9 @@ pub const RANGE_FORMAT: &str = "--format=%x1e%H %P%x1f%s";
 pub struct RawChange {
     /// One of `A M D R C T`.
     pub status: char,
+    /// Modes as git prints them (`100644`, `000000` when absent, `160000` for a submodule).
+    pub old_mode: String,
+    pub new_mode: String,
     pub path: String,
     /// Renames and copies: the path before.
     pub old_path: Option<String>,
@@ -100,8 +116,10 @@ pub fn exclude_for(base: &str, selected: &[String]) -> Vec<String> {
     }
 }
 
-/// The flags both the range log and a single commit's read use.
-const RAW_FLAGS: [&str; 6] = ["--raw", "-z", "-M", "--no-abbrev", "--diff-merges=first-parent", RANGE_FORMAT];
+/// The flags both the range log and a single commit's read use. `--root` and
+/// `--no-show-signature` override a user's `log.showRoot=false` (a root commit with no files) and
+/// `log.showSignature=true` (gpg lines in the output).
+const RAW_FLAGS: [&str; 8] = ["--raw", "-z", "-M", "--no-abbrev", "--diff-merges=first-parent", "--root", "--no-show-signature", RANGE_FORMAT];
 
 /// Every commit reachable from the selected ones and not from `exclude`, with each one's files
 /// (merges: against their first parent). The trailing `--` keeps a ref from reading as a path.
@@ -117,12 +135,17 @@ pub fn range_log_args(selected: &[String], exclude: &[String]) -> Vec<String> {
 }
 
 /// One commit's changed files, with blob ids (merges: against their first parent; a root commit:
-/// everything added).
+/// everything added). The trailing `--` keeps a work-tree file named like the sha from making the
+/// argument ambiguous.
 pub fn show_raw_args(sha: &str) -> Vec<String> {
     let mut a: Vec<String> = std::iter::once("show").chain(RAW_FLAGS.iter().copied()).map(|s| s.to_string()).collect();
     a.push(sha.to_string());
+    a.push("--".to_string());
     a
 }
+
+/// The mode of a submodule entry (a gitlink): its "blob" is a commit, not text.
+pub const GITLINK_MODE: &str = "160000";
 
 fn raw_re() -> &'static Regex {
     static RAW: OnceLock<Regex> = OnceLock::new();
@@ -166,7 +189,8 @@ pub fn parse_range_log(out: &str) -> Vec<RangeCommit> {
                 break;
             }
             let (path, old_path) = if two { (paths[1].to_string(), Some(paths[0].to_string())) } else { (paths[0].to_string(), None) };
-            changes.push(RawChange { status, path, old_path, old_blob: fields[2].to_string(), new_blob: fields[3].to_string() });
+            let old_mode = fields[0].trim_start_matches(':').to_string();
+            changes.push(RawChange { status, path, old_path, old_mode, new_mode: fields[1].to_string(), old_blob: fields[2].to_string(), new_blob: fields[3].to_string() });
         }
         if is_sha(&sha) {
             commits.push(RangeCommit { sha, parents, subject, changes });
@@ -176,8 +200,6 @@ pub fn parse_range_log(out: &str) -> Vec<RangeCommit> {
 }
 
 struct Acc {
-    /// Where the file is now, as the range goes on (unselected renames too).
-    path: String,
     /// Its path after the newest selected commit that touched it: the path shown.
     shown_path: String,
     before_path: String,
@@ -185,10 +207,9 @@ struct Acc {
     first: RawChange,
     last: RawChange,
     shas: Vec<String>,
-    /// Unselected commits since the last selected one; they count once another selected commit
-    /// follows.
-    pending: Vec<String>,
-    included: Vec<String>,
+    /// Every unselected commit in range that touched it, oldest first, including those before
+    /// its first selected commit; [`combine_repo`] keeps the ones the plain diff carries.
+    touched: Vec<String>,
 }
 
 fn net_status(a: &Acc) -> Option<NetStatus> {
@@ -231,46 +252,53 @@ fn ancestors(sha: &str, log: &[RangeCommit]) -> HashSet<String> {
 pub fn combine_repo(selected: &HashSet<String>, log: &[RangeCommit]) -> (Vec<CombinedFile>, Vec<String>) {
     let mut by_path: HashMap<String, usize> = HashMap::new();
     let mut all: Vec<Acc> = Vec::new();
+    // Unselected commits that touched a path no selected commit has touched yet, followed through
+    // renames the same way: they seed the entry a selected commit opens later.
+    let mut before_any: HashMap<String, Vec<String>> = HashMap::new();
     for c in log.iter().rev() {
         let mine = selected.contains(&c.sha);
         for change in &c.changes {
             let was = change.old_path.as_ref().unwrap_or(&change.path);
+            let renamed = change.old_path.as_ref().filter(|old| **old != change.path);
             let at = match by_path.get(was) {
                 Some(&at) => at,
+                None if !mine => {
+                    let mut seen = match renamed {
+                        Some(old) => before_any.remove(old).unwrap_or_default(),
+                        None => before_any.remove(&change.path).unwrap_or_default(),
+                    };
+                    seen.push(c.sha.clone());
+                    before_any.insert(change.path.clone(), seen);
+                    continue;
+                }
                 None => {
-                    if !mine {
-                        continue; // not (yet) a file of the selection
+                    let touched = before_any.remove(was).unwrap_or_default();
+                    if renamed.is_some() {
+                        before_any.remove(&change.path);
                     }
                     all.push(Acc {
-                        path: change.path.clone(),
                         shown_path: change.path.clone(),
                         before_path: was.clone(),
                         before_ref: c.parents.first().cloned(),
                         first: change.clone(),
                         last: change.clone(),
                         shas: Vec::new(),
-                        pending: Vec::new(),
-                        included: Vec::new(),
+                        touched,
                     });
                     all.len() - 1
                 }
             };
-            if let Some(old) = &change.old_path {
-                if *old != change.path {
-                    by_path.remove(old);
-                }
+            if let Some(old) = renamed {
+                by_path.remove(old);
             }
-            let acc = &mut all[at];
-            acc.path = change.path.clone();
             by_path.insert(change.path.clone(), at);
+            let acc = &mut all[at];
             if mine {
                 acc.shown_path = change.path.clone();
                 acc.shas.push(c.sha.clone());
                 acc.last = change.clone();
-                let pending = std::mem::take(&mut acc.pending);
-                acc.included.extend(pending);
             } else {
-                acc.pending.push(c.sha.clone());
+                acc.touched.push(c.sha.clone());
             }
         }
     }
@@ -279,10 +307,14 @@ pub fn combine_repo(selected: &HashSet<String>, log: &[RangeCommit]) -> (Vec<Com
     for a in all {
         let status = net_status(&a);
         let last = a.shas.last().cloned().expect("an entry starts with a selected commit");
-        let before = ancestors(&last, log);
-        // Only commits `last` descends from reach its version of the file.
-        let included: Vec<String> = a.included.iter().filter(|s| before.contains(*s)).cloned().collect();
-        let fast = included.is_empty() && a.shas.iter().all(|s| before.contains(s));
+        let reach = ancestors(&last, log);
+        let below = a.before_ref.as_deref().map(|b| ancestors(b, log)).unwrap_or_default();
+        // The plain diff `before_ref ↔ last` carries the change of every commit that reaches
+        // `last` but not `before_ref`, and takes back out every one that reaches `before_ref` but
+        // not `last`. An unselected one among them that touched the file is included.
+        let included: Vec<String> = a.touched.iter().filter(|s| reach.contains(*s) != below.contains(*s)).cloned().collect();
+        // Fast: the diff carries nothing unselected, and every selected change (each reaches `last`).
+        let fast = included.is_empty() && a.shas.iter().all(|s| reach.contains(s));
         let Some(status) = status else {
             no_net_change.push(a.shown_path);
             continue;
@@ -363,27 +395,42 @@ fn unmergeable_text(bytes: &[u8]) -> Option<Fallback> {
     None
 }
 
-/// A side's text, or why it can't be merged. `missing` is what a `Missing` blob reads as: `None`
-/// makes it a failure (a blob id the range log named must exist).
-fn side(git: &dyn GitRead, spec: &str, missing: Option<&str>) -> Result<Result<String, Fallback>, ReadError> {
+/// A side as read for the merge.
+enum Side {
+    Text(String),
+    Unmergeable(Fallback),
+    Missing,
+}
+
+fn side(git: &dyn GitRead, spec: &str) -> Result<Side, ReadError> {
     if is_no_blob(spec) {
-        return Ok(Ok(String::new()));
+        return Ok(Side::Text(String::new()));
     }
     Ok(match git.blob(spec, MERGE_LIMIT_BYTES)? {
         Blob::Bytes(b) => match unmergeable_bytes(&b) {
-            Some(why) => Err(why),
-            None => Ok(String::from_utf8(b).expect("checked as UTF-8")),
+            Some(why) => Side::Unmergeable(why),
+            None => Side::Text(String::from_utf8(b).expect("checked as UTF-8")),
         },
-        Blob::TooLarge(_) => Err(Fallback::TooLarge),
-        Blob::Missing => match missing {
-            Some(t) => Ok(t.to_string()),
-            None => return Err(ReadError::Failed(format!("missing blob {spec}"))),
-        },
+        Blob::TooLarge(_) => Side::Unmergeable(Fallback::TooLarge),
+        Blob::Missing => Side::Missing,
     })
+}
+
+/// A blob id the range log named: it must exist.
+fn step_side(git: &dyn GitRead, id: &str) -> Result<Result<String, Fallback>, ReadError> {
+    match side(git, id)? {
+        Side::Text(t) => Ok(Ok(t)),
+        Side::Unmergeable(why) => Ok(Err(why)),
+        Side::Missing => Err(ReadError::Failed(format!("missing blob {id}"))),
+    }
 }
 
 fn is_no_blob(id: &str) -> bool {
     !id.is_empty() && id.bytes().all(|b| b == b'0')
+}
+
+fn is_gitlink(c: &RawChange) -> bool {
+    c.old_mode == GITLINK_MODE || c.new_mode == GITLINK_MODE
 }
 
 /// The file `path` at `last` with the commits `without` (newest first) taken back out, each by a
@@ -392,11 +439,35 @@ fn is_no_blob(id: &str) -> bool {
 /// selected changes put back onto the result must give `last:path` byte for byte; otherwise, and
 /// on any conflict, the file falls back.
 pub fn left_side(git: &dyn GitRead, last: &str, path: &str, without: &[String]) -> Result<LeftSide, ReadError> {
-    // A file the newest commit deleted has no right side: start from empty.
-    let right = match side(git, &format!("{last}:{path}"), Some(""))? {
-        Ok(t) => t,
-        Err(why) => return Ok(LeftSide::Fallback(why)),
+    left_and_right(git, last, path, without).map(|(left, _)| left)
+}
+
+/// [`left_side`], and the right side it was computed from (`last:path`; empty when `last`
+/// deleted the file). The right side is `None` when the file fell back before it was read.
+pub fn left_and_right(git: &dyn GitRead, last: &str, path: &str, without: &[String]) -> Result<(LeftSide, Option<String>), ReadError> {
+    let fallback = |why| Ok((LeftSide::Fallback(why), None));
+    let mut records: HashMap<String, Option<RangeCommit>> = HashMap::new();
+    let mut record = |sha: &str| -> Result<Option<RangeCommit>, ReadError> {
+        if let Some(r) = records.get(sha) {
+            return Ok(r.clone());
+        }
+        let r = parse_range_log(&read_str(git, &show_raw_args(sha))?).into_iter().next();
+        records.insert(sha.to_string(), r.clone());
+        Ok(r)
     };
+    // The right side. Missing reads as empty only when `last` deleted the file; otherwise the
+    // path did not survive the read (a path that is not UTF-8), and the file falls back.
+    let last_change = record(last)?.and_then(|r| r.changes.into_iter().find(|c| c.path == path));
+    if last_change.as_ref().is_some_and(is_gitlink) {
+        return fallback(Fallback::Binary);
+    }
+    let right = match side(git, &format!("{last}:{path}"))? {
+        Side::Text(t) => t,
+        Side::Unmergeable(why) => return fallback(why),
+        Side::Missing if last_change.as_ref().is_some_and(|c| c.status == 'D') => String::new(),
+        Side::Missing => return fallback(Fallback::Conflict),
+    };
+    let done = |left: LeftSide| Ok((left, Some(right.clone())));
     let mut text = right.clone();
     // Each step's file before and after its commit, newest first: checked again at the end.
     let mut steps: Vec<(String, String)> = Vec::new();
@@ -404,14 +475,13 @@ pub fn left_side(git: &dyn GitRead, last: &str, path: &str, without: &[String]) 
     // The revision `text` stands for: renames between it and the next commit are followed back.
     let mut state = last.to_string();
     for sha in without {
-        let commit = parse_range_log(&read_str(git, &show_raw_args(sha))?).into_iter().next();
-        // Polylog skips a commit `git show` did not describe; leaving its change in would make
-        // the left side wrong, so it falls back instead.
-        let Some(commit) = commit else { return Ok(LeftSide::Fallback(Fallback::Conflict)) };
+        // A commit `git show` did not describe can't be taken out: leaving its change in would
+        // make the left side wrong, so the file falls back (Polylog skipped it).
+        let Some(commit) = record(sha)? else { return done(LeftSide::Fallback(Fallback::Conflict)) };
         let mut change = commit.changes.iter().find(|c| c.path == current);
         if change.is_none() && state != *sha {
             // Renamed by a commit in between (one not selected): its path after this commit.
-            let out = read_str(git, &["diff", "--raw", "-z", "-M", "--no-abbrev", sha, &state].map(str::to_string))?;
+            let out = read_str(git, &["diff", "--raw", "-z", "-M", "--no-abbrev", sha, &state, "--"].map(str::to_string))?;
             let between = parse_range_log(&format!("\x1e{sha}\0{out}")).into_iter().next();
             let renamed = between.and_then(|b| b.changes.into_iter().find(|c| c.path == current && c.old_path.is_some()));
             if let Some(r) = renamed {
@@ -423,20 +493,24 @@ pub fn left_side(git: &dyn GitRead, last: &str, path: &str, without: &[String]) 
             state = p.clone();
         }
         // The range log says this commit touched the file: not finding it means the path was lost.
-        let Some(change) = change else { return Ok(LeftSide::Fallback(Fallback::Conflict)) };
-        let after = side(git, &change.new_blob, None)?;
-        let before = side(git, &change.old_blob, None)?;
+        let Some(change) = change else { return done(LeftSide::Fallback(Fallback::Conflict)) };
+        // A submodule has no text to merge.
+        if is_gitlink(change) {
+            return done(LeftSide::Fallback(Fallback::Binary));
+        }
+        let after = step_side(git, &change.new_blob)?;
+        let before = step_side(git, &change.old_blob)?;
         if let Some(why) = unmergeable_text(text.as_bytes()) {
-            return Ok(LeftSide::Fallback(why));
+            return done(LeftSide::Fallback(why));
         }
         let (after, before) = match (after, before) {
             (Ok(a), Ok(b)) => (a, b),
-            (Err(why), _) | (_, Err(why)) => return Ok(LeftSide::Fallback(why)),
+            (Err(why), _) | (_, Err(why)) => return done(LeftSide::Fallback(why)),
         };
         text = match merge3(&after, &text, &before) {
             MergeResult::Clean(t) => t,
-            MergeResult::Conflict => return Ok(LeftSide::Fallback(Fallback::Conflict)),
-            MergeResult::TooLarge => return Ok(LeftSide::Fallback(Fallback::TooLarge)),
+            MergeResult::Conflict => return done(LeftSide::Fallback(Fallback::Conflict)),
+            MergeResult::TooLarge => return done(LeftSide::Fallback(Fallback::TooLarge)),
         };
         steps.push((before, after));
         if let Some(old) = &change.old_path {
@@ -449,13 +523,13 @@ pub fn left_side(git: &dyn GitRead, last: &str, path: &str, without: &[String]) 
     for (before, after) in steps.iter().rev() {
         match merge3(before, &check, after) {
             MergeResult::Clean(t) => check = t,
-            _ => return Ok(LeftSide::Fallback(Fallback::Conflict)),
+            _ => return done(LeftSide::Fallback(Fallback::Conflict)),
         }
     }
     if check != right {
-        return Ok(LeftSide::Fallback(Fallback::Conflict));
+        return done(LeftSide::Fallback(Fallback::Conflict));
     }
-    Ok(LeftSide::Text(text))
+    done(LeftSide::Text(text))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -501,6 +575,15 @@ enum Slow {
 pub fn read_combined(git: &dyn GitRead, selected: &[String]) -> Result<RepoRead, ReadError> {
     // The range starts below the commit every selected one descends from (none: unrelated
     // histories).
+    // Only commit ids reach git, and in one order: the range log's order (and with it `last` on
+    // two branches) then depends on the set, never on the order it was passed in.
+    if let Some(bad) = selected.iter().find(|s| !is_sha(s)) {
+        return Err(ReadError::Failed(format!("not a commit id: {bad:?}")));
+    }
+    let mut sorted = selected.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    let selected = &sorted[..];
     let base = match read_str(git, &merge_base_args(selected)) {
         Ok(out) => out.trim().to_string(),
         Err(ReadError::Cancelled) => return Err(ReadError::Cancelled),
@@ -518,13 +601,10 @@ pub fn read_combined(git: &dyn GitRead, selected: &[String]) -> Result<RepoRead,
     let settled = par_map_limit(&slow, SLOW_FILES_AT_ONCE, |&i| -> Result<Slow, ReadError> {
         let f = &files[i];
         let without: Vec<String> = f.shas.iter().rev().cloned().collect();
-        Ok(match left_side(git, &f.last, &f.path, &without)? {
-            LeftSide::Fallback(why) => Slow::Fallback(why),
-            LeftSide::Text(left) => match git.blob(&format!("{}:{}", f.last, f.path), MERGE_LIMIT_BYTES)? {
-                Blob::Bytes(b) if b == left.as_bytes() => Slow::Same,
-                Blob::Missing if left.is_empty() => Slow::Same,
-                _ => Slow::Merge,
-            },
+        Ok(match left_and_right(git, &f.last, &f.path, &without)? {
+            (LeftSide::Fallback(why), _) => Slow::Fallback(why),
+            (LeftSide::Text(left), right) if right.as_deref() == Some(left.as_str()) => Slow::Same,
+            (LeftSide::Text(_), _) => Slow::Merge,
         })
     });
     if settled.iter().any(|r| matches!(r, Err(ReadError::Cancelled))) {
