@@ -4,7 +4,7 @@ const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 #[test]
 fn blame_args_shape() {
-    assert_eq!(blame_args(A, "-x.ts", 7), ["blame", "--porcelain", "-L7,7", A, "--", "-x.ts"]);
+    assert_eq!(blame_args(A, "-x.ts", 7), ["blame", "--porcelain", "--no-textconv", "-L7,7", A, "--", "-x.ts"]);
 }
 
 #[test]

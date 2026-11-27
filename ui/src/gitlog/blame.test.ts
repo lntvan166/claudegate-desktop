@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+// @ts-expect-error Monaco ships this module without types.
+import { marked } from "monaco-editor/base/common/marked/marked.js";
 import { blameHover, blameText, combinedBlameSides, commitBlameSides, escapeMarkdown, BLAME_DEBOUNCE_MS } from "./blame";
 import type { ChangedFile } from "./changes";
 import type { CombinedFile } from "./combined";
@@ -31,10 +33,26 @@ describe("blame text", () => {
     // The first paragraph holds the template's own parentheses around the date; the subject is the second.
     const subject = h.split("\n\n")[1];
     for (const c of ["[", "(", "*"]) expect(bare(subject, c), c).toBe(false);
-    expect(h).toContain("\\*bold\\* \\[x\\]\\(javascript:alert\\(1\\)\\)");
+    expect(h).toContain("\\*bold\\* \\[x\\]\\(javascript\\:alert\\(1\\)\\)");
     expect(h).toContain("\\<img src=x\\>");
     expect(h.endsWith("\n\n`a1b2c3d`")).toBe(true);
     expect(escapeMarkdown("a\\b`c*d_e{f}g[h]i(j)k#l+m-n.o!p|q<r>s")).toBe("a\\\\b\\`c\\*d\\_e\\{f\\}g\\[h\\]i\\(j\\)k\\#l\\+m\\-n\\.o\\!p\\|q\\<r\\>s");
+  });
+});
+
+describe("hover rendering", () => {
+  // Monaco renders hover markdown with this same marked.
+  const html = (s: string) => marked.parse(s, { async: false }) as string;
+  it("renders links and strikethrough as plain text", () => {
+    for (const subject of ["see https://github.com/x", "http://localhost/x", "~~x~~", "www.example.com/a", "javascript:alert(1)"]) {
+      const out = html(blameHover(b({ summary: subject }), NOW).split("\n\n")[1]);
+      expect(out, subject).not.toMatch(/<a |<del|href/);
+    }
+  });
+  it("cuts the subject by code point, never inside an emoji", () => {
+    const text = blameText(b({ summary: "😀".repeat(60) }), NOW);
+    expect(text.startsWith(`${"😀".repeat(49)}…, Ann`)).toBe(true);
+    expect(text).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/);
   });
 });
 

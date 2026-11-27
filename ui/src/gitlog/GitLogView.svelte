@@ -4,6 +4,7 @@
   import Splitter from "../components/Splitter.svelte";
   import {
     gitlogBlame,
+    gitlogBlameCancel,
     gitlogBlameSetting,
     gitlogChanges,
     gitlogCombined,
@@ -659,7 +660,7 @@
     }
   }
 
-  const blame = $derived({ on: cfg.blame, at: blameAt, toggle: (on: boolean) => void setBlame(on) });
+  const blame = $derived({ on: cfg.blame, at: blameAt, toggle: (on: boolean) => void setBlame(on), cancel: () => void gitlogBlameCancel(queryGate.begin()).catch(() => {}) });
   const external = $derived({ ...(combinedOn ? combinedExternal : singleExternal), blame });
 
   /** "Open in editor": the working-tree file, never written to. It may be gone since the commit. */

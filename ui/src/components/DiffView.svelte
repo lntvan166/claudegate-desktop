@@ -97,6 +97,8 @@
         on: boolean;
         at: (side: "original" | "modified", line: number) => Promise<BlameLine | null>;
         toggle: (on: boolean) => void;
+        /** Drops the read in flight (the cursor moved on, blame went off, the diff closed). */
+        cancel?: () => void;
       } | null;
     } | null;
   } = $props();
@@ -109,7 +111,14 @@
   /** The line a decoration is drawn on now. */
   let blamed: { side: "original" | "modified"; line: number } | null = null;
 
+  /** A read is out: clearing must cancel it so its git does not run on. */
+  let blameInflight = false;
+
   function clearBlame() {
+    if (blameInflight) {
+      blameInflight = false;
+      external?.blame?.cancel?.();
+    }
     blameSeq++;
     if (blameTimer) clearTimeout(blameTimer);
     blameTimer = null;
@@ -130,11 +139,13 @@
     blameTimer = setTimeout(async () => {
       blameTimer = null;
       let hit: BlameLine | null = null;
+      blameInflight = true;
       try {
         hit = await b.at(side, line);
       } catch {
         hit = null;
       }
+      if (mine === blameSeq) blameInflight = false;
       // The cursor moved on, another file or the other side took over, or blame was turned off.
       if (!hit || mine !== blameSeq || ident !== shownIdent || !external?.blame?.on || cursor?.side !== side || cursor.line !== line) return;
       const model = side === "original" ? editor?.getModel()?.original : editor?.getModel()?.modified;
@@ -152,13 +163,27 @@
     }, BLAME_DEBOUNCE_MS);
   }
 
-  // Turned off, or no longer a Git log diff: nothing stays drawn.
+  // Turned off, or no longer a Git log diff: nothing stays drawn. Turned on: the cursor's line now.
   $effect(() => {
-    if (!external?.blame?.on) untrack(clearBlame);
+    if (!external?.blame?.on) return untrack(clearBlame);
+    untrack(() => {
+      if (cursor && cursorIdent === shownIdent && shownIdent !== "") onBlameCursor(cursor.side, cursor.line);
+    });
+  });
+
+  // Hover is a Git log feature here: off in the review's diffs, as before blame existed.
+  $effect(() => {
+    const on = !!external?.blame;
+    const ed = editor;
+    if (!ed) return;
+    ed.getOriginalEditor().updateOptions({ hover: { enabled: on ? "on" : "off" } });
+    ed.getModifiedEditor().updateOptions({ hover: { enabled: on ? "on" : "off" } });
   });
 
   /** The last cursor position in either side of the diff, for "Open at cursor". */
   let cursor: { side: "original" | "modified"; line: number; col: number } | null = null;
+  /** The diff `cursor` was placed in. */
+  let cursorIdent = "";
   const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
   /** Opens the file at `line`:`col` of `side`; the original side is carried across the changes. */
@@ -257,6 +282,7 @@
       // must not replace "the first change" with line 1.
       if (ev.source !== "mouse" && ev.source !== "keyboard") return;
       cursor = { side, line: ev.position.lineNumber, col: ev.position.column };
+      cursorIdent = shownIdent;
       onBlameCursor(side, ev.position.lineNumber);
     });
     // Monaco's right-click menu: the diff's entry for "Copy reference for Claude" (the review's:
@@ -477,6 +503,7 @@
       diffWordWrap: wrap ? "on" : "off",
       fixedOverflowWidgets: true,
       ariaLabel: "Diff",
+      hover: { enabled: external?.blame ? "on" : "off" },
     });
     wireNavigation(m, "original", ed.getOriginalEditor());
     wireNavigation(m, "modified", ed.getModifiedEditor());
@@ -573,6 +600,7 @@
   });
 
   onDestroy(() => {
+    clearBlame();
     const m = editor?.getModel();
     editor?.dispose();
     m?.original.dispose();

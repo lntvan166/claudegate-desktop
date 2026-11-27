@@ -694,7 +694,8 @@ fn signed_commits_survive_show_signature() {
     let (_t, root) = tmp();
     let d = root.join("acme-api");
     init(&d);
-    commit(&d, &[("a.txt", Some(b"a"))], "plain", BASE);
+    // Older than the signed commit (committed at BASE): equal times made the order a coin toss.
+    commit(&d, &[("a.txt", Some(b"a"))], "plain", BASE - 60);
     let key = root.join("signing-key");
     let made = std::process::Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", ""]).arg("-f").arg(&key).status().is_ok_and(|s| s.success());
     if !made {
@@ -788,4 +789,30 @@ fn blame_never_supersedes_the_log_and_a_newer_blame_supersedes_it() {
     assert!(g.blame("main", 5, &id, &sha, "a.txt", 1).unwrap().is_some());
     assert!(g.runner.is_current(&Tag { window: "main".into(), query: 10 }), "blame leaves the log's query current");
     assert_eq!(g.blame("main", 4, &id, &sha, "a.txt", 1), Err(STALE.into()), "an older blame arriving late");
+}
+
+#[test]
+fn blame_reads_the_raw_blob_not_a_textconv_driver() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    init(&d);
+    git(&d, &["config", "diff.dbl.textconv", "sed p"]);
+    let sha = commit_as(&d, "ann", &[(".gitattributes", Some(b"*.dbl diff=dbl\n")), ("x.dbl", Some(b"one\ntwo\n"))], "add", BASE);
+    let g = gl();
+    let id = ids_of(&g, &[root])[0].clone();
+    assert_eq!(blamed(&g, 1, &id, &sha, "x.dbl", 2).map(|b| b.0), Some("ann".into()));
+    assert_eq!(g.blame("main", 2, &id, &sha, "x.dbl", 3).unwrap(), None, "a converted text would have a line 3");
+}
+
+#[test]
+fn blame_cancel_kills_and_supersedes() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    init(&d);
+    let sha = commit_as(&d, "ann", &[("a.txt", Some(b"one\n"))], "first", BASE);
+    let g = gl();
+    let id = ids_of(&g, &[root])[0].clone();
+    g.blame_cancel("main", 10);
+    assert_eq!(g.blame("main", 9, &id, &sha, "a.txt", 1), Err(STALE.into()), "a blame older than the cancel");
+    assert!(g.blame("main", 11, &id, &sha, "a.txt", 1).unwrap().is_some());
 }

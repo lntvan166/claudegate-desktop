@@ -8,9 +8,10 @@
 use super::parse::is_sha;
 
 /// `git blame` for the one 1-based `line` of `path` at `rev`. `rev` is a commit id the caller
-/// validated; `--` keeps the path from reading as an option or a revision.
+/// validated; `--` keeps the path from reading as an option or a revision. `--no-textconv`: the
+/// diff shows the raw blob, so line numbers must count the raw blob's lines, not a converted text.
 pub fn blame_args(rev: &str, path: &str, line: u32) -> Vec<String> {
-    ["blame", "--porcelain", &format!("-L{line},{line}"), rev, "--", path].map(String::from).to_vec()
+    ["blame", "--porcelain", "--no-textconv", &format!("-L{line},{line}"), rev, "--", path].map(String::from).to_vec()
 }
 
 /// The commit that last changed a line.

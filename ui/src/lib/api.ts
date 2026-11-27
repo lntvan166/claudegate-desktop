@@ -242,6 +242,8 @@ export interface Api {
   gitlogRevFile(repo: string, rev: string, path: string): Promise<FileView>;
   /** Who last changed the 1-based `line` of `path` as of commit `rev`; null when git has no answer. A newer call supersedes this one. */
   gitlogBlame(queryId: number, repo: string, rev: string, path: string, line: number): Promise<BlameLine | null>;
+  /** Drops the blame in flight (kills its git). */
+  gitlogBlameCancel(queryId: number): Promise<void>;
   /** Blame on the cursor line, on or off. */
   gitlogBlameSetting(on: boolean): Promise<GitLogConfig>;
 }
@@ -304,6 +306,7 @@ const tauriApi: Api = {
   gitlogCombinedLeft: (queryId, repo, last, path, without) => invoke<CombinedLeft>("gitlog_combined_left", { queryId, repo, last, path, without }),
   gitlogRevFile: (repo, rev, path) => invoke<FileView>("gitlog_rev_file", { repo, rev, path }),
   gitlogBlame: (queryId, repo, rev, path, line) => invoke<BlameLine | null>("gitlog_blame", { queryId, repo, rev, path, line }),
+  gitlogBlameCancel: (queryId) => invoke<void>("gitlog_blame_cancel", { queryId }),
   gitlogBlameSetting: (on) => invoke<GitLogConfig>("gitlog_blame_setting", { on }),
 };
 
@@ -394,4 +397,5 @@ export const gitlogCombinedLeft = async (queryId: number, repo: string, last: st
 export const gitlogRevFile = async (repo: string, rev: string, path: string) => (await api()).gitlogRevFile(repo, rev, path);
 export const gitlogBlame = async (queryId: number, repo: string, rev: string, path: string, line: number) =>
   (await api()).gitlogBlame(queryId, repo, rev, path, line);
+export const gitlogBlameCancel = async (queryId: number) => (await api()).gitlogBlameCancel(queryId);
 export const gitlogBlameSetting = async (on: boolean) => (await api()).gitlogBlameSetting(on);

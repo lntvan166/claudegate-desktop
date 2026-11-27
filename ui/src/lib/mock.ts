@@ -816,6 +816,7 @@ const gitlogMock: Pick<
   | "gitlogCombinedLeft"
   | "gitlogRevFile"
   | "gitlogBlame"
+  | "gitlogBlameCancel"
   | "gitlogBlameSetting"
 > = {
   gitlogRepos: async () => {
@@ -966,6 +967,7 @@ const gitlogMock: Pick<
     const time = Math.floor(Date.now() / 1000) - (k + 1) * 3 * 86400 - line * 60;
     return { sha: `${k + 1}${rev.slice(1, 39)}${k}`.padEnd(40, "0").slice(0, 40), author, email, time, summary };
   },
+  gitlogBlameCancel: async () => {},
   gitlogBlameSetting: (on) => {
     gitLog = { ...gitLog, blame: on };
     return gl();

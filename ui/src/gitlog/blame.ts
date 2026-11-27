@@ -19,11 +19,13 @@ export type BlameSides = { original: BlameRef | null; modified: BlameRef | null 
 
 /** `subject, author (3d ago)`, the subject cut to 50 characters. */
 export function blameText(b: BlameLine, now: number): string {
-  const subject = b.summary.length > 50 ? `${b.summary.slice(0, 49)}…` : b.summary;
+  // By code point: a cut inside a surrogate pair would leave half an emoji.
+  const chars = Array.from(b.summary);
+  const subject = chars.length > 50 ? `${chars.slice(0, 49).join("")}…` : b.summary;
   return `${subject}, ${b.author} (${commitAge(b.time, now)})`;
 }
 
-const MD_SPECIAL = /[\\`*_{}[\]()#+\-.!|<>]/g;
+const MD_SPECIAL = /[\\`*_{}[\]()#+\-.!|<>:~]/g;
 
 /** Backslash-escapes every character Markdown reads as syntax, so a name or subject stays text. */
 export function escapeMarkdown(s: string): string {

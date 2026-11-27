@@ -1076,6 +1076,12 @@ impl GitLog {
         }
     }
 
+    /// Drops the window's in-flight blame: its git is killed, and a blame older than `query_id`
+    /// arriving late is stale.
+    pub fn blame_cancel(&self, window: &str, query_id: u64) {
+        self.runner.set_current(&channel(window, BLAME_CHANNEL), query_id);
+    }
+
     /// The object `spec` names. No such object: missing. The size first, so a huge blob is never read.
     fn blob_view(&self, cwd: &Path, spec: &str) -> Result<FileView, String> {
         let size = match self.runner.text(None, cwd, &["cat-file", "-s", spec]) {
@@ -1280,6 +1286,14 @@ pub async fn gitlog_blame(
     let gl = state.inner().0.clone();
     let label = window.label().to_string();
     crate::commands::blocking(move || gl.blame(&label, query_id, &repo, &rev, &path, line)).await?
+}
+
+/// Cancels the window's blame in flight (the cursor left the line, blame was switched off).
+#[tauri::command]
+pub async fn gitlog_blame_cancel(query_id: u64, window: tauri::Window, state: tauri::State<'_, GitLogState>) -> Result<(), String> {
+    let gl = state.inner().0.clone();
+    let label = window.label().to_string();
+    crate::commands::blocking(move || gl.blame_cancel(&label, query_id)).await
 }
 
 #[tauri::command]
