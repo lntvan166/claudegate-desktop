@@ -4,11 +4,14 @@
   import Splitter from "../components/Splitter.svelte";
   import {
     gitlogChanges,
+    gitlogCombined,
+    gitlogCombinedLeft,
     gitlogConfig,
     gitlogFile,
     gitlogLastFilter,
     gitlogPane,
     gitlogRepos,
+    gitlogRevFile,
     gitlogWorktreeFile,
     openInEditor,
     setEditor,
@@ -17,6 +20,20 @@
   import type { IconTheme } from "../lib/icons";
   import type { Row } from "../lib/rows";
   import Changes from "./Changes.svelte";
+  import CombinedChanges from "./CombinedChanges.svelte";
+  import {
+    CombinedLoad,
+    combinedFirst,
+    combinedPlan,
+    combinedTitle,
+    isCombined,
+    itemsOf,
+    orderRepos,
+    EMPTY_COMBINED,
+    type CombinedFile,
+    type CombinedState,
+    type FallbackReason,
+  } from "./combined";
   import {
     CHANGES_DEBOUNCE_MS,
     ChangesCache,
@@ -35,10 +52,10 @@
   } from "./changes";
   import Filters from "./Filters.svelte";
   import LogList from "./LogList.svelte";
-  import { EMPTY_SELECTION, type Selection } from "./selection";
+  import { EMPTY_SELECTION, single, type Selection } from "./selection";
   import RepoPane from "./RepoPane.svelte";
   import { reposForLaunch } from "../lib/launch";
-  import { DEFAULT_FILTER, debounce, parseFilter, rowKey, type FilterState, type RowView } from "./log";
+  import { DEFAULT_FILTER, debounce, isStale, parseFilter, rowKey, type FilterState, type RowView } from "./log";
   import {
     DEFAULT_GITLOG_CONFIG,
     PANE_DEFAULTS,
@@ -181,14 +198,168 @@
     changesFor && files ? changesTitle(repoName(changesFor.repo), changesFor.sha, files.length) : "Changes",
   );
 
-  const selKey = $derived(selected ? rowKey(selected) : null);
+  // ---- Combined Changes: two or more picked commits -----------------------------------------
+  // The Changes column then shows each file once across the selection. With one commit nothing
+  // below runs and the single-commit path above is exactly what it was.
+  const combinedOn = $derived(isCombined(picked));
+  let combinedState = $state<CombinedState>(EMPTY_COMBINED);
+  const combinedLoad = new CombinedLoad(
+    (id, items) => gitlogCombined(id, items),
+    (s) => onCombined(s),
+  );
+  const fetchCombined = leadingDebounce(() => {
+    if (isCombined(picked)) void combinedLoad.start(itemsOf(picked));
+  }, CHANGES_DEBOUNCE_MS);
+  let combinedTree: CombinedChanges | undefined = $state();
+  /** The combined file whose diff is open. */
+  let cActive = $state<{ repo: string; file: CombinedFile } | null>(null);
+  /** Why the open file's left side fell back to one diff across the selection (shown by Task 6). */
+  let cFallback = $state<FallbackReason | null>(null);
+  /** Enter was pressed before the answer landed: open the first file when it does. */
+  let enterWanted = false;
+  const combinedRepos = $derived(combinedState.view ? orderRepos(combinedState.view.repos, (repos ?? []).map((r) => r.id)) : []);
+  const combinedHeading = $derived(combinedTitle(picked.length, new Set(picked.map((r) => r.repo)).size));
+  const repoColor = (id: string) => repos?.find((r) => r.id === id)?.color ?? 0;
+
+  // Declared before the commit effect below: when the selection goes back to one commit, the
+  // combined diff is cleared first, and then the single commit's files may open theirs.
+  const pickKey = $derived(combinedOn ? picked.map(rowKey).join("\n") : "");
+  let lastPick = "";
+  $effect(() => {
+    const k = pickKey;
+    if (k === lastPick) return;
+    lastPick = k;
+    untrack(() => {
+      enterWanted = false;
+      if (!k) {
+        fetchCombined.drop();
+        combinedLoad.clear();
+        if (cActive) {
+          cActive = null;
+          clearDiff();
+        }
+        cFallback = null;
+        return;
+      }
+      combinedState = { ...combinedState, loading: true, error: null };
+      fetchCombined();
+    });
+  });
+
+  function onCombined(s: CombinedState) {
+    combinedState = s;
+    if (s.loading) return;
+    if (s.error) {
+      enterWanted = false;
+      if (cActive) {
+        cActive = null;
+        clearDiff();
+      }
+      return;
+    }
+    if (!s.view) return;
+    if (enterWanted) {
+      enterWanted = false;
+      openFirstCombined();
+      return;
+    }
+    const cur = cActive;
+    if (!cur) return;
+    // The open file follows the selection: still there and unchanged keeps its diff, changed re-reads it, gone closes it.
+    const again = orderRepos(s.view.repos, (repos ?? []).map((r) => r.id))
+      .find((r) => r.repo === cur.repo)
+      ?.files.find((f) => f.path === cur.file.path);
+    if (!again) {
+      cActive = null;
+      clearDiff();
+    } else if (JSON.stringify(again) !== JSON.stringify(cur.file)) void showCombinedFile(cur.repo, again);
+  }
+
+  const asChanged = (f: CombinedFile): ChangedFile => ({ path: f.path, status: f.status, from: f.from, added: null, removed: null });
+
+  async function showCombinedFile(repo: string, f: CombinedFile) {
+    const g = fileGate.next();
+    cActive = { repo, file: f };
+    cFallback = null;
+    shownPane = null;
+    diffLoading = true;
+    diffError = null;
+    openError = null;
+    const qid = combinedLoad.id;
+    let fallback: FallbackReason | null = null;
+    const plan = combinedPlan(f);
+    const readRev = (): Promise<FileView> =>
+      f.beforeRef === null ? Promise.resolve<FileView>({ kind: "missing" }) : gitlogRevFile(repo, f.beforeRef, f.beforePath);
+    const left = async (): Promise<FileView> => {
+      if (plan.left === "missing") return { kind: "missing" };
+      if (plan.left === "rev") return readRev();
+      const ans = await gitlogCombinedLeft(qid, repo, f.last, f.path, [...f.shas].reverse());
+      if (ans.kind === "text") return { kind: "text", value: ans.value };
+      // The backend could not take the selection apart after all: one diff across it.
+      fallback = ans.value;
+      return readRev();
+    };
+    try {
+      const [before, after] = await Promise.all([
+        left(),
+        plan.right === "missing" ? Promise.resolve<FileView>({ kind: "missing" }) : gitlogRevFile(repo, f.last, f.path),
+      ]);
+      if (!fileGate.isCurrent(g)) return;
+      cFallback = fallback;
+      shownPane = diffPane(f.path, before, after);
+      diffLoading = false;
+    } catch (e) {
+      if (!fileGate.isCurrent(g)) return;
+      // A newer selection superseded the query this read belongs to: its answer reopens the file.
+      if (isStale(e) && combinedLoad.id !== qid) return;
+      diffError = String(e);
+      diffLoading = false;
+    }
+  }
+
+  function openFirstCombined() {
+    if (!cActive) {
+      const first = combinedFirst(combinedRepos);
+      if (first) void showCombinedFile(first.repo, first.file);
+    }
+    void tick().then(() => combinedTree?.focus());
+  }
+
+  /** Enter with several commits picked: the first file of the combined tree, the keyboard in the tree. */
+  function enterCombined() {
+    if (combinedState.view && !combinedState.loading) return openFirstCombined();
+    enterWanted = true;
+    if (fetchCombined.hasPending()) fetchCombined.flush();
+    else if (!combinedState.loading) void combinedLoad.start(itemsOf(picked));
+  }
+
+  /** Back to the focused commit alone. */
+  function clearSelection() {
+    const r = selected;
+    if (!r) return;
+    selection = single(rowKey(r));
+    picked = [r];
+    logList?.focusList();
+  }
+
+  // The single commit's path. A combined selection pauses it; going back to one commit starts it again.
+  const selKey = $derived(combinedOn ? "\u0001combined" : selected ? rowKey(selected) : null);
   let lastKey: string | null = null;
   $effect(() => {
     const k = selKey;
     if (k === lastKey) return;
     lastKey = k;
-    untrack(() => commitChanged(selected));
+    untrack(() => (combinedOn ? leaveSingle() : commitChanged(selected)));
   });
+
+  function leaveSingle() {
+    commitGate.next();
+    fetchChanges.drop();
+    focusTreeWhenReady = false;
+    inflightFor = null;
+    filesLoading = false;
+    clearDiff();
+  }
 
   function clearDiff() {
     fileGate.next();
@@ -288,6 +459,7 @@
 
   /** Enter on a commit: its changes, with the keyboard in the tree on the first file. */
   function openCommit(row: RowView) {
+    if (combinedOn) return enterCombined();
     const key = rowKey(row);
     const loaded = !!changesFor && !!files && rowKey(changesFor) === key;
     const act = enterAction({ loaded, inflight: inflightFor === key, pending: fetchChanges.hasPending() });
@@ -312,7 +484,7 @@
   }
 
   /** The row the shared diff header draws: a commit's file, never a review row. */
-  const diffRow = $derived<Row | null>(
+  const singleRow = $derived<Row | null>(
     changesFor && activeFile
       ? {
           key: `${changesFor.sha}:${activeFile.path}`,
@@ -328,7 +500,45 @@
         }
       : null,
   );
-  const external = $derived.by(() => {
+  const combinedRow = $derived<Row | null>(
+    cActive
+      ? {
+          key: `${cActive.file.last}:${cActive.file.path}`,
+          path: cActive.file.path,
+          rel: cActive.file.path,
+          scope: cActive.repo,
+          added: 0,
+          removed: 0,
+          newFile: cActive.file.status === "added",
+          decidedAt: null,
+          waiting: false,
+          rejectOutcome: null,
+        }
+      : null,
+  );
+  const diffRow = $derived(combinedOn ? combinedRow : singleRow);
+  const combinedExternal = $derived.by(() => {
+    const pane = shownPane;
+    const f = cActive?.file;
+    return {
+      payload: pane?.kind === "diff" ? pane.payload : null,
+      loading: diffLoading,
+      error: diffError,
+      noStats: true,
+      notice: !f
+        ? { title: "Select a file to see its diff", body: "Click a file in Changes, or press Enter on it." }
+        : pane && pane.kind !== "diff"
+          ? paneMessage(pane)
+          : null,
+      tag:
+        f?.status === "deleted"
+          ? { text: "Deleted", tone: "deleted" as const }
+          : f?.status === "renamed"
+            ? { text: statusText(asChanged(f)), tone: "new" as const }
+            : null,
+    };
+  });
+  const singleExternal = $derived.by(() => {
     const pane = shownPane;
     const f = activeFile;
     const empty = {
@@ -349,15 +559,20 @@
     };
   });
 
+  const external = $derived(combinedOn ? combinedExternal : singleExternal);
+
   /** "Open in editor": the working-tree file, never written to. It may be gone since the commit. */
   async function openInWorktree(line: number, col: number, template: string | null = null): Promise<boolean> {
     const r = changesFor;
     const f = activeFile;
-    if (!r || !f) return false;
+    const c = cActive;
+    const target = combinedOn ? (c ? { repo: c.repo, path: c.file.path, source: undefined } : null) : r && f ? { repo: r.repo, path: f.path, source: r.source } : null;
+    if (!target) return false;
     openError = null;
     try {
-      // The commit's source picks the checkout it lives in (a worktree-only commit opens there).
-      const abs = await gitlogWorktreeFile(r.repo, f.path, r.source);
+      // The commit's source picks the checkout it lives in (a worktree-only commit opens there);
+      // a combined file opens in the repository's main checkout.
+      const abs = await gitlogWorktreeFile(target.repo, target.path, target.source);
       await openInEditor(abs, line, col, template);
       onnotice(openedText(abs, line, template ?? config.editor));
       return true;
@@ -529,17 +744,36 @@
     </div>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="top" style:height={topH > 0 ? `${topH}px` : `${TOP_DEFAULT * 100}%`} onkeydown={leaveBottom}>
-      <Changes
-        bind:this={changesTree}
-        title={changesHeading}
-        {files}
-        loading={filesLoading}
-        error={filesError}
-        activePath={activeFile?.path ?? null}
-        {theme}
-        onopenfile={(f) => !filesLoading && void showFile(f)}
-        onescape={() => logList?.focusList()}
-      />
+      {#if combinedOn}
+        <CombinedChanges
+          bind:this={combinedTree}
+          title={combinedHeading}
+          repos={combinedRepos}
+          repoName={repoName}
+          {repoColor}
+          loading={combinedState.loading}
+          error={combinedState.error}
+          active={cActive ? { repo: cActive.repo, path: cActive.file.path } : null}
+          {theme}
+          loadingText="Reading {picked.length} commits…"
+          onopenfile={(repo, f) => void showCombinedFile(repo, f)}
+          onclear={clearSelection}
+          onescape={() => logList?.focusList()}
+          onhistory={() => {}}
+        />
+      {:else}
+        <Changes
+          bind:this={changesTree}
+          title={changesHeading}
+          {files}
+          loading={filesLoading}
+          error={filesError}
+          activePath={activeFile?.path ?? null}
+          {theme}
+          onopenfile={(f) => !filesLoading && void showFile(f)}
+          onescape={() => logList?.focusList()}
+        />
+      {/if}
       <div class="split split-changes">
         <Splitter
           label="Resize changes"
@@ -557,7 +791,7 @@
           bind:this={diffView}
           row={diffRow}
           kind="pending"
-          root={changesFor?.repo ?? ""}
+          root={combinedOn ? (cActive?.repo ?? "") : (changesFor?.repo ?? "")}
           version={0}
           {theme}
           {config}

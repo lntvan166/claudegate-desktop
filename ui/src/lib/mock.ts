@@ -21,6 +21,7 @@ import type {
 } from "./api";
 import type { FilterView, PageView, RowView } from "../gitlog/log";
 import type { ChangedFile, FileView } from "../gitlog/changes";
+import type { CombinedFile, CombinedLeft, CombinedRepo, CombinedView } from "../gitlog/combined";
 import { DEFAULT_GITLOG_CONFIG, SCAN_DEPTH_MAX, type GitLogConfig, type RepoView } from "../gitlog/repos";
 import { DEFAULT_PROTECTED, globMatcher, type ExcludeOwner, type Resolved } from "./settings";
 
@@ -688,6 +689,81 @@ const GL_CHANGES: ChangedFile[][] = [
 ];
 const glFiles = (sha: string) => GL_CHANGES[parseInt(sha.slice(-4), 16) % GL_CHANGES.length];
 
+// Combined Changes: a fixture built from whatever commits are picked. The first repository gets a
+// file that falls back on a conflict (it carries an unselected commit), a binary, a too-large one,
+// one that needs the merge path and a file with no net change; the second gets a rename, an added
+// and a deleted file; a repository named legacy-billing fails. Every sha is the picked one or a
+// made-up unselected one, so the pane's counts and tooltips read like the real thing.
+const UNSEL_A = "9c4e1a8".padEnd(40, "0");
+const UNSEL_B = "1b2c3d4".padEnd(40, "0");
+const BEFORE_REF = "ba5e".repeat(10);
+let glCombinedNewest = 0;
+function mockCombinedRepo(repo: string, cs: string[], gi: number): CombinedRepo {
+  const last = cs[cs.length - 1];
+  const first = cs[0];
+  const f = (path: string, extra: Partial<CombinedFile> = {}): CombinedFile => ({
+    path,
+    from: null,
+    status: "modified",
+    shas: cs,
+    last,
+    beforeRef: BEFORE_REF,
+    beforePath: path,
+    included: [],
+    mode: "fast",
+    reason: null,
+    ...extra,
+  });
+  if (repo.includes("legacy-billing")) {
+    return { repo, commits: cs, files: [], noNetChange: [], subjects: {}, error: "fatal: detected dubious ownership in repository" };
+  }
+  if (gi % 2 === 0) {
+    return {
+      repo,
+      commits: cs,
+      files: [
+        f("internal/refunds/refund.go"),
+        f("internal/refunds/rules.go", { mode: "merge", included: [UNSEL_B] }),
+        f("web/src/components/Cart.ts", { shas: [first], mode: "fallback", reason: "conflict", included: [UNSEL_A] }),
+        f("web/public/logo.png", { mode: "fallback", reason: "binary" }),
+        f("db/seed.sql", { shas: [last], mode: "fallback", reason: "tooLarge" }),
+        f("README.md", { shas: [first] }),
+      ],
+      noNetChange: ["internal/refunds/debug.go"],
+      subjects: { [UNSEL_A]: "header: wider title", [UNSEL_B]: "fix: keep the retry count" },
+      error: null,
+    };
+  }
+  return {
+    repo,
+    commits: cs,
+    files: [
+      f("web/src/client.ts", { status: "renamed", from: "web/src/api.ts", beforePath: "web/src/api.ts" }),
+      f("web/src/components/Totals.ts", { status: "added", shas: [first], last: first, beforeRef: null }),
+      f("docs/old-notes.md", { status: "deleted", shas: [last] }),
+      f("package.json"),
+    ],
+    noNetChange: ["web/src/debug.ts", "web/src/nav.ts"],
+    subjects: {},
+    error: null,
+  };
+}
+async function mockCombined(queryId: number, items: { repo: string; sha: string }[]): Promise<CombinedView> {
+  const distinct = new Set(items.map((i) => `${i.repo}\u0000${i.sha}`));
+  if (distinct.size > 100) throw "Combined Changes shows up to 100 commits";
+  await new Promise((r) => setTimeout(r, 150));
+  if (queryId < glCombinedNewest) throw "stale query";
+  glCombinedNewest = queryId;
+  const order: string[] = [];
+  const by = new Map<string, string[]>();
+  for (const it of items) {
+    if (!by.has(it.repo)) (by.set(it.repo, []), order.push(it.repo));
+    by.get(it.repo)!.push(it.sha);
+  }
+  // The list is newest first; a repository's commits are reported oldest first.
+  return { queryId, repos: order.map((repo, gi) => mockCombinedRepo(repo, by.get(repo)!.slice().reverse(), gi)) };
+}
+
 const gitlogMock: Pick<
   Api,
   | "gitlogRepos"
@@ -711,6 +787,9 @@ const gitlogMock: Pick<
   | "gitlogFile"
   | "gitlogWorktreeFile"
   | "gitlogOpenRemote"
+  | "gitlogCombined"
+  | "gitlogCombinedLeft"
+  | "gitlogRevFile"
 > = {
   gitlogRepos: async () => {
     await new Promise((r) => setTimeout(r, 300));
@@ -815,6 +894,21 @@ const gitlogMock: Pick<
     if (repo.includes("legacy-billing")) return false;
     console.info("open", `https://github.com/acme/${repo.split("/").slice(-2, -1)[0]}/commit/${sha}`);
     return true;
+  },
+  gitlogCombined: mockCombined,
+  gitlogCombinedLeft: async (queryId, _repo, _last, path): Promise<CombinedLeft> => {
+    await new Promise((r) => setTimeout(r, 40));
+    if (queryId < glCombinedNewest) throw "stale query";
+    const { before } = sample(path, false);
+    return before === null ? { kind: "text", value: "" } : { kind: "text", value: before };
+  },
+  gitlogRevFile: async (_repo, rev, path): Promise<FileView> => {
+    await new Promise((r) => setTimeout(r, 40));
+    if (path.endsWith(".png")) return { kind: "binary" };
+    if (path.endsWith(".sql")) return { kind: "tooLarge", value: 3_400_000 };
+    const { before, after } = sample(path, false);
+    const text = rev === BEFORE_REF ? before : after;
+    return text === null ? { kind: "missing" } : { kind: "text", value: text };
   },
 };
 

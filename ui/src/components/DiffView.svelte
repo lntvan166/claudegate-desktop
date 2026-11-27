@@ -84,6 +84,8 @@
       notice: { title: string; body: string } | null;
       /** A chip beside the path: "Deleted", "Renamed from a.ts". */
       tag?: { text: string; tone: "new" | "deleted" } | null;
+      /** No +/- counts (a combined file's counts are not known before the diff is drawn). */
+      noStats?: boolean;
     } | null;
   } = $props();
 
@@ -531,6 +533,8 @@
       {#if row.waiting && !external}
         <!-- No change on disk yet: "+0 −0" would read as an empty edit, so say what it is. -->
         <span class="tag waiting" title="Captured before Claude wrote it; the write hasn't landed yet. It can be decided once it does.">Not written yet</span>
+        <span class="diff-stats-gap"></span>
+      {:else if external?.noStats}
         <span class="diff-stats-gap"></span>
       {:else}
         <span class="diff-stats num">

@@ -17,6 +17,7 @@ import { AUDIT_EVENT } from "./audit";
 import type { GitLogConfig, RepoView } from "../gitlog/repos";
 import type { FilterView, PageView } from "../gitlog/log";
 import type { ChangedFile, FileSide, FileView } from "../gitlog/changes";
+import type { CombinedLeft, CombinedView } from "../gitlog/combined";
 
 export type { AuditView, CaptureView, HookReplacedView, HookView, InstallView, UpdateView };
 export type { GitLogConfig, RepoView };
@@ -232,6 +233,12 @@ export interface Api {
   gitlogWorktreeFile(repo: string, path: string, source?: string): Promise<string>;
   /** Opens the commit's page on its remote in the system browser; false when the remote has no link. */
   gitlogOpenRemote(repo: string, sha: string): Promise<boolean>;
+  /** Combined Changes (gitlog_combined.rs): the selected commits, each file once. A refused request supersedes nothing. */
+  gitlogCombined(queryId: number, items: { repo: string; sha: string }[]): Promise<CombinedView>;
+  /** A file's left side without the selected commits (`without`, newest first), for the query `queryId`. */
+  gitlogCombinedLeft(queryId: number, repo: string, last: string, path: string, without: string[]): Promise<CombinedLeft>;
+  /** The file `path` at commit `rev`. */
+  gitlogRevFile(repo: string, rev: string, path: string): Promise<FileView>;
 }
 
 const tauriApi: Api = {
@@ -288,6 +295,9 @@ const tauriApi: Api = {
   gitlogFile: (repo, sha, path, side, from) => invoke<FileView>("gitlog_file", { repo, sha, path, side, from: from ?? null }),
   gitlogWorktreeFile: (repo, path, source) => invoke<string>("gitlog_worktree_file", { repo, path, source }),
   gitlogOpenRemote: (repo, sha) => invoke<boolean>("gitlog_open_remote", { repo, sha }),
+  gitlogCombined: (queryId, items) => invoke<CombinedView>("gitlog_combined", { queryId, items }),
+  gitlogCombinedLeft: (queryId, repo, last, path, without) => invoke<CombinedLeft>("gitlog_combined_left", { queryId, repo, last, path, without }),
+  gitlogRevFile: (repo, rev, path) => invoke<FileView>("gitlog_rev_file", { repo, rev, path }),
 };
 
 let chosen: Promise<Api> | undefined;
@@ -371,3 +381,7 @@ export const gitlogFile = async (repo: string, sha: string, path: string, side: 
 export const gitlogWorktreeFile = async (repo: string, path: string, source?: string) =>
   (await api()).gitlogWorktreeFile(repo, path, source);
 export const gitlogOpenRemote = async (repo: string, sha: string) => (await api()).gitlogOpenRemote(repo, sha);
+export const gitlogCombined = async (queryId: number, items: { repo: string; sha: string }[]) => (await api()).gitlogCombined(queryId, items);
+export const gitlogCombinedLeft = async (queryId: number, repo: string, last: string, path: string, without: string[]) =>
+  (await api()).gitlogCombinedLeft(queryId, repo, last, path, without);
+export const gitlogRevFile = async (repo: string, rev: string, path: string) => (await api()).gitlogRevFile(repo, rev, path);

@@ -68,11 +68,11 @@ export function changeTree(files: ChangedFile[]): ChangeNode[] {
   return buildTree(files.map((file) => ({ rel: file.path, file })));
 }
 
-export type VisibleNode = { node: ChangeNode; depth: number };
+export type VisibleNode<T = ChangeItem> = { node: TreeNode<T>; depth: number };
 
 /** The rows on screen, in order, with the folders in `collapsed` (by `rel`) closed. */
-export function visibleNodes(nodes: ChangeNode[], collapsed: ReadonlySet<string>, depth = 0): VisibleNode[] {
-  const out: VisibleNode[] = [];
+export function visibleNodes<T = ChangeItem>(nodes: TreeNode<T>[], collapsed: ReadonlySet<string>, depth = 0): VisibleNode<T>[] {
+  const out: VisibleNode<T>[] = [];
   for (const node of nodes) {
     out.push({ node, depth });
     if (node.kind === "folder" && !collapsed.has(node.rel)) out.push(...visibleNodes(node.children ?? [], collapsed, depth + 1));
