@@ -17,7 +17,6 @@
     debounce,
     footerText,
     indexOfKey,
-    keepSelection,
     navigate,
     nearEnd,
     rowKey,
@@ -31,6 +30,16 @@
     type RowView,
   } from "./log";
   import { colorVar, type RepoView } from "./repos";
+  import {
+    EMPTY_SELECTION,
+    LIMIT_NOTICE,
+    applyGesture,
+    clickGesture,
+    keepListed,
+    pickedRows,
+    type Gesture,
+    type Selection,
+  } from "./selection";
 
   // The merged commit list: one virtualised column of rows across the ticked repositories, its
   // keyboard, its context menu and Load more. The query it runs is a function of the repositories
@@ -40,7 +49,8 @@
     queryRepos,
     filter,
     active,
-    selectedKey = $bindable(null),
+    selection = $bindable(EMPTY_SELECTION),
+    multi = true,
     onopen,
     onselect,
     onfocussearch,
@@ -53,10 +63,13 @@
     queryRepos: string[];
     filter: FilterState;
     active: boolean;
-    selectedKey?: string | null;
+    /** The picked commits: `focus` is the row the keyboard is on (it drives the single-commit Changes). */
+    selection?: Selection;
+    /** Ctrl/Shift pick several; off, every click is a plain click (File History). */
+    multi?: boolean;
     /** Enter or a double-click: open the commit's first changed file (Task 7 wires this). */
     onopen: (row: RowView) => void;
-    onselect: (row: RowView | null) => void;
+    onselect: (focus: RowView | null, picked: RowView[]) => void;
     /** `/`: put the cursor in the search box. */
     onfocussearch: () => void;
     onnotice: (text: string) => void;
@@ -123,19 +136,40 @@
   const rows = $derived(q.rows);
   const range = $derived(visibleRange(scrollTop, viewH, ROW_H, rows.length));
   const slice = $derived(rows.slice(range.start, range.end));
-  const selIndex = $derived(indexOfKey(rows, selectedKey));
+  const selIndex = $derived(indexOfKey(rows, selection.focus));
+  const pickedKeys = $derived(new Set(selection.keys));
+  const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
   const pageRows = $derived(Math.max(1, Math.floor(viewH / ROW_H) - 1));
 
-  // A new list keeps the selection while the commit is still in it.
+  // A new list keeps the picked commits that are still in it.
   $effect(() => {
-    const kept = keepSelection(rows, untrack(() => selectedKey));
-    if (kept !== untrack(() => selectedKey)) select(null, false);
+    const cur = untrack(() => selection);
+    const kept = keepListed(cur, rows.map(rowKey));
+    const same = kept.focus === cur.focus && kept.anchor === cur.anchor && kept.keys.length === cur.keys.length;
+    if (!same) commit(kept, false);
   });
 
+  /** Sets the selection and tells the parent: the focused row and every picked row. */
+  function commit(next: Selection, scroll = true) {
+    selection = next;
+    const i = indexOfKey(rows, next.focus);
+    onselect(i >= 0 ? rows[i] : null, pickedRows(rows, next));
+    if (i >= 0 && scroll) revealIndex(i);
+  }
+  /** A gesture on the list; a pick beyond the limit changes nothing and says why. */
+  function gesture(g: Gesture, scroll = true) {
+    const { next, overLimit } = applyGesture(selection, g, rows.map(rowKey));
+    if (overLimit) return onnotice(LIMIT_NOTICE);
+    commit(next, scroll);
+  }
+  /** Plain selection of one row (or none), as a click or Esc used to do. */
   function select(row: RowView | null, scroll = true) {
-    selectedKey = row ? rowKey(row) : null;
-    onselect(row);
-    if (row && scroll) revealIndex(indexOfKey(rows, selectedKey));
+    if (row) gesture({ kind: "click", key: rowKey(row), ctrl: false, shift: false }, scroll);
+    else commit(EMPTY_SELECTION, scroll);
+  }
+  function onrowclick(e: MouseEvent, row: RowView) {
+    gesture(clickGesture(e, rowKey(row), isMac, multi), false);
+    scroller?.focus();
   }
   function revealIndex(i: number) {
     if (!scroller || i < 0) return;
@@ -179,7 +213,7 @@
     if (NAV_KEYS.includes(e.key)) {
       e.preventDefault();
       const i = navigate(rows.length, selIndex, e.key as NavKey, pageRows);
-      if (i >= 0) select(rows[i]);
+      if (i >= 0) gesture({ kind: "arrow", key: rowKey(rows[i]), shift: e.shiftKey && multi });
     } else if (e.key === "Enter") {
       e.preventDefault();
       const r = rows[selIndex];
@@ -216,7 +250,7 @@
   ];
   function oncontext(e: MouseEvent, row: RowView) {
     e.preventDefault();
-    select(row, false);
+    gesture({ kind: "context", key: rowKey(row) }, false);
     menu = { row, x: e.clientX, y: e.clientY };
   }
   async function pick(id: string) {
@@ -278,6 +312,7 @@
     tabindex="0"
     data-loglist
     role="listbox"
+    aria-multiselectable="true"
     aria-label="Commits, newest first"
     aria-busy={q.loading}
     aria-activedescendant={selIndex >= 0 ? `c-${selIndex}` : undefined}
@@ -307,13 +342,14 @@
             <div
               id="c-{i}"
               class="row"
-              class:selected={i === selIndex}
+              class:selected={pickedKeys.has(rowKey(r))}
+              class:focused={i === selIndex}
               role="option"
-              aria-selected={i === selIndex}
+              aria-selected={pickedKeys.has(rowKey(r))}
               tabindex="-1"
               style:--c={colorVar(repo?.color ?? 0)}
               title={`${r.subject}\n${r.author} · ${commitDate(r.time)}`}
-              onclick={() => (select(r, false), scroller?.focus())}
+              onclick={(e) => onrowclick(e, r)}
               ondblclick={() => onopen(r)}
               oncontextmenu={(e) => oncontext(e, r)}
             >
@@ -388,9 +424,12 @@
     background: var(--hover);
   }
   .row.selected {
+    background: color-mix(in srgb, var(--active) 60%, transparent);
+  }
+  .row.selected.focused {
     background: var(--active);
   }
-  .scroller:focus-visible .row.selected {
+  .scroller:focus-visible .row.focused {
     box-shadow: inset 2px 0 0 var(--focus-ring);
   }
   .chip {

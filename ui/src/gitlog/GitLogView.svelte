@@ -35,6 +35,7 @@
   } from "./changes";
   import Filters from "./Filters.svelte";
   import LogList from "./LogList.svelte";
+  import { EMPTY_SELECTION, type Selection } from "./selection";
   import RepoPane from "./RepoPane.svelte";
   import { reposForLaunch } from "../lib/launch";
   import { DEFAULT_FILTER, debounce, parseFilter, rowKey, type FilterState, type RowView } from "./log";
@@ -99,6 +100,8 @@
     cfg = { ...cfg, ticked: ids };
     // Only the selection is cleared: it may point at a repo no longer shown. The filters stay.
     selected = null;
+    picked = [];
+    selection = EMPTY_SELECTION;
     return true;
   }
 
@@ -137,6 +140,9 @@
   let logList: LogList | undefined = $state();
   let logBusy = $state(false);
   let selected = $state<RowView | null>(null);
+  /** Every picked commit, in list order (Combined Changes, Task 5). `selected` is the focused one. */
+  let picked = $state<RowView[]>([]);
+  let selection = $state<Selection>(EMPTY_SELECTION);
   const saveFilter = debounce(() => {
     lastStored = JSON.stringify(filter);
     void gitlogLastFilter($state.snapshot(filter)).catch(() => {});
@@ -513,7 +519,8 @@
           {filter}
           {active}
           onopen={openCommit}
-          onselect={(r) => (selected = r)}
+          bind:selection
+          onselect={(r, p) => ((selected = r), (picked = p))}
           onfocussearch={() => filters?.focusSearch()}
           onloading={(b) => (logBusy = b)}
           {onnotice}
