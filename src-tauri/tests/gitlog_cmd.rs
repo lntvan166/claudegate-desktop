@@ -486,11 +486,10 @@ fn history_pages_with_skip() {
     assert!(!p1.done);
     let p2 = g.page("main", 1, &ids, &FilterView::default(), true, Some(&h)).unwrap();
     assert_eq!(p2.rows.len(), 2);
-    let p2 = if p2.done { p2 } else {
-        let p3 = g.page("main", 1, &ids, &FilterView::default(), true, Some(&h)).unwrap();
-        assert!(p3.rows.is_empty() && p3.done);
-        p2
-    };
+    assert!(!p2.done, "a full fetch cannot know it was the last, as in the log");
+    let p3 = g.page("main", 1, &ids, &FilterView::default(), true, Some(&h)).unwrap();
+    assert!(p3.rows.is_empty());
+    assert!(p3.done);
     let mut all = files(&p1);
     all.extend(files(&p2));
     assert_eq!(all, four(), "no row repeats, and each keeps its file across pages");
@@ -604,4 +603,114 @@ fn history_pages_under_log_follow_config() {
         assert!(all.len() < 20);
     }
     assert_eq!(all, four());
+}
+
+/// `renamed_file`, then a new, unrelated old.ts (t5 of the review's repro, at BASE + 6).
+fn reused_name(d: &Path) {
+    renamed_file(d);
+    commit(d, &[("old.ts", Some(b"something else entirely\n"))], "unrelated old", BASE + 6);
+}
+
+#[test]
+fn history_skips_another_file_under_an_old_name() {
+    let (_t, root) = tmp();
+    reused_name(&root.join("acme-api"));
+    let g = gl();
+    let ids = ids_of(&g, &[root.clone()]);
+    let p = g.page("main", 1, &ids, &FilterView::default(), false, Some(&hist(&ids[0], "new.ts"))).unwrap();
+    assert_eq!(files(&p), four());
+    assert!(p.done);
+    // Paged one by one, the skipped record still advances --skip.
+    let g = gl().with_page_size(1);
+    let ids = ids_of(&g, &[root]);
+    let h = hist(&ids[0], "new.ts");
+    let mut all = Vec::new();
+    let mut p = g.page("main", 1, &ids, &FilterView::default(), false, Some(&h)).unwrap();
+    loop {
+        all.extend(files(&p));
+        if p.done {
+            break;
+        }
+        p = g.page("main", 1, &ids, &FilterView::default(), true, Some(&h)).unwrap();
+        assert!(all.len() < 20);
+    }
+    assert_eq!(all, four());
+}
+
+#[test]
+fn history_skips_another_file_under_an_old_name_then_a_merge() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    reused_name(&d);
+    // Each side changes a different file, so the merge equals neither parent and is listed,
+    // with no status.
+    git(&d, &["checkout", "-q", "-b", "side"]);
+    commit(&d, &[("new.ts", Some(&body("two\nfour\nside\n")))], "side edits new", BASE + 7);
+    git(&d, &["checkout", "-q", "main"]);
+    commit(&d, &[("old.ts", Some(b"something else, changed\n"))], "main edits unrelated old", BASE + 8);
+    git(&d, &["-c", "user.name=Ann Dev", "-c", "user.email=ann@example.com", "merge", "-q", "--no-commit", "side"]);
+    commit(&d, &[], "merge side", BASE + 9);
+    // Walked before the merge: the unrelated old.ts must not become the name the merge keeps.
+    commit(&d, &[("old.ts", Some(b"something else, again\n"))], "unrelated again", BASE + 10);
+    let g = gl();
+    let ids = ids_of(&g, &[root]);
+    let p = g.page("main", 1, &ids, &FilterView::default(), false, Some(&hist(&ids[0], "new.ts"))).unwrap();
+    let mut want = vec![
+        ("merge side".to_string(), "new.ts".to_string(), None, None),
+        ("side edits new".into(), "new.ts".into(), None, Some("modified")),
+    ];
+    want.extend(four());
+    assert_eq!(files(&p), want);
+}
+
+#[test]
+fn history_refuses_a_folder() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    init(&d);
+    commit(&d, &[("src/a.ts", Some(b"a\n"))], "add", BASE);
+    let g = gl();
+    let ids = ids_of(&g, &[root]);
+    assert_eq!(g.page("main", 1, &ids, &FilterView::default(), false, Some(&hist(&ids[0], "src"))), Err("Not a file".to_string()));
+    assert_eq!(g.page("main", 2, &ids, &FilterView::default(), false, Some(&hist(&ids[0], "src/a.ts"))).unwrap().rows.len(), 1);
+    commit(&d, &[("src/a.ts", None)], "delete", BASE + 1);
+    assert_eq!(g.page("main", 3, &ids, &FilterView::default(), false, Some(&hist(&ids[0], "src/a.ts"))).unwrap().rows.len(), 2, "a deleted file still has a history");
+}
+
+#[test]
+fn history_more_for_another_file_is_stale() {
+    let (_t, root) = tmp();
+    renamed_file(&root.join("acme-api"));
+    let g = gl().with_page_size(1);
+    let ids = ids_of(&g, &[root]);
+    g.page("main", 1, &ids, &FilterView::default(), false, Some(&hist(&ids[0], "new.ts"))).unwrap();
+    assert_eq!(g.page("main", 1, &ids, &FilterView::default(), true, Some(&hist(&ids[0], "other.ts"))), Err(STALE.to_string()));
+    assert!(g.page("main", 1, &ids, &FilterView::default(), true, Some(&hist(&ids[0], "new.ts"))).is_ok());
+}
+
+/// `log.showSignature=true` writes a line before each signed record; the log must not drop it.
+#[test]
+fn signed_commits_survive_show_signature() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    init(&d);
+    commit(&d, &[("a.txt", Some(b"a"))], "plain", BASE);
+    let key = root.join("signing-key");
+    let made = std::process::Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", ""]).arg("-f").arg(&key).status().is_ok_and(|s| s.success());
+    if !made {
+        eprintln!("ssh-keygen unavailable: the argv is still checked in core's gitlog_filter tests");
+        return;
+    }
+    std::fs::write(d.join("a.txt"), "b").unwrap();
+    git(&d, &["add", "-A"]);
+    let signing = format!("user.signingkey={}", key.display());
+    git(&d, &["-c", "gpg.format=ssh", "-c", &signing, "commit", "-q", "-S", "-m", "signed"]);
+    git(&d, &["config", "log.showSignature", "true"]);
+    let g = gl();
+    let ids = ids_of(&g, &[root]);
+    let p = first_page(&g, 1, &ids, &FilterView::default());
+    let subjects: Vec<&str> = p.rows.iter().map(|r| r.subject.as_str()).collect();
+    assert_eq!(subjects, vec!["signed", "plain"]);
+    let h = g.page("main", 2, &ids, &FilterView::default(), false, Some(&hist(&ids[0], "a.txt"))).unwrap();
+    assert_eq!(h.rows.len(), 2);
 }

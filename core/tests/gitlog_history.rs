@@ -120,10 +120,14 @@ fn parse_history_hostile_names() {
     let out = hrec(A, 2, "a\x1eb\x1fc", "R100", &["a\nR100\nb.ts", "x\x1ey.ts"]) + &hrec(B, 1, "plain", "M", &["-rf.ts"]);
     let (rows, n) = parse_history(&out, "x\x1ey.ts");
     assert_eq!(n, 2);
-    assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].0.subject, "a\x1eb\x1fc");
     assert_eq!(rows[0].1, file("x\x1ey.ts", Some("a\nR100\nb.ts"), Some(FileStatus::Renamed { from: "a\nR100\nb.ts".into() })));
-    assert_eq!(rows[1].1, file("-rf.ts", None, Some(FileStatus::Modified)));
+    // "-rf.ts" is not a name this file had: another file's commit, counted but not shown.
+    assert_eq!(rows.len(), 1);
+    let (rows, n) = parse_history(&out, "-rf.ts");
+    assert_eq!(n, 2);
+    assert_eq!(rows.len(), 1, "read from the other file's side, only its own record");
+    assert_eq!(rows[0].1, file("-rf.ts", None, Some(FileStatus::Modified)));
 }
 
 #[test]
@@ -152,4 +156,28 @@ fn several_entries_prefer_the_followed_name() {
     assert_eq!(n, 3);
     assert_eq!(rows[1].1, file("old.ts", None, Some(FileStatus::Modified)));
     assert_eq!(rows[2].0.subject, "after");
+}
+
+#[test]
+fn a_reused_old_name_is_another_file() {
+    // Newest first: a new, unrelated old.ts (A), then new.ts's own history.
+    let out = hrec(A, 5, "new old", "A", &["old.ts"]) + &hrec(B, 4, "edit new", "M", &["new.ts"]) + &hrec(C, 3, "rename", "R100", &["old.ts", "new.ts"]);
+    let (rows, n) = parse_history(&out, "new.ts");
+    assert_eq!(n, 3, "counted, so --skip still advances past it");
+    assert_eq!(rows.iter().map(|(c, _)| c.subject.as_str()).collect::<Vec<_>>(), vec!["edit new", "rename"]);
+    // And it does not move the followed name: a merge after it keeps new.ts.
+    let merge = format!("\x1e{B}\x004\0rin\0rin@example.com\0merge\0{A} {C}\0");
+    let (rows, n) = parse_history(&(hrec(A, 5, "new old", "M", &["old.ts"]) + &merge), "new.ts");
+    assert_eq!(n, 2);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, file("new.ts", None, None));
+}
+
+#[test]
+fn delete_then_re_add_is_one_history() {
+    let out = hrec(A, 3, "back", "A", &["a.ts"]) + &hrec(B, 2, "gone", "D", &["a.ts"]) + &hrec(C, 1, "first", "A", &["a.ts"]);
+    let (rows, n) = parse_history(&out, "a.ts");
+    assert_eq!(n, 3);
+    let st: Vec<Option<FileStatus>> = rows.into_iter().map(|(_, f)| f.status).collect();
+    assert_eq!(st, vec![Some(FileStatus::Added), Some(FileStatus::Deleted), Some(FileStatus::Added)]);
 }

@@ -6,6 +6,10 @@
 //! logs all of those names as literal pathspecs, without `--follow`, paged with `--skip` like the
 //! log (`history_args`, `parse_history`).
 //!
+//! Deliberately unlike Polylog: a commit that lists the file's names only for *another* file (a
+//! new, unrelated file that reuses an old name after the rename) is counted for `--skip` but
+//! shows no row, so it neither joins this file's history nor moves the name being followed.
+//!
 //! Both parsers read NUL-terminated tokens by position: a path can hold a newline, an RS byte or
 //! a string that looks like a status letter, and a subject can hold RS too.
 
@@ -127,9 +131,10 @@ fn file_of(letter: char, paths: &[&str]) -> HistoryFile {
 ///
 /// Positional on NUL tokens: a record starts at a token beginning with RS, and the next five
 /// tokens are its fields, taken verbatim. Then come zero or more status tokens, each with its one
-/// or two path tokens. When a commit lists several (a later file reusing an older name), the one
-/// naming the file as the previous commit left it wins, else the first. A record with no status
-/// keeps the previous commit's `from` (or `path`), else `current`. A record cut off before its
+/// or two path tokens. The entry naming the file as the previous row left it (its `from`, else its
+/// `path`; `current` before the first row) is this file's. A record that lists entries but none
+/// for that name is another file reusing an old name: it is counted but gives no row (Polylog
+/// took its first entry). A record with no status (a merge) keeps that name. A record cut off before its
 /// sixth field is not counted, and one cut off inside its status is dropped.
 pub fn parse_history(out: &str, current: &str) -> (Vec<(Commit, HistoryFile)>, usize) {
     let mut toks: Vec<&str> = out.split('\0').collect();
@@ -176,7 +181,8 @@ pub fn parse_history(out: &str, current: &str) -> (Vec<(Commit, HistoryFile)>, u
         }
         let file = match entries.iter().position(|e| e.path == expect) {
             Some(k) => entries.swap_remove(k),
-            None if !entries.is_empty() => entries.swap_remove(0),
+            // Another file under one of this file's old names: not this file's history.
+            None if !entries.is_empty() => continue,
             None => HistoryFile { path: expect, from: None, status: None },
         };
         let commit = Commit {

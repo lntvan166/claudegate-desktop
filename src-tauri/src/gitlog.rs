@@ -554,6 +554,8 @@ struct QueryState {
 /// it had at the oldest commit read so far (where a status-less record on the next page starts),
 /// and each pending commit's file.
 struct HistoryState {
+    /// What the query was started for; a Load more for another file is stale.
+    req: HistoryReq,
     paths: Vec<String>,
     last: String,
     files: HashMap<String, HistoryFile>,
@@ -730,7 +732,11 @@ impl GitLog {
         let state = if more {
             let existing = lock(&self.queries).get(&key).cloned();
             match existing {
-                Some(s) if lock(&s).query == query_id && self.runner.is_current(&tag) => s,
+                // The same query, still current, and (for File History) the same file.
+                Some(s) if self.runner.is_current(&tag) && {
+                    let st = lock(&s);
+                    st.query == query_id && st.history.as_ref().map(|h| &h.req) == history
+                } => s,
                 _ => return Err(STALE.into()),
             }
         } else {
@@ -766,6 +772,15 @@ impl GitLog {
         let mut st = self.start(tag, std::slice::from_ref(&h.repo), &only_branch)?;
         let mut paths = vec![h.path.clone()];
         if let Some(q) = st.repos.first() {
+            // A folder has no history of its own here: its pathspec would match every file in it.
+            // A path missing at the head (a deleted file) still has one, so only "tree" refuses.
+            if let Some(head) = q.heads.first() {
+                match self.runner.text(Some(tag), &q.cwd, &["cat-file", "-t", &format!("{head}:{}", h.path)]) {
+                    Ok(kind) if kind.trim() == "tree" => return Err("Not a file".into()),
+                    Err(RunError::Cancelled) => return Err(STALE.into()),
+                    _ => {}
+                }
+            }
             let args = history_paths_args(&h.path, &q.heads);
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             match self.runner.text(Some(tag), &q.cwd, &args) {
@@ -778,7 +793,7 @@ impl GitLog {
                 }
             }
         }
-        st.history = Some(HistoryState { paths, last: h.path.clone(), files: HashMap::new() });
+        st.history = Some(HistoryState { req: h.clone(), paths, last: h.path.clone(), files: HashMap::new() });
         Ok(st)
     }
 
