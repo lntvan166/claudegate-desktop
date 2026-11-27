@@ -14,7 +14,7 @@ You run this on the real machine. It checks that ClaudeGate Desktop and the VS C
    Expected: VS Code opens it and the Claude Gate panels are present.
 2. Start the app from the desktop repo:
    ```bash
-   cd ~/Documents/src/personal/claudegate-desktop
+   cd claudegate-desktop   # your clone of this repo
    export PATH=$HOME/.cargo/bin:$PATH && npm run tauri dev
    ```
    Expected: the window opens. Read-only is off (the switch in settings is not set).
