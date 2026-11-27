@@ -15,7 +15,7 @@ import type { UpdateView } from "./update";
 import type { AuditView } from "./audit";
 import { AUDIT_EVENT } from "./audit";
 import type { GitLogConfig, RepoView } from "../gitlog/repos";
-import type { FilterView, PageView } from "../gitlog/log";
+import type { FilterView, HistoryReq, PageView } from "../gitlog/log";
 import type { ChangedFile, FileSide, FileView } from "../gitlog/changes";
 import type { CombinedLeft, CombinedView } from "../gitlog/combined";
 
@@ -222,7 +222,7 @@ export interface Api {
   /** The filter bar as last left; null drops it. */
   gitlogLastFilter(filter: Record<string, unknown> | null): Promise<GitLogConfig>;
   /** One page of the merged log. `more: false` starts query `queryId`; `more: true` continues it. */
-  gitlogPage(queryId: number, repos: string[], filter: FilterView, more: boolean): Promise<PageView>;
+  gitlogPage(queryId: number, repos: string[], filter: FilterView, more: boolean, history: HistoryReq | null): Promise<PageView>;
   /** A commit's full message. */
   gitlogMessage(repo: string, sha: string): Promise<string>;
   /** The files `sha` changed against its first parent, with +/- counts. */
@@ -289,7 +289,7 @@ const tauriApi: Api = {
   gitlogInclude: (glob) => invoke<GitLogConfig>("gitlog_include", { glob }),
   gitlogPane: (pane, width) => invoke<GitLogConfig>("gitlog_pane", { pane, width }),
   gitlogLastFilter: (filter) => invoke<GitLogConfig>("gitlog_last_filter", { filter }),
-  gitlogPage: (queryId, repos, filter, more) => invoke<PageView>("gitlog_page", { queryId, repos, filter, more }),
+  gitlogPage: (queryId, repos, filter, more, history) => invoke<PageView>("gitlog_page", { queryId, repos, filter, more, history }),
   gitlogMessage: (repo, sha) => invoke<string>("gitlog_message", { repo, sha }),
   gitlogChanges: (repo, sha) => invoke<ChangedFile[]>("gitlog_changes", { repo, sha }),
   gitlogFile: (repo, sha, path, side, from) => invoke<FileView>("gitlog_file", { repo, sha, path, side, from: from ?? null }),
@@ -372,8 +372,8 @@ export const gitlogExclude = async (glob: string) => (await api()).gitlogExclude
 export const gitlogInclude = async (glob: string) => (await api()).gitlogInclude(glob);
 export const gitlogPane = async (pane: string, width: number) => (await api()).gitlogPane(pane, width);
 export const gitlogLastFilter = async (filter: Record<string, unknown> | null) => (await api()).gitlogLastFilter(filter);
-export const gitlogPage = async (queryId: number, repos: string[], filter: FilterView, more: boolean) =>
-  (await api()).gitlogPage(queryId, repos, filter, more);
+export const gitlogPage = async (queryId: number, repos: string[], filter: FilterView, more: boolean, history: HistoryReq | null = null) =>
+  (await api()).gitlogPage(queryId, repos, filter, more, history);
 export const gitlogMessage = async (repo: string, sha: string) => (await api()).gitlogMessage(repo, sha);
 export const gitlogChanges = async (repo: string, sha: string) => (await api()).gitlogChanges(repo, sha);
 export const gitlogFile = async (repo: string, sha: string, path: string, side: FileSide, from?: string) =>

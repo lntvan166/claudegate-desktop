@@ -3,6 +3,7 @@
 // gitlog.rs `PageView`/`RowView` are the wire shapes.
 import { isTypingTarget } from "../lib/keys";
 import { relTime } from "../lib/time";
+import type { FileStatus } from "./changes";
 
 /** gitlog.rs `RowView`. `time` is the committer time in epoch seconds. */
 export type RowView = {
@@ -14,6 +15,8 @@ export type RowView = {
   subject: string;
   parents: string[];
   source: string;
+  /** File History only: the file as this commit knew it (its path then, where it came from, how it changed). */
+  file?: { path: string; from: string | null; status: FileStatus | null } | null;
 };
 export type Failure = { repo: string; reason: string };
 export type BranchUse = { branch: string; found: number; fallback: number };
@@ -117,6 +120,25 @@ export function addAuthor(list: string[], raw: string): string[] {
   return [...list, a];
 }
 
+// ---- File History ------------------------------------------------------------------------------
+
+/** The `h` key on a file row opens its history. */
+export const HISTORY_KEY = "h";
+
+/**
+ * What File History asks for: the one file in its one repository, the branch filter kept and
+ * search, authors, Me, path and dates set aside (the backend ignores them too; the list's request
+ * key then does not change when they are edited).
+ */
+export function historyRequest(f: FilterState, h: HistoryReq): Request {
+  const filter: FilterView = {};
+  if (f.branch.trim()) filter.branch = f.branch.trim();
+  return { repos: [h.repo], filter, history: { repo: h.repo, path: h.path } };
+}
+
+/** The banner above the list while File History is open. */
+export const historyBanner = (path: string) => `History of ${path}`;
+
 // ---- debounce ----------------------------------------------------------------------------------
 
 /** How long a filter edit waits before it queries: typing is one query, not one per key. */
@@ -190,7 +212,9 @@ export type QueryState = {
 
 export const EMPTY_QUERY: QueryState = { rows: [], failures: [], branchUse: null, done: false, loading: false, loadingMore: false, error: null };
 
-export type Request = { repos: string[]; filter: FilterView };
+/** The file whose history is open (gitlog.rs `HistoryReq`). */
+export type HistoryReq = { repo: string; path: string };
+export type Request = { repos: string[]; filter: FilterView; history: HistoryReq | null };
 export type PageFetcher = (id: number, req: Request, more: boolean) => Promise<PageView>;
 
 export const rowKey = (r: Pick<RowView, "repo" | "sha">) => `${r.repo}\u0000${r.sha}`;
@@ -201,7 +225,7 @@ export const rowKey = (r: Pick<RowView, "repo" | "sha">) => `${r.repo}\u0000${r.
  */
 export class LogQuery {
   private id = 0;
-  private req: Request = { repos: [], filter: {} };
+  private req: Request = { repos: [], filter: {}, history: null };
   private moreBusy = false;
   state: QueryState = EMPTY_QUERY;
 

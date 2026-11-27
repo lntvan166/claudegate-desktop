@@ -8,12 +8,15 @@
     loading,
     onrefresh,
     onexit,
+    disabled = false,
   }: {
     filter: FilterState;
     loading: boolean;
     onrefresh: () => void;
     /** Esc or ↓ in the search box: hand the keyboard to the list. */
     onexit: () => void;
+    /** File History is open: the fields are set aside (inert), the refresh button still works. */
+    disabled?: boolean;
   } = $props();
 
   let searchEl: HTMLInputElement | undefined = $state();
@@ -68,13 +71,13 @@
   }
 </script>
 
-<div class="filters" role="search" aria-label="Filter commits">
-  <div class="field search">
+<div class="filters" class:disabled role="search" aria-label="Filter commits" title={disabled ? "Set aside while File History is open" : undefined}>
+  <div class="field search" inert={disabled}>
     <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M10.2 10.2 13 13" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /></svg>
     <input bind:this={searchEl} bind:value={filter.search} placeholder="Search messages" aria-label="Search commit messages" aria-keyshortcuts="/" onkeydown={searchKey} spellcheck="false" />
   </div>
 
-  <div class="field authors">
+  <div class="field authors" inert={disabled}>
     <button class="me" type="button" aria-pressed={filter.mine} onclick={() => (filter.mine = !filter.mine)} title="Only your commits, by each repository's git user.email">Me</button>
     {#each filter.authors as a (a)}
       <span class="achip">{a}<button type="button" aria-label="Remove author {a}" onclick={() => removeAuthor(a)}>×</button></span>
@@ -82,20 +85,20 @@
     <input bind:value={authorDraft} placeholder={filter.authors.length || filter.mine ? "Add author" : "Author"} aria-label="Author" onkeydown={authorKey} onblur={commitAuthor} spellcheck="false" />
   </div>
 
-  <div class="field path">
+  <div class="field path" inert={disabled}>
     <input bind:value={filter.path} placeholder="Path" aria-label="Only commits touching this path" onkeydown={fieldKey} spellcheck="false" />
   </div>
-  <div class="field branch">
+  <div class="field branch" inert={disabled}>
     <input bind:value={filter.branch} placeholder="Branch" aria-label="Branch to show" onkeydown={fieldKey} spellcheck="false" />
   </div>
 
-  <div class="range" role="group" aria-label="Date range">
+  <div class="range" role="group" aria-label="Date range" inert={disabled}>
     {#each RANGES as r (r.id)}
       <button type="button" aria-pressed={filter.range === r.id} class:on={filter.range === r.id} onclick={() => (filter.range = r.id)}>{r.label}</button>
     {/each}
   </div>
   {#if filter.range === "custom"}
-    <div class="dates">
+    <div class="dates" inert={disabled}>
       <input type="date" bind:value={filter.from} aria-label="From date" max={filter.to || undefined} />
       <span aria-hidden="true">–</span>
       <input type="date" bind:value={filter.to} aria-label="To date" min={filter.from || undefined} />
@@ -110,6 +113,11 @@
 </div>
 
 <style>
+  .filters.disabled .field,
+  .filters.disabled .range,
+  .filters.disabled .dates {
+    opacity: 0.45;
+  }
   .filters {
     display: flex;
     flex-wrap: wrap;

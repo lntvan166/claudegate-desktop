@@ -687,7 +687,30 @@ const GL_CHANGES: ChangedFile[][] = [
   [ch("db/seed.sql", "modified", 9000, 8800), ch("config/deploy.yml", "modified", 3, 0), ch("scripts/export.rs", "deleted", 0, 12)],
   [],
 ];
-const glFiles = (sha: string) => GL_CHANGES[parseInt(sha.slice(-4), 16) % GL_CHANGES.length];
+// File History: every 6th commit of the repository "touched" the file; the oldest ones know it by
+// its earlier name (web/src/client.ts was web/src/api.ts), and the oldest created it. The commit's
+// own Changes is then that one file, so the diff has something to follow.
+const GL_RENAMED: Record<string, string> = { "web/src/client.ts": "web/src/api.ts" };
+const glHistoryFile = new Map<string, ChangedFile>();
+let glHistNewest = 0;
+let glHistQuery: { id: number; req: string; rows: RowView[]; at: number } | null = null;
+function glHistory(id: number, repo: string, path: string, branch?: string) {
+  if (!path.includes(".")) throw "Not a file";
+  const touched = glAll.filter((r) => r.repo === repo).filter((_, i) => i % 6 === 0).slice(0, 14);
+  const old = GL_RENAMED[path] ?? null;
+  const rows = touched.map((r, i) => {
+    const last = i === touched.length - 1;
+    const renamedHere = old !== null && i === touched.length - 4;
+    const before = old !== null && i >= touched.length - 3;
+    const name = before ? old! : path;
+    const status = last ? "added" : renamedHere ? "renamed" : "modified";
+    const file = { path: name, from: renamedHere ? old : null, status } as const;
+    glHistoryFile.set(r.sha, ch(name, status, 6 + i, last ? 0 : 2, renamedHere ? old : null));
+    return { ...r, source: branch ?? r.source, file: { ...file } };
+  });
+  return { id, req: JSON.stringify([repo, path, branch ?? ""]), rows, at: 0 };
+}
+const glFiles = (sha: string) => (glHistoryFile.has(sha) ? [glHistoryFile.get(sha)!] : GL_CHANGES[parseInt(sha.slice(-4), 16) % GL_CHANGES.length]);
 
 // Combined Changes: a fixture built from whatever commits are picked. The first repository gets a
 // file that falls back on a conflict (it carries an unselected commit), a binary, a too-large one,
@@ -856,8 +879,22 @@ const gitlogMock: Pick<
     gitLog = { ...gitLog, lastFilter: filter };
     return gl();
   },
-  gitlogPage: async (queryId, repos, filter, more) => {
+  gitlogPage: async (queryId, repos, filter, more, history) => {
     await new Promise((r) => setTimeout(r, 120));
+    if (history) {
+      // Its own channel: it never supersedes the log's query.
+      if (queryId < glHistNewest) throw "stale query";
+      if (more) {
+        if (!glHistQuery || glHistQuery.id !== queryId) throw "stale query";
+      } else {
+        glHistNewest = queryId;
+        glHistQuery = glHistory(queryId, history.repo, history.path, filter.branch);
+      }
+      const h = glHistQuery!;
+      const rows = h.rows.slice(h.at, h.at + 6);
+      h.at += rows.length;
+      return { queryId, rows, failures: [], branchUse: null, done: h.at >= h.rows.length };
+    }
     if (queryId < glNewest) throw "stale query";
     if (more) {
       if (!glQuery || glQuery.id !== queryId) throw "stale query";

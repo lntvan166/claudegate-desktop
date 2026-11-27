@@ -16,6 +16,7 @@
     commitDate,
     debounce,
     footerText,
+    historyRequest,
     indexOfKey,
     navigate,
     nearEnd,
@@ -25,8 +26,10 @@
     toFilterView,
     visibleRange,
     type FilterState,
+    type HistoryReq,
     type NavKey,
     type QueryState,
+    type Request,
     type RowView,
   } from "./log";
   import { colorVar, type RepoView } from "./repos";
@@ -53,6 +56,7 @@
     active,
     selection = $bindable(EMPTY_SELECTION),
     multi = true,
+    history = null,
     onopen,
     onselect,
     onfocussearch,
@@ -69,6 +73,8 @@
     selection?: Selection;
     /** Ctrl/Shift pick several; off, every click is a plain click (File History). */
     multi?: boolean;
+    /** File History: the list is that one file's commits; the filter is set aside but for its branch. */
+    history?: HistoryReq | null;
     /** Enter or a double-click: open the commit's first changed file (Task 7 wires this). */
     onopen: (row: RowView) => void;
     onselect: (focus: RowView | null, picked: RowView[]) => void;
@@ -80,7 +86,7 @@
 
   let q = $state<QueryState>(EMPTY_QUERY);
   const query = new LogQuery(
-    (id, req, more) => gitlogPage(id, req.repos, req.filter, more),
+    (id, req, more) => gitlogPage(id, req.repos, req.filter, more, req.history),
     (s) => (q = s),
   );
 
@@ -88,8 +94,12 @@
   const branchFilter = $derived(filter.branch);
 
   // ---- running the query ----
-  const requestKey = $derived(JSON.stringify([queryRepos, toFilterView(filter)]));
+  const request = $derived<Request>(history ? historyRequest(filter, history) : { repos: queryRepos, filter: toFilterView(filter), history: null });
+  const requestKey = $derived(JSON.stringify(request));
   let ran: string | null = null;
+  /** The file whose history `ran` was for: opening or closing File History starts at once, not after the debounce. */
+  let ranHistory: string | null = null;
+  const historyKey = $derived(history ? `${history.repo}\u0000${history.path}` : null);
   /** Pages fetched by the scroll trigger since the user last scrolled. */
   let idle = 0;
   let wasActive = false;
@@ -98,13 +108,15 @@
   function run() {
     later.cancel();
     ran = untrack(() => requestKey);
+    ranHistory = untrack(() => historyKey);
     dismissed = new Set();
     idle = 0;
-    if (queryRepos.length === 0) {
+    const req = untrack(() => request);
+    if (req.repos.length === 0) {
       query.clear();
       return;
     }
-    void query.start({ repos: queryRepos.slice(), filter: toFilterView(filter) });
+    void query.start({ ...req, repos: req.repos.slice() });
   }
 
   $effect(() => {
@@ -122,7 +134,10 @@
         run();
         // The list was display:none: its scroll position and height are not what we hold.
         void tick().then(resync);
-      } else if (key !== ran) later();
+      } else if (key !== ran) {
+        if (historyKey !== ranHistory) run();
+        else later();
+      }
     });
   });
   onDestroy(() => {
@@ -335,18 +350,22 @@
   >
     {#if q.error && rows.length === 0}
       <div class="state error">
-        <p class="state-title">Couldn't read the log</p>
+        <p class="state-title">{history ? "Couldn't read the history" : "Couldn't read the log"}</p>
         <p class="state-body">{q.error}</p>
         <button type="button" class="again" onclick={run}>Try again</button>
       </div>
-    {:else if queryRepos.length === 0}
+    {:else if !history && queryRepos.length === 0}
       <div class="state"><p class="state-title">No repository is shown</p><p class="state-body">Tick one or more in Repositories.</p></div>
     {:else if q.loading && rows.length === 0}
       <div class="state" aria-hidden="true">
         {#each [82, 64, 74, 58, 70] as w, i (i)}<div class="skeleton" style:width="{w}%"></div>{/each}
       </div>
     {:else if rows.length === 0}
-      <div class="state"><p class="state-title">No commits match</p><p class="state-body">Widen the date range or clear a filter.</p></div>
+      {#if history}
+        <div class="state"><p class="state-title">No commits changed this file</p><p class="state-body">Nothing on this branch touched it.</p></div>
+      {:else}
+        <div class="state"><p class="state-title">No commits match</p><p class="state-body">Widen the date range or clear a filter.</p></div>
+      {/if}
     {:else}
       <div class="spacer" style:height="{rows.length * ROW_H}px">
         <div class="window" style:transform="translateY({range.start * ROW_H}px)">

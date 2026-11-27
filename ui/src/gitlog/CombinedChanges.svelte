@@ -1,7 +1,9 @@
 <script lang="ts">
   import { tick } from "svelte";
   import { iconFor, type IconTheme } from "../lib/icons";
-  import { NAV_KEYS, navigate, shortSha, type NavKey } from "./log";
+  import ContextMenu from "../components/ContextMenu.svelte";
+  import { isTypingTarget } from "../lib/keys";
+  import { HISTORY_KEY, NAV_KEYS, navigate, shortSha, type NavKey } from "./log";
   import { colorVar } from "./repos";
   import { foldersOf, statusLetter, statusText, visibleNodes, type ChangedFile } from "./changes";
   import { combinedTree, noNetChangeText, shaList, warnText, type CombinedFile, type CombinedNode, type CombinedRepo } from "./combined";
@@ -25,6 +27,7 @@
     commitSubjects = {},
     onescape,
     loadingText = "Reading the selected commits…",
+    onhistory,
   }: {
     title: string;
     repos: CombinedRepo[];
@@ -43,7 +46,7 @@
     commitSubjects?: Record<string, string>;
     onescape: () => void;
     loadingText?: string;
-    /** Wired in Task 8 (file history); a no-op until then. */
+    /** "File History": the commits that changed this file in this repository. */
     onhistory?: (repo: string, path: string) => void;
   } = $props();
 
@@ -155,6 +158,16 @@
     if (canToggle(r)) toggle(toggleKey(r));
     else if (r.kind === "file") onopenfile(r.repo.repo, r.file);
   }
+  // The context menu of a file row, and the `h` key: File History.
+  const MENU = [{ id: "history", label: "File History", hint: HISTORY_KEY.toUpperCase() }];
+  let menu = $state<{ x: number; y: number; repo: string; path: string; id: string } | null>(null);
+  function openMenu(e: MouseEvent, repo: string, path: string, id: string) {
+    if (!onhistory) return;
+    e.preventDefault();
+    focusId = id;
+    menu = { x: e.clientX, y: e.clientY, repo, path, id };
+  }
+
   const depthOf = (r: Row) => (r.kind === "repo" ? 0 : r.kind === "folder" || r.kind === "file" ? r.depth : 1);
 
   function onkeydown(e: KeyboardEvent) {
@@ -188,6 +201,13 @@
     } else if (e.key === "Escape") {
       e.preventDefault();
       onescape();
+    } else if (e.key.toLowerCase() === HISTORY_KEY && !e.shiftKey && !isTypingTarget(e.target as Element) && cur?.kind === "file" && onhistory) {
+      e.preventDefault();
+      onhistory(cur.repo.repo, cur.file.path);
+    } else if ((e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) && cur?.kind === "file" && onhistory) {
+      e.preventDefault();
+      const r = rowEl(cur.id)?.getBoundingClientRect();
+      menu = { x: r ? r.left + 24 : 0, y: r ? r.bottom : 0, repo: cur.repo.repo, path: cur.file.path, id: cur.id };
     }
   }
 
@@ -291,6 +311,7 @@
               focusId = r.id;
               onopenfile(r.repo.repo, f);
             }}
+            oncontextmenu={(e) => openMenu(e, r.repo.repo, f.path, r.id)}
           >
             <span class="chev-gap" aria-hidden="true"></span>
             <img class="icon" src={iconFor(r.node.name, "file", false, theme)} alt="" draggable="false" />
@@ -317,6 +338,25 @@
     </div>
   {/if}
 </section>
+
+{#if menu}
+  {@const m = menu}
+  <ContextMenu
+    x={m.x}
+    y={m.y}
+    items={MENU}
+    onpick={() => {
+      const { repo, path } = m;
+      menu = null;
+      onhistory?.(repo, path);
+    }}
+    onclose={() => {
+      const id = m.id;
+      menu = null;
+      void tick().then(() => rowEl(id)?.focus());
+    }}
+  />
+{/if}
 
 <style>
   .changes {

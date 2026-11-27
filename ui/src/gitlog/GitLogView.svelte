@@ -60,7 +60,7 @@
   import { EMPTY_SELECTION, type Selection } from "./selection";
   import RepoPane from "./RepoPane.svelte";
   import { reposForLaunch } from "../lib/launch";
-  import { DEFAULT_FILTER, debounce, isStale, parseFilter, rowKey, type FilterState, type RowView } from "./log";
+  import { DEFAULT_FILTER, debounce, historyBanner, isStale, parseFilter, rowKey, type FilterState, type HistoryReq, type RowView } from "./log";
   import {
     DEFAULT_GITLOG_CONFIG,
     PANE_DEFAULTS,
@@ -165,6 +165,41 @@
   /** Every picked commit, in list order (Combined Changes, Task 5). `selected` is the focused one. */
   let picked = $state<RowView[]>([]);
   let selection = $state<Selection>(EMPTY_SELECTION);
+  /**
+   * File History: the one file's commits replace the log (the filter is set aside, not lost).
+   * It opens from a file row in Changes or Combined Changes and closes with ✕.
+   */
+  let history = $state<HistoryReq | null>(null);
+  function openHistory(repo: string, path: string) {
+    // No commit of the old list is carried over, and several commits cannot be picked here.
+    selection = EMPTY_SELECTION;
+    selected = null;
+    picked = [];
+    history = { repo, path };
+    focusWhenLoaded();
+  }
+  // The keyboard goes to the new list (selecting its first commit) once its first page has landed,
+  // not onto the rows of the list it replaces.
+  let focusStage: 0 | 1 | 2 = 0;
+  function focusWhenLoaded() {
+    focusStage = 1;
+  }
+  $effect(() => {
+    const busy = logBusy;
+    if (focusStage === 1 && busy) focusStage = 2;
+    else if (focusStage === 2 && !busy) {
+      focusStage = 0;
+      void tick().then(() => logList?.focusList());
+    }
+  });
+  function closeHistory() {
+    if (!history) return;
+    selection = EMPTY_SELECTION;
+    selected = null;
+    picked = [];
+    history = null;
+    focusWhenLoaded();
+  }
   const saveFilter = debounce(() => {
     lastStored = JSON.stringify(filter);
     void gitlogLastFilter($state.snapshot(filter)).catch(() => {});
@@ -447,7 +482,8 @@
     filesLoading = false;
     filesError = null;
     // The diff follows the selection: the file that was open if this commit has it too, else the first.
-    const pick = pickFile(list, untrack(() => activeFile?.path ?? null));
+    // In File History it follows the file's path at that commit (it may have been renamed since).
+    const pick = pickFile(list, untrack(() => (history ? (r.file?.path ?? null) : (activeFile?.path ?? null))));
     if (pick) void showFile(pick);
     else clearDiff();
     if (focusTreeWhenReady) {
@@ -754,7 +790,15 @@
   <div class="sheet" bind:clientHeight={sheetH}>
     <!-- The commit list comes first in the DOM, so Tab runs list, tree, diff; the top row is drawn above it. -->
     <div class="log">
-      <Filters bind:this={filters} bind:filter loading={logBusy} onrefresh={() => logList?.refresh()} onexit={() => logList?.focusList()} />
+      <Filters bind:this={filters} bind:filter loading={logBusy} disabled={!!history} onrefresh={() => logList?.refresh()} onexit={() => logList?.focusList()} />
+      {#if history}
+        <div class="history" role="status">
+          <span class="htext">{historyBanner(history.path).slice(0, -history.path.length)}<code title={history.path}>{history.path}</code></span>
+          <button type="button" class="hclose" aria-label="Close File History" title="Close File History" onclick={closeHistory}>
+            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
+          </button>
+        </div>
+      {/if}
       {#if (repos === null && !reposError) || !configReady}
         <div class="state" aria-hidden="true">
           {#each [82, 64, 74] as w, i (i)}<div class="skeleton" style:width="{w}%"></div>{/each}
@@ -766,6 +810,8 @@
           {queryRepos}
           {filter}
           {active}
+          {history}
+          multi={!history}
           onopen={openCommit}
           bind:selection
           onselect={(r, p) => ((selected = r), (picked = p))}
@@ -794,7 +840,7 @@
           canClear={!!selected}
           {commitSubjects}
           onescape={() => logList?.focusList()}
-          onhistory={() => {}}
+          onhistory={openHistory}
         />
       {:else}
         <Changes
@@ -805,8 +851,10 @@
           error={filesError}
           activePath={activeFile?.path ?? null}
           {theme}
+          repo={changesFor?.repo ?? null}
           onopenfile={(f) => !filesLoading && void showFile(f)}
           onescape={() => logList?.focusList()}
+          onhistory={openHistory}
         />
       {/if}
       <div class="split split-changes">
@@ -923,6 +971,47 @@
   }
   .diffcol > :global(.diff) {
     flex: 1;
+  }
+
+  .history {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 30px;
+    padding: 4px var(--pad);
+    border-bottom: 1px solid var(--rule);
+    background: var(--hover);
+    font-size: var(--fs-small);
+    color: var(--muted);
+  }
+  .htext {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .htext code {
+    font-family: var(--font-mono);
+    color: var(--text);
+  }
+  .hclose {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    color: var(--muted);
+  }
+  .hclose:hover {
+    background: var(--active);
+    color: var(--text);
+  }
+  .hclose:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -2px;
   }
 
   .state {
