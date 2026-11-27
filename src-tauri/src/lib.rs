@@ -4,6 +4,7 @@ pub mod config;
 pub mod editor;
 pub mod gitlog;
 pub mod gitlog_combined;
+pub mod gitlog_compare;
 pub mod launch;
 pub mod tray;
 pub mod update;
@@ -105,6 +106,10 @@ pub fn run() {
             gitlog::gitlog_rev_file,
             gitlog_combined::gitlog_combined,
             gitlog_combined::gitlog_combined_left,
+            gitlog_compare::gitlog_compare,
+            gitlog_compare::gitlog_compare_files,
+            gitlog_compare::gitlog_compare_commits,
+            gitlog_compare::gitlog_branches,
             gitlog::gitlog_open_remote,
             tray::set_pending_count,
             update::check_update,

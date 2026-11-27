@@ -3,6 +3,7 @@
 
 pub mod blame;
 pub mod combined;
+pub mod compare;
 pub mod discover;
 pub mod filter;
 pub mod history;

@@ -227,6 +227,26 @@ impl Runner {
     /// [`Runner::run`] waiting for the given `share` of the pool: a click that still belongs to
     /// a query (killed with it) takes `Share::Reserved`.
     pub fn run_in(&self, tag: Option<&Tag>, share: Share, cwd: &Path, args: &[&str]) -> Result<Vec<u8>, RunError> {
+        let (code, out, err) = self.exec(tag, share, cwd, args)?;
+        if code == 0 {
+            return Ok(out);
+        }
+        let msg = String::from_utf8_lossy(&err);
+        let line = msg.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from);
+        Err(RunError::Failed(line.unwrap_or_else(|| format!("git exited with exit status: {code}"))))
+    }
+
+    /// `git <args>` in `cwd`: its exit code and stdout bytes, for a command whose exit code is an
+    /// answer (`merge-base` exits 1 for no common history). A non-zero exit is not an error here;
+    /// a child killed by a newer query is `Cancelled`, and one killed by anything else `Failed`.
+    /// The pool share is [`Runner::run`]'s.
+    pub fn run_code(&self, tag: Option<&Tag>, cwd: &Path, args: &[&str]) -> Result<(i32, Vec<u8>), RunError> {
+        let share = if tag.is_some() { Share::Paging } else { Share::Reserved };
+        self.exec(tag, share, cwd, args).map(|(code, out, _)| (code, out))
+    }
+
+    /// The one place a child is spawned: exit code, stdout, stderr.
+    fn exec(&self, tag: Option<&Tag>, share: Share, cwd: &Path, args: &[&str]) -> Result<(i32, Vec<u8>, Vec<u8>), RunError> {
         if !cwd.is_dir() {
             return Err(RunError::Spawn(format!("The folder {} is missing", cwd.display())));
         }
@@ -274,12 +294,11 @@ impl Runner {
         match status {
             // Killed by `set_current`, which reaped it.
             None => Err(RunError::Cancelled),
-            Some(s) if s.success() => Ok(out),
-            Some(s) => {
-                let msg = String::from_utf8_lossy(&err);
-                let line = msg.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from);
-                Err(RunError::Failed(line.unwrap_or_else(|| format!("git exited with {s}"))))
-            }
+            Some(s) => match s.code() {
+                Some(code) => Ok((code, out, err)),
+                // Killed by a signal nobody here sent.
+                None => Err(RunError::Failed(format!("git exited with {s}"))),
+            },
         }
     }
 
