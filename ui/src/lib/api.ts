@@ -246,6 +246,15 @@ export interface Api {
   gitlogBlameCancel(queryId: number): Promise<void>;
   /** Blame on the cursor line, on or off. */
   gitlogBlameSetting(on: boolean): Promise<GitLogConfig>;
+  /** Sets the compare pair; each side says whether it is the remote-tracking branch. */
+  gitlogComparePair(left: string, leftRemote: boolean, right: string, rightRemote: boolean): Promise<GitLogConfig>;
+  /** Puts the pair first in the recent pairs (the backend keeps the list and the cap). */
+  gitlogCompareRecent(left: string, leftRemote: boolean, right: string, rightRemote: boolean): Promise<GitLogConfig>;
+  /** Adds a favourite branch (add-only). */
+  gitlogFavorite(name: string, remote: boolean): Promise<GitLogConfig>;
+  /** Removes a favourite branch (remove-only). */
+  gitlogUnfavorite(name: string, remote: boolean): Promise<GitLogConfig>;
+  gitlogCompareMode(mode: "files" | "commits"): Promise<GitLogConfig>;
 }
 
 const tauriApi: Api = {
@@ -308,6 +317,11 @@ const tauriApi: Api = {
   gitlogBlame: (queryId, repo, rev, path, line) => invoke<BlameLine | null>("gitlog_blame", { queryId, repo, rev, path, line }),
   gitlogBlameCancel: (queryId) => invoke<void>("gitlog_blame_cancel", { queryId }),
   gitlogBlameSetting: (on) => invoke<GitLogConfig>("gitlog_blame_setting", { on }),
+  gitlogComparePair: (left, leftRemote, right, rightRemote) => invoke<GitLogConfig>("gitlog_compare_pair", { left, leftRemote, right, rightRemote }),
+  gitlogCompareRecent: (left, leftRemote, right, rightRemote) => invoke<GitLogConfig>("gitlog_compare_recent", { left, leftRemote, right, rightRemote }),
+  gitlogFavorite: (name, remote) => invoke<GitLogConfig>("gitlog_favorite", { name, remote }),
+  gitlogUnfavorite: (name, remote) => invoke<GitLogConfig>("gitlog_unfavorite", { name, remote }),
+  gitlogCompareMode: (mode) => invoke<GitLogConfig>("gitlog_compare_mode", { mode }),
 };
 
 let chosen: Promise<Api> | undefined;
@@ -399,3 +413,10 @@ export const gitlogBlame = async (queryId: number, repo: string, rev: string, pa
   (await api()).gitlogBlame(queryId, repo, rev, path, line);
 export const gitlogBlameCancel = async (queryId: number) => (await api()).gitlogBlameCancel(queryId);
 export const gitlogBlameSetting = async (on: boolean) => (await api()).gitlogBlameSetting(on);
+export const gitlogComparePair = async (left: string, leftRemote: boolean, right: string, rightRemote: boolean) =>
+  (await api()).gitlogComparePair(left, leftRemote, right, rightRemote);
+export const gitlogCompareRecent = async (left: string, leftRemote: boolean, right: string, rightRemote: boolean) =>
+  (await api()).gitlogCompareRecent(left, leftRemote, right, rightRemote);
+export const gitlogFavorite = async (name: string, remote: boolean) => (await api()).gitlogFavorite(name, remote);
+export const gitlogUnfavorite = async (name: string, remote: boolean) => (await api()).gitlogUnfavorite(name, remote);
+export const gitlogCompareMode = async (mode: "files" | "commits") => (await api()).gitlogCompareMode(mode);

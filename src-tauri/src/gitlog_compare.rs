@@ -114,7 +114,8 @@ fn bad_side() -> String {
     "Not a side".into()
 }
 
-/// The two names cross the webview boundary: only branch names reach git.
+/// The names cross the webview boundary: only branch names reach git. Each side carries its
+/// kind (`left_remote`/`right_remote`) and is resolved as exactly that ref.
 pub const BAD_PAIR: &str = "Not a branch name";
 
 fn files_of(r: Result<Vec<u8>, RunError>) -> Result<Vec<ChangedFile>, RunError> {
@@ -180,10 +181,9 @@ impl GitLog {
     /// response in request order. Starts query `query_id` on the window's `compare` channel,
     /// superseding (and killing) the previous pair's reads; a superseded call returns
     /// `Err(STALE)`.
-    pub fn compare(&self, window: &str, query_id: u64, repos: &[String], left: &str, right: &str) -> Result<CompareView, String> {
+    pub fn compare(&self, window: &str, query_id: u64, repos: &[String], pair: &Pair) -> Result<CompareView, String> {
         // Validation first: a request refused here supersedes nothing.
-        let pair = Pair { left: left.to_string(), right: right.to_string() };
-        if !valid_pair(&pair) {
+        if !valid_pair(pair) {
             return Err(BAD_PAIR.into());
         }
         let cwds: Vec<(String, PathBuf)> = repos.iter().map(|r| self.cwd_of(r).map(|c| (r.clone(), c))).collect::<Result<_, _>>()?;
@@ -191,7 +191,7 @@ impl GitLog {
         if !self.runner.set_current(&tag.window, query_id) {
             return Err(STALE.into());
         }
-        let results = par_map(&cwds, |(_, cwd)| self.compare_one(&tag, cwd, &pair));
+        let results = par_map(&cwds, |(_, cwd)| self.compare_one(&tag, cwd, pair));
         let mut rows = Vec::with_capacity(cwds.len());
         for ((repo, _), r) in cwds.into_iter().zip(results) {
             let Ok(result) = r else { return Err(STALE.into()) };
@@ -286,10 +286,19 @@ impl GitLog {
 // ---------------------------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn gitlog_compare(query_id: u64, repos: Vec<String>, left: String, right: String, window: tauri::Window, state: tauri::State<'_, GitLogState>) -> Result<CompareView, String> {
+pub async fn gitlog_compare(
+    query_id: u64,
+    repos: Vec<String>,
+    left: String,
+    left_remote: bool,
+    right: String,
+    right_remote: bool,
+    window: tauri::Window, state: tauri::State<'_, GitLogState>,
+) -> Result<CompareView, String> {
     let gl = state.inner().0.clone();
     let label = window.label().to_string();
-    crate::commands::blocking(move || gl.compare(&label, query_id, &repos, &left, &right)).await?
+    let pair = Pair { left, right, left_remote, right_remote };
+    crate::commands::blocking(move || gl.compare(&label, query_id, &repos, &pair)).await?
 }
 
 #[tauri::command]

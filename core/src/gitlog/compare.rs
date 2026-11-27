@@ -11,11 +11,15 @@ use std::collections::HashSet;
 use super::filter::is_valid_ref;
 use super::parse::{is_sha, ChangedFile, FileStatus};
 
-/// The two branch names, as the user picked them.
+/// The two branches, as the user picked them. A name alone is ambiguous (a local `origin/x` and
+/// the remote-tracking `origin/x` are two refs), so each side says which kind it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pair {
     pub left: String,
     pub right: String,
+    /// The left side is a remote-tracking branch (`refs/remotes/<left>`), else a local one.
+    pub left_remote: bool,
+    pub right_remote: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,40 +44,39 @@ fn strings(v: &[&str]) -> Vec<String> {
 pub const RESOLVE_FORMAT: &str = "--format=%(refname)%00%(objecttype)%00%(objectname)%00%(tree)%00";
 const RESOLVE_FIELDS: usize = 4;
 
-/// Both tips and their trees in one spawn, looked up by exact refname: `refs/heads/<name>` or
-/// `refs/remotes/<name>`, never a tag and never git's DWIM order (where `refs/tags/x` shadows a
-/// branch `x`, and a local `origin/x` shadows the remote one). for-each-ref matches its patterns
-/// as prefixes too, so [`parse_resolve`] keeps exact matches only.
+/// The full ref of a branch: `refs/heads/<name>` or, when `remote`, `refs/remotes/<name>`.
+pub fn branch_ref(name: &str, remote: bool) -> String {
+    format!("{}{name}", if remote { "refs/remotes/" } else { "refs/heads/" })
+}
+
+/// Both tips and their trees in one spawn, looked up by exact refname, the kind each side
+/// names and no other: never a tag, never git's DWIM order (where `refs/tags/x` shadows a branch
+/// `x`), and never the other kind (a local `origin/x` is not the remote one). for-each-ref
+/// matches its patterns as prefixes too, so [`parse_resolve`] keeps exact matches only.
 pub fn resolve_args(p: &Pair) -> Vec<String> {
-    let mut v: Vec<String> = vec!["for-each-ref".into(), RESOLVE_FORMAT.into(), "--end-of-options".into()];
-    for n in [&p.left, &p.right] {
-        v.push(format!("refs/heads/{n}"));
-        v.push(format!("refs/remotes/{n}"));
-    }
-    v
+    vec![
+        "for-each-ref".into(),
+        RESOLVE_FORMAT.into(),
+        "--end-of-options".into(),
+        branch_ref(&p.left, p.left_remote),
+        branch_ref(&p.right, p.right_remote),
+    ]
 }
 
-/// One name's `(commit, tree)` from `resolve_args` output: the local branch when there is one,
-/// else the remote-tracking one. A ref that is not a commit counts as absent.
-fn resolve_one(refs: &[(&str, &str, &str, &str)], name: &str) -> Option<(String, String)> {
-    for full in [format!("refs/heads/{name}"), format!("refs/remotes/{name}")] {
-        if let Some((_, kind, id, tree)) = refs.iter().find(|r| r.0 == full) {
-            if *kind == "commit" && is_sha(id) && is_sha(tree) {
-                return Some((id.to_string(), tree.to_string()));
-            }
-            return None;
-        }
-    }
-    None
+/// One ref's `(commit, tree)` from `resolve_args` output. A ref that is not a commit counts as
+/// absent.
+fn resolve_one(refs: &[(&str, &str, &str, &str)], full: &str) -> Option<(String, String)> {
+    let (_, kind, id, tree) = refs.iter().find(|r| r.0 == full)?;
+    (*kind == "commit" && is_sha(id) && is_sha(tree)).then(|| (id.to_string(), tree.to_string()))
 }
 
-/// `(left, right, same_tree)`, or `None` when either name is no branch of the repository.
+/// `(left, right, same_tree)`, or `None` when either branch is not in the repository.
 pub fn parse_resolve(out: &str, p: &Pair) -> Option<(String, String, bool)> {
     let mut fields: Vec<&str> = out.split('\0').collect();
     fields.pop();
     let refs: Vec<(&str, &str, &str, &str)> = fields.chunks_exact(RESOLVE_FIELDS).map(|f| (f[0].trim_start_matches('\n'), f[1], f[2], f[3])).collect();
-    let (l, lt) = resolve_one(&refs, &p.left)?;
-    let (r, rt) = resolve_one(&refs, &p.right)?;
+    let (l, lt) = resolve_one(&refs, &branch_ref(&p.left, p.left_remote))?;
+    let (r, rt) = resolve_one(&refs, &branch_ref(&p.right, p.right_remote))?;
     Some((l, r, lt == rt))
 }
 

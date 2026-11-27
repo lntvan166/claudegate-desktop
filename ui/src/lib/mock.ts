@@ -22,6 +22,7 @@ import type {
 import type { FilterView, PageView, RowView } from "../gitlog/log";
 import type { ChangedFile, FileView } from "../gitlog/changes";
 import type { CombinedFile, CombinedLeft, CombinedRepo, CombinedView } from "../gitlog/combined";
+import { pushRecent } from "../gitlog/compare";
 import { DEFAULT_GITLOG_CONFIG, SCAN_DEPTH_MAX, type GitLogConfig, type RepoView } from "../gitlog/repos";
 import { DEFAULT_PROTECTED, globMatcher, type ExcludeOwner, type Resolved } from "./settings";
 
@@ -818,6 +819,11 @@ const gitlogMock: Pick<
   | "gitlogBlame"
   | "gitlogBlameCancel"
   | "gitlogBlameSetting"
+  | "gitlogComparePair"
+  | "gitlogCompareRecent"
+  | "gitlogFavorite"
+  | "gitlogUnfavorite"
+  | "gitlogCompareMode"
 > = {
   gitlogRepos: async () => {
     await new Promise((r) => setTimeout(r, 300));
@@ -970,6 +976,26 @@ const gitlogMock: Pick<
   gitlogBlameCancel: async () => {},
   gitlogBlameSetting: (on) => {
     gitLog = { ...gitLog, blame: on };
+    return gl();
+  },
+  gitlogComparePair: (left, leftRemote, right, rightRemote) => {
+    gitLog = { ...gitLog, comparePair: { left, leftRemote, right, rightRemote } };
+    return gl();
+  },
+  gitlogCompareRecent: (left, leftRemote, right, rightRemote) => {
+    gitLog = { ...gitLog, compareRecent: pushRecent(gitLog.compareRecent, { left, leftRemote, right, rightRemote }) };
+    return gl();
+  },
+  gitlogFavorite: (name, remote) => {
+    if (!gitLog.compareFavorites.some((f) => f.name === name && f.remote === remote)) gitLog = { ...gitLog, compareFavorites: [...gitLog.compareFavorites, { name, remote }] };
+    return gl();
+  },
+  gitlogUnfavorite: (name, remote) => {
+    gitLog = { ...gitLog, compareFavorites: gitLog.compareFavorites.filter((f) => !(f.name === name && f.remote === remote)) };
+    return gl();
+  },
+  gitlogCompareMode: (mode) => {
+    gitLog = { ...gitLog, compareMode: mode };
     return gl();
   },
 };

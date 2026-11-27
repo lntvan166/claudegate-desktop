@@ -14,7 +14,10 @@ fn s(x: &str) -> String {
     x.to_string()
 }
 fn pair(l: &str, r: &str) -> Pair {
-    Pair { left: s(l), right: s(r) }
+    Pair { left: s(l), right: s(r), left_remote: false, right_remote: false }
+}
+fn kpair(l: &str, lr: bool, r: &str, rr: bool) -> Pair {
+    Pair { left: s(l), right: s(r), left_remote: lr, right_remote: rr }
 }
 
 #[test]
@@ -35,11 +38,8 @@ fn rec(refname: &str, kind: &str, id: &str, tree: &str) -> String {
 fn resolve_same_tree_is_identical() {
     let (a, b, c) = (rep('a'), rep('b'), rep('c'));
     let (t1, t2) = (rep('1'), rep('2'));
-    let p = pair("origin/release-1.4", "main");
-    assert_eq!(
-        resolve_args(&p),
-        ["for-each-ref", RESOLVE_FORMAT, "--end-of-options", "refs/heads/origin/release-1.4", "refs/remotes/origin/release-1.4", "refs/heads/main", "refs/remotes/main"]
-    );
+    let p = kpair("origin/release-1.4", true, "main", false);
+    assert_eq!(resolve_args(&p), ["for-each-ref", RESOLVE_FORMAT, "--end-of-options", "refs/remotes/origin/release-1.4", "refs/heads/main"]);
     let out = rec("refs/heads/main", "commit", &b, &t2) + &rec("refs/remotes/origin/release-1.4", "commit", &a, &t1);
     assert_eq!(parse_resolve(&out, &p), Some((a.clone(), b.clone(), false)));
     let out = rec("refs/heads/main", "commit", &b, &t1) + &rec("refs/remotes/origin/release-1.4", "commit", &a, &t1);
@@ -48,12 +48,21 @@ fn resolve_same_tree_is_identical() {
     assert_eq!(parse_resolve(&rec("refs/heads/main", "commit", &b, &t2), &p), None);
     assert_eq!(parse_resolve(&(rec("refs/heads/main", "commit", &b, &t2) + &rec("refs/remotes/origin/release-1.4", "blob", &a, "")), &p), None);
     assert_eq!(parse_resolve("", &p), None);
-    // A local branch wins over the remote-tracking one of the same name.
-    let p = pair("origin/x", "main");
-    let out = rec("refs/heads/main", "commit", &b, &t2) + &rec("refs/heads/origin/x", "commit", &c, &t1) + &rec("refs/remotes/origin/x", "commit", &a, &t1);
-    assert_eq!(parse_resolve(&out, &p), Some((c.clone(), b.clone(), false)));
+    // Exactly the kind asked for: a local `origin/x` and the remote one are different refs, and
+    // neither stands in for the other.
+    let both = rec("refs/heads/main", "commit", &b, &t2) + &rec("refs/heads/origin/x", "commit", &c, &t1) + &rec("refs/remotes/origin/x", "commit", &a, &t1);
+    let local = kpair("origin/x", false, "main", false);
+    let remote = kpair("origin/x", true, "main", false);
+    assert_eq!(resolve_args(&local)[3], "refs/heads/origin/x");
+    assert_eq!(resolve_args(&remote)[3], "refs/remotes/origin/x");
+    assert_eq!(parse_resolve(&both, &local), Some((c.clone(), b.clone(), false)));
+    assert_eq!(parse_resolve(&both, &remote), Some((a.clone(), b.clone(), false)));
+    let only_remote = rec("refs/heads/main", "commit", &b, &t2) + &rec("refs/remotes/origin/x", "commit", &a, &t1);
+    assert_eq!(parse_resolve(&only_remote, &local), None, "no fallback to the remote");
+    let only_local = rec("refs/heads/main", "commit", &b, &t2) + &rec("refs/heads/origin/x", "commit", &c, &t1);
+    assert_eq!(parse_resolve(&only_local, &remote), None, "no fallback to the local");
     // Prefix matches (refs/remotes/origin matches refs/remotes/origin/main) are not the name.
-    let p = pair("origin", "main");
+    let p = kpair("origin", true, "main", false);
     let out = rec("refs/heads/main", "commit", &b, &t2) + &rec("refs/remotes/origin/main", "commit", &a, &t1);
     assert_eq!(parse_resolve(&out, &p), None);
 }

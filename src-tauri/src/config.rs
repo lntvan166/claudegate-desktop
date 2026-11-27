@@ -700,6 +700,62 @@ pub struct GitLogConfig {
     pub panes: std::collections::BTreeMap<String, f64>,
     /// Blame on the cursor's line in Git log diffs (on unless set to `false`).
     pub blame: bool,
+    /// Compare Branches: the pair as last picked.
+    pub compare_pair: Option<PairView>,
+    /// The last [`COMPARE_RECENT_MAX`] pairs, newest first.
+    pub compare_recent: Vec<PairView>,
+    /// Favourite branches, as (name, kind).
+    pub compare_favorites: Vec<FavoriteView>,
+    /// `"files"` (default) or `"commits"`.
+    pub compare_mode: String,
+}
+
+/// Most recent pairs kept.
+pub const COMPARE_RECENT_MAX: usize = 5;
+
+/// A compared pair. A name alone is ambiguous (a local `origin/x` and the remote-tracking one),
+/// so each side records its kind and the compare resolves exactly that ref.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairView {
+    pub left: String,
+    pub left_remote: bool,
+    pub right: String,
+    pub right_remote: bool,
+}
+
+/// A favourite branch: its name and whether it is the remote-tracking one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FavoriteView {
+    pub name: String,
+    pub remote: bool,
+}
+
+fn pair_of(v: &serde_json::Value) -> Option<PairView> {
+    let o = v.as_object()?;
+    let name = |k: &str| o.get(k).and_then(|x| x.as_str()).filter(|n| claudegate_core::gitlog::is_valid_ref(n)).map(str::to_string);
+    let kind = |k: &str| o.get(k).and_then(|x| x.as_bool());
+    Some(PairView { left: name("left")?, left_remote: kind("leftRemote")?, right: name("right")?, right_remote: kind("rightRemote")? })
+}
+
+fn favorite_of(v: &serde_json::Value) -> Option<FavoriteView> {
+    let o = v.as_object()?;
+    let name = o.get("name")?.as_str().filter(|n| claudegate_core::gitlog::is_valid_ref(n))?.to_string();
+    Some(FavoriteView { name, remote: o.get("remote")?.as_bool()? })
+}
+
+fn favorites_in(g: &serde_json::Map<String, serde_json::Value>) -> Vec<FavoriteView> {
+    let mut v: Vec<FavoriteView> = Vec::new();
+    for f in g.get("compareFavorites").and_then(|a| a.as_array()).into_iter().flatten().filter_map(favorite_of) {
+        if !v.contains(&f) {
+            v.push(f);
+        }
+    }
+    v
+}
+
+fn recent_in(g: &serde_json::Map<String, serde_json::Value>) -> Vec<PairView> {
+    g.get("compareRecent").and_then(|a| a.as_array()).into_iter().flatten().filter_map(pair_of).take(COMPARE_RECENT_MAX).collect()
 }
 
 impl Default for GitLogConfig {
@@ -712,6 +768,10 @@ impl Default for GitLogConfig {
             exclude_repos: Vec::new(),
             panes: Default::default(),
             blame: true,
+            compare_pair: None,
+            compare_recent: Vec::new(),
+            compare_favorites: Vec::new(),
+            compare_mode: "files".into(),
         }
     }
 }
@@ -737,6 +797,10 @@ fn gitlog_of(v: &serde_json::Value) -> GitLogConfig {
             .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_f64().filter(|w| w.is_finite() && *w > 0.0)?))).collect())
             .unwrap_or_default(),
         blame: get("blame").and_then(|b| b.as_bool()).unwrap_or(true),
+        compare_pair: get("comparePair").and_then(pair_of),
+        compare_recent: g.and_then(|g| g.as_object()).map(recent_in).unwrap_or_default(),
+        compare_favorites: g.and_then(|g| g.as_object()).map(favorites_in).unwrap_or_default(),
+        compare_mode: get("compareMode").and_then(|m| m.as_str()).filter(|m| *m == "commits").unwrap_or("files").to_string(),
     }
 }
 
@@ -995,6 +1059,103 @@ pub fn gitlog_set_blame(path: &Path, on: bool, guard: Option<&Path>) -> Result<G
     })
 }
 
+const NOT_A_BRANCH: &str = "Not a branch name.";
+
+fn branch_ok(name: &str) -> Result<(), String> {
+    if claudegate_core::gitlog::is_valid_ref(name) {
+        Ok(())
+    } else {
+        Err(NOT_A_BRANCH.into())
+    }
+}
+
+fn pair_json(p: &PairView) -> serde_json::Value {
+    serde_json::json!({"left": p.left, "leftRemote": p.left_remote, "right": p.right, "rightRemote": p.right_remote})
+}
+
+fn favorites_json(list: &[FavoriteView]) -> serde_json::Value {
+    serde_json::Value::Array(list.iter().map(|f| serde_json::json!({"name": f.name, "remote": f.remote})).collect())
+}
+
+fn checked_pair(left: &str, left_remote: bool, right: &str, right_remote: bool) -> Result<PairView, String> {
+    branch_ok(left)?;
+    branch_ok(right)?;
+    Ok(PairView { left: left.into(), left_remote, right: right.into(), right_remote })
+}
+
+/// Sets `gitLog.comparePair` and nothing else.
+pub fn gitlog_set_compare_pair(path: &Path, left: &str, left_remote: bool, right: &str, right_remote: bool, guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    let v = pair_json(&checked_pair(left, left_remote, right, right_remote)?);
+    update_gitlog(path, guard, |g| {
+        if g.get("comparePair") == Some(&v) {
+            return Ok(false);
+        }
+        g.insert("comparePair".into(), v);
+        Ok(true)
+    })
+}
+
+/// Puts the pair first in `gitLog.compareRecent`, drops its earlier copy and keeps
+/// [`COMPARE_RECENT_MAX`]. The list is the stored one, read under the lock; the UI never sends one.
+pub fn gitlog_push_recent_pair(path: &Path, left: &str, left_remote: bool, right: &str, right_remote: bool, guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    let new = checked_pair(left, left_remote, right, right_remote)?;
+    update_gitlog(path, guard, |g| {
+        let before = recent_in(g);
+        let mut list = vec![new.clone()];
+        list.extend(before.iter().filter(|p| **p != new).cloned());
+        list.truncate(COMPARE_RECENT_MAX);
+        if list == before {
+            return Ok(false);
+        }
+        g.insert("compareRecent".into(), serde_json::Value::Array(list.iter().map(pair_json).collect()));
+        Ok(true)
+    })
+}
+
+/// Adds a favourite branch, add-only.
+pub fn gitlog_favorite_branch(path: &Path, name: &str, remote: bool, guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    branch_ok(name)?;
+    let f = FavoriteView { name: name.into(), remote };
+    update_gitlog(path, guard, |g| {
+        let mut list = favorites_in(g);
+        if list.contains(&f) {
+            return Ok(false);
+        }
+        list.push(f);
+        g.insert("compareFavorites".into(), favorites_json(&list));
+        Ok(true)
+    })
+}
+
+/// Removes a favourite branch, remove-only; a missing one writes nothing.
+pub fn gitlog_unfavorite_branch(path: &Path, name: &str, remote: bool, guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    branch_ok(name)?;
+    update_gitlog(path, guard, |g| {
+        let mut list = favorites_in(g);
+        let before = list.len();
+        list.retain(|f| !(f.name == name && f.remote == remote));
+        if list.len() == before {
+            return Ok(false);
+        }
+        g.insert("compareFavorites".into(), favorites_json(&list));
+        Ok(true)
+    })
+}
+
+/// Sets `gitLog.compareMode`: `"files"` or `"commits"`.
+pub fn gitlog_set_compare_mode(path: &Path, mode: &str, guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    if mode != "files" && mode != "commits" {
+        return Err("Unknown mode.".into());
+    }
+    update_gitlog(path, guard, |g| {
+        if g.get("compareMode").and_then(|m| m.as_str()) == Some(mode) {
+            return Ok(false);
+        }
+        g.insert("compareMode".into(), serde_json::json!(mode));
+        Ok(true)
+    })
+}
+
 /// The Tauri side of the writers above: the real config path, guarded by the ClaudeGate home.
 fn gitlog_write<T: Send + 'static>(f: impl FnOnce(&Path, Option<&Path>) -> T + Send + 'static) -> impl std::future::Future<Output = Result<T, String>> {
     crate::commands::blocking(move || {
@@ -1079,6 +1240,31 @@ pub async fn gitlog_include(glob: String) -> Result<GitLogConfig, String> {
 #[tauri::command]
 pub async fn gitlog_last_filter(filter: serde_json::Value) -> Result<GitLogConfig, String> {
     gitlog_write(move |p, g| gitlog_set_last_filter(p, filter, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_compare_pair(left: String, left_remote: bool, right: String, right_remote: bool) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_set_compare_pair(p, &left, left_remote, &right, right_remote, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_compare_recent(left: String, left_remote: bool, right: String, right_remote: bool) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_push_recent_pair(p, &left, left_remote, &right, right_remote, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_favorite(name: String, remote: bool) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_favorite_branch(p, &name, remote, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_unfavorite(name: String, remote: bool) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_unfavorite_branch(p, &name, remote, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_compare_mode(mode: String) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_set_compare_mode(p, &mode, g)).await?
 }
 
 #[tauri::command]

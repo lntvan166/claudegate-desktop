@@ -1,6 +1,7 @@
 //! Compare Branches commands against real fixture repositories (CB §4).
 mod gitfix;
 
+use claudegate_core::gitlog::compare::Pair;
 use claudegate_desktop_lib::gitlog::{channel, GitLog, Runner, Tag, STALE};
 use claudegate_desktop_lib::gitlog_compare::{BranchNameView, RepoCompareView, BAD_PAIR};
 use gitfix::*;
@@ -9,6 +10,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// A pair of local branches.
+fn local(l: &str, r: &str) -> Pair {
+    Pair { left: l.to_string(), right: r.to_string(), left_remote: false, right_remote: false }
+}
 
 const LEFT: &str = "release-1.4";
 const RIGHT: &str = "main";
@@ -97,7 +103,7 @@ fn differs(v: &RepoCompareView) -> (String, String, String) {
 #[test]
 fn compare_counts_and_kinds() {
     let fx = fixture();
-    let v = fx.g.compare("main", 1, &fx.all(), LEFT, RIGHT).unwrap();
+    let v = fx.g.compare("main", 1, &fx.all(), &local(LEFT, RIGHT)).unwrap();
     assert_eq!(v.query_id, 1);
     let order: Vec<String> = v.rows.iter().map(|r| r.repo.clone()).collect();
     assert_eq!(order, fx.all(), "rows come back in request order");
@@ -127,7 +133,7 @@ fn compare_counts_and_kinds() {
     assert_eq!(j["rows"][3], serde_json::json!({"repo": fx.id("acme-old"), "kind": "missing"}));
 
     // Swapped, the counts swap.
-    let v = fx.g.compare("main", 2, &[fx.id("acme-web")], RIGHT, LEFT).unwrap();
+    let v = fx.g.compare("main", 2, &[fx.id("acme-web")], &local(RIGHT, LEFT)).unwrap();
     match &v.rows[0].result {
         RepoCompareView::Differs { left, right, .. } => assert_eq!((*left, *right), (0, 2)),
         other => panic!("{other:?}"),
@@ -138,11 +144,11 @@ fn compare_counts_and_kinds() {
 fn compare_rejects_bad_input() {
     let fx = fixture();
     for bad in ["-x", "--output=/tmp/x", "a..b", "HEAD~1", "", "x y", "main^{tree}"] {
-        assert_eq!(fx.g.compare("main", 1, &fx.all(), bad, RIGHT), Err(BAD_PAIR.to_string()), "{bad:?}");
-        assert_eq!(fx.g.compare("main", 1, &fx.all(), LEFT, bad), Err(BAD_PAIR.to_string()), "{bad:?}");
+        assert_eq!(fx.g.compare("main", 1, &fx.all(), &local(bad, RIGHT)), Err(BAD_PAIR.to_string()), "{bad:?}");
+        assert_eq!(fx.g.compare("main", 1, &fx.all(), &local(LEFT, bad)), Err(BAD_PAIR.to_string()), "{bad:?}");
     }
-    assert_eq!(fx.g.compare("main", 1, &["/nowhere/.git".to_string()], LEFT, RIGHT), Err("Unknown repository; refresh the list".to_string()));
-    let v = fx.g.compare("main", 2, &fx.all(), LEFT, RIGHT).unwrap();
+    assert_eq!(fx.g.compare("main", 1, &["/nowhere/.git".to_string()], &local(LEFT, RIGHT)), Err("Unknown repository; refresh the list".to_string()));
+    let v = fx.g.compare("main", 2, &fx.all(), &local(LEFT, RIGHT)).unwrap();
     let (l, r, b) = differs(&v.rows[0].result);
     let api = fx.id("acme-api");
     assert_eq!(fx.g.compare_files("main", 2, &api, "HEAD", &r, &b), Err("Not a commit id".to_string()));
@@ -159,7 +165,7 @@ fn compare_rejects_bad_input() {
 fn compare_files_both_tag() {
     let fx = fixture();
     let api = fx.id("acme-api");
-    let v = fx.g.compare("main", 1, std::slice::from_ref(&api), LEFT, RIGHT).unwrap();
+    let v = fx.g.compare("main", 1, std::slice::from_ref(&api), &local(LEFT, RIGHT)).unwrap();
     let (l, r, b) = differs(&v.rows[0].result);
     let f = fx.g.compare_files("main", 1, &api, &l, &r, &b).unwrap();
     let paths = |v: &[claudegate_desktop_lib::gitlog::ChangedFileView]| v.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
@@ -173,7 +179,7 @@ fn compare_files_both_tag() {
     assert_eq!(j["right"][0]["status"], "modified");
 
     // A newer pair makes this one stale.
-    fx.g.compare("main", 2, std::slice::from_ref(&api), RIGHT, LEFT).unwrap();
+    fx.g.compare("main", 2, std::slice::from_ref(&api), &local(RIGHT, LEFT)).unwrap();
     assert_eq!(fx.g.compare_files("main", 1, &api, &l, &r, &b), Err(STALE.to_string()));
 }
 
@@ -181,7 +187,7 @@ fn compare_files_both_tag() {
 fn compare_commits_marks_duplicates() {
     let fx = fixture();
     let api = fx.id("acme-api");
-    let v = fx.g.compare("main", 1, std::slice::from_ref(&api), LEFT, RIGHT).unwrap();
+    let v = fx.g.compare("main", 1, std::slice::from_ref(&api), &local(LEFT, RIGHT)).unwrap();
     let (l, r, _) = differs(&v.rows[0].result);
     let left = fx.g.compare_commits("main", 1, &api, "left", &l, &r, 500).unwrap();
     let marks: Vec<(String, String)> = left.iter().map(|c| (c.mark.clone(), c.sha.clone())).collect();
@@ -230,7 +236,7 @@ fn compare_superseded_is_stale() {
     g.set_repos(vec![s, gd]);
 
     let g1 = g.clone();
-    let q1 = std::thread::spawn(move || g1.compare("main", 1, &[sid], LEFT, RIGHT));
+    let q1 = std::thread::spawn(move || g1.compare("main", 1, &[sid], &local(LEFT, RIGHT)));
     let tag1 = Tag { window: channel("main", "compare"), query: 1 };
     let deadline = Instant::now() + Duration::from_secs(10);
     let pids = loop {
@@ -243,7 +249,7 @@ fn compare_superseded_is_stale() {
     };
 
     let started = Instant::now();
-    let v2 = g.compare("main", 2, &[gid], LEFT, RIGHT).unwrap();
+    let v2 = g.compare("main", 2, &[gid], &local(LEFT, RIGHT)).unwrap();
     assert_eq!(v2.rows[0].result, RepoCompareView::Identical);
     assert_eq!(q1.join().unwrap(), Err(STALE.to_string()));
     assert!(started.elapsed() < Duration::from_secs(10), "the supersede must not wait for the slow child");
@@ -253,7 +259,7 @@ fn compare_superseded_is_stale() {
         std::thread::sleep(Duration::from_millis(20));
     }
     // An older query arriving late is stale and kills nothing.
-    assert_eq!(g.compare("main", 1, &[], LEFT, RIGHT), Err(STALE.to_string()));
+    assert_eq!(g.compare("main", 1, &[], &local(LEFT, RIGHT)), Err(STALE.to_string()));
 }
 
 /// Every file under `.git` with its size and modification time.
@@ -280,7 +286,7 @@ fn compare_writes_nothing() {
     let status: Vec<String> = NAMES.iter().map(|n| git(&fx.dirs[n], &["--no-optional-locks", "status", "--porcelain"])).collect();
     let before: Vec<_> = NAMES.iter().map(|n| snapshot(&fx.dirs[n])).collect();
 
-    let v = fx.g.compare("main", 1, &fx.all(), LEFT, RIGHT).unwrap();
+    let v = fx.g.compare("main", 1, &fx.all(), &local(LEFT, RIGHT)).unwrap();
     for (n, row) in NAMES.iter().zip(&v.rows) {
         if let RepoCompareView::Differs { left_sha, right_sha, base, .. } = &row.result {
             fx.g.compare_files("main", 1, &fx.id(n), left_sha, right_sha, base).unwrap();
@@ -356,12 +362,12 @@ fn nobase_runs_no_count() {
         &format!("for a in \"$@\"; do case \"$a\" in for-each-ref|merge-base|rev-list|log|diff) echo \"$a\" >> '{}'; break;; esac; done\nexec git \"$@\"\n", log.display()),
     );
     let g = through(&fx, wrapper);
-    let v = g.compare("main", 1, &[fx.id("acme-docs")], LEFT, RIGHT).unwrap();
+    let v = g.compare("main", 1, &[fx.id("acme-docs")], &local(LEFT, RIGHT)).unwrap();
     assert_eq!(v.rows[0].result, RepoCompareView::Nobase);
     assert_eq!(std::fs::read_to_string(&log).unwrap(), "for-each-ref\nmerge-base\n", "no rev-list --cherry-mark without a merge base");
     // With a base, the counts follow it.
     std::fs::remove_file(&log).unwrap();
-    g.compare("main", 2, &[fx.id("acme-api")], LEFT, RIGHT).unwrap();
+    g.compare("main", 2, &[fx.id("acme-api")], &local(LEFT, RIGHT)).unwrap();
     assert_eq!(std::fs::read_to_string(&log).unwrap(), "for-each-ref\nmerge-base\nrev-list\nrev-list\n");
 }
 
@@ -371,11 +377,11 @@ fn a_tag_never_shadows_a_branch() {
     let api = &fx.dirs["acme-api"];
     // A tag named like the branch, on another commit: rev-parse's DWIM would take the tag.
     git(api, &["tag", LEFT, &fx.m1]);
-    let v = fx.g.compare("main", 1, &[fx.id("acme-api")], LEFT, RIGHT).unwrap();
+    let v = fx.g.compare("main", 1, &[fx.id("acme-api")], &local(LEFT, RIGHT)).unwrap();
     assert_eq!(differs(&v.rows[0].result).0, fx.r2, "the branch, not the tag");
     // A tag alone is no branch.
     git(api, &["tag", "v1.0", &fx.m1]);
-    let v = fx.g.compare("main", 2, &[fx.id("acme-api")], "v1.0", RIGHT).unwrap();
+    let v = fx.g.compare("main", 2, &[fx.id("acme-api")], &local("v1.0", RIGHT)).unwrap();
     assert_eq!(v.rows[0].result, RepoCompareView::Missing);
 }
 
@@ -385,13 +391,24 @@ fn a_local_origin_branch_is_not_the_remote_one() {
     let api = &fx.dirs["acme-api"];
     git(api, &["update-ref", "refs/remotes/origin/x", &fx.r2]);
     git(api, &["update-ref", "refs/remotes/origin/y", &fx.r1]);
-    // Only the remote: the remote-tracking branch is compared.
-    let v = fx.g.compare("main", 1, &[fx.id("acme-api")], "origin/x", RIGHT).unwrap();
+    let remote = |l: &str, r: bool| Pair { left: l.to_string(), right: RIGHT.to_string(), left_remote: r, right_remote: false };
+    let api_id = [fx.id("acme-api")];
+    // Only the remote: the remote kind compares it; the local kind finds nothing, no fallback.
+    let v = fx.g.compare("main", 1, &api_id, &remote("origin/x", true)).unwrap();
     assert_eq!(differs(&v.rows[0].result).0, fx.r2);
-    // A local branch of the same name wins, and the picker lists both, each where it belongs.
+    let v = fx.g.compare("main", 2, &api_id, &remote("origin/x", false)).unwrap();
+    assert_eq!(v.rows[0].result, RepoCompareView::Missing);
+    // A local branch of the same name too: each kind compares exactly its own ref.
     git(api, &["update-ref", "refs/heads/origin/x", &fx.r1]);
-    let v = fx.g.compare("main", 2, &[fx.id("acme-api")], "origin/x", RIGHT).unwrap();
+    let v = fx.g.compare("main", 3, &api_id, &remote("origin/x", false)).unwrap();
     assert_eq!(differs(&v.rows[0].result).0, fx.r1);
+    let v = fx.g.compare("main", 4, &api_id, &remote("origin/x", true)).unwrap();
+    assert_eq!(differs(&v.rows[0].result).0, fx.r2, "the remote one, though a local origin/x exists");
+    // A local branch alone is not found as a remote one.
+    git(api, &["update-ref", "-d", "refs/remotes/origin/x"]);
+    let v = fx.g.compare("main", 5, &api_id, &remote("origin/x", true)).unwrap();
+    assert_eq!(v.rows[0].result, RepoCompareView::Missing);
+    git(api, &["update-ref", "refs/remotes/origin/x", &fx.r2]);
     let b = fx.g.branches(&[fx.id("acme-api")]).unwrap();
     let mut got: Vec<(String, bool)> = b.iter().map(|b| (b.name.clone(), b.remote)).collect();
     got.sort();
@@ -418,7 +435,7 @@ fn a_merge_is_not_counted() {
     let r = repo_at(&d);
     let id = r.id.clone();
     g.set_repos(vec![r]);
-    let v = g.compare("main", 1, std::slice::from_ref(&id), LEFT, RIGHT).unwrap();
+    let v = g.compare("main", 1, std::slice::from_ref(&id), &local(LEFT, RIGHT)).unwrap();
     assert_eq!(v.rows[0].result, RepoCompareView::Differs { left_sha: c0.clone(), right_sha: merge.clone(), base: c0.clone(), left: 0, right: 2, same_left: 0, same_right: 0 });
     let right = g.compare_commits("main", 1, &id, "right", &c0, &merge, 500).unwrap();
     let mut shas: Vec<String> = right.iter().map(|c| c.sha.clone()).collect();
@@ -435,7 +452,7 @@ fn a_broken_repository_is_an_error_not_missing() {
     std::fs::remove_dir_all(&fx.dirs["acme-old"]).unwrap();
     // A folder that is no git repository (any more).
     std::fs::remove_dir_all(fx.dirs["svc-lib"].join(".git")).unwrap();
-    let v = fx.g.compare("main", 1, &[fx.id("acme-old"), fx.id("svc-lib")], LEFT, RIGHT).unwrap();
+    let v = fx.g.compare("main", 1, &[fx.id("acme-old"), fx.id("svc-lib")], &local(LEFT, RIGHT)).unwrap();
     match &v.rows[0].result {
         RepoCompareView::Error { reason } => assert!(reason.contains("is missing"), "{reason}"),
         other => panic!("removed folder: {other:?}"),
@@ -452,7 +469,7 @@ fn merge_base_failure_keeps_gits_reason() {
     let tools = tempfile::tempdir().unwrap();
     let wrapper = script(tools.path(), "badbase", "for a in \"$@\"; do [ \"$a\" = merge-base ] && { echo 'fatal: merge-base broke' >&2; exit 2; }; done\nexec git \"$@\"\n");
     let g = through(&fx, wrapper);
-    let v = g.compare("main", 1, &[fx.id("acme-api")], LEFT, RIGHT).unwrap();
+    let v = g.compare("main", 1, &[fx.id("acme-api")], &local(LEFT, RIGHT)).unwrap();
     assert_eq!(v.rows[0].result, RepoCompareView::Error { reason: "fatal: merge-base broke".into() });
 }
 
