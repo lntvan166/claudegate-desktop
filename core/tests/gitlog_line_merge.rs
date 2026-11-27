@@ -51,11 +51,15 @@ fn oracle(base: &str, ours: &str, theirs: &str) -> Option<Option<String>> {
             cmd.env_remove(&k);
         }
     }
+    // Hermetic: no system or user config can change how git merges.
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null");
     let out = cmd.args(["merge-file", "-p", "ours", "base", "theirs"]).current_dir(dir.path()).output().ok()?;
-    if out.status.success() {
-        Some(Some(String::from_utf8(out.stdout).unwrap()))
-    } else {
-        Some(None)
+    // merge-file exits with the number of conflicts (capped at 127); anything else, such as git's
+    // own error exit 255 or a signal, is not an answer.
+    match out.status.code() {
+        Some(0) => Some(Some(String::from_utf8(out.stdout).unwrap())),
+        Some(1..=127) => Some(None),
+        other => panic!("git merge-file failed ({other:?}): {}", String::from_utf8_lossy(&out.stderr)),
     }
 }
 

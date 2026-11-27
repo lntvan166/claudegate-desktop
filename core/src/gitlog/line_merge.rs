@@ -1,7 +1,8 @@
 //! A three-way line merge with `git merge-file`'s rule for clean versus conflict: changes to
 //! overlapping or adjacent base lines conflict unless both sides made the same change. Combined
 //! Changes uses it to take selected commits back out of a file, in memory. It is ours rather than
-//! `git merge-file` because git's would write objects into the user's `.git`.
+//! `git merge-file` or `git merge-tree` because the git routes need the intermediate text stored
+//! as a blob, and that writes into the user's `.git`.
 //!
 //! Ported line for line from Polylog's `lineMerge.ts`; the oracle test pins its alignment.
 
@@ -38,13 +39,14 @@ fn diff<'a>(a: &[&'a str], b: &[&'a str]) -> Option<Vec<Hunk<'a>>> {
     let max = (n + m).min(MAX_EDITS as isize);
     let off = max + 1;
     let mut v = vec![0isize; (2 * max + 3) as usize];
-    // trace[d]: v for k in [-(d+1), d+1] as step d started (what backtracking reads).
-    let mut trace: Vec<Vec<isize>> = Vec::new();
-    let at = |t: &[isize], d: isize, k: isize| if k >= -(d + 1) && k <= d + 1 { t[(k + d + 1) as usize] } else { 0 };
+    // trace[d]: v for k in [-(d+1), d+1] as step d started (what backtracking reads). Stored as
+    // i32 to halve its peak size: an x never exceeds the line count.
+    let mut trace: Vec<Vec<i32>> = Vec::new();
+    let at = |t: &[i32], d: isize, k: isize| if k >= -(d + 1) && k <= d + 1 { t[(k + d + 1) as usize] as isize } else { 0 };
     let mut done = false;
     let mut d = 0;
     while d <= max && !done {
-        trace.push(v[(off - d - 1) as usize..(off + d + 2) as usize].to_vec());
+        trace.push(v[(off - d - 1) as usize..(off + d + 2) as usize].iter().map(|&x| x as i32).collect());
         let mut k = -d;
         while k <= d {
             let mut x = if k == -d || (k != d && v[(off + k - 1) as usize] < v[(off + k + 1) as usize]) {
