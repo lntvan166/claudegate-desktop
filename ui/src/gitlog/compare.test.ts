@@ -55,6 +55,7 @@ describe("compare helpers", () => {
   it("titles the pair without origin/", () => {
     expect(tabTitle(p1)).toBe("release-1.4 ↔ main");
     expect(tabTitle(null)).toBe("");
+    expect(tabTitle(pair("origin/x", "main"))).toBe("origin/x ↔ main");
     expect(tabTitle(pair("main", ""))).toBe("");
   });
 

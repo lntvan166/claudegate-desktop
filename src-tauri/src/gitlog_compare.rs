@@ -286,6 +286,7 @@ impl GitLog {
 // ---------------------------------------------------------------------------------------------
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn gitlog_compare(
     query_id: u64,
     repos: Vec<String>,
@@ -293,7 +294,8 @@ pub async fn gitlog_compare(
     left_remote: bool,
     right: String,
     right_remote: bool,
-    window: tauri::Window, state: tauri::State<'_, GitLogState>,
+    window: tauri::Window,
+    state: tauri::State<'_, GitLogState>,
 ) -> Result<CompareView, String> {
     let gl = state.inner().0.clone();
     let label = window.label().to_string();

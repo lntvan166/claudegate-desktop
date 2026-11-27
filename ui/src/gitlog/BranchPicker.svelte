@@ -1,3 +1,7 @@
+<script module lang="ts">
+  let instances = 0;
+</script>
+
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { highlight, inReposText, noMatchText, pickerGroups, type BranchName, type Pair, type PickerItem } from "./compare";
@@ -27,6 +31,7 @@
     onclose: () => void;
   } = $props();
 
+  const uid = `bp${++instances}`;
   let query = $state("");
   let active = $state(0);
   let inputEl: HTMLInputElement | undefined = $state();
@@ -37,6 +42,11 @@
   const groups = $derived(pickerGroups(names ?? [], favorites, recent, query));
   const items = $derived(groups.flatMap((g) => g.items));
   const emptyText = $derived(names === null ? "Reading branch names…" : names.length === 0 ? "No branches in the ticked repositories." : noMatchText(query.trim()));
+
+  // The list shrinks as you type: the active row never points past its end.
+  $effect(() => {
+    if (active >= items.length) active = Math.max(0, items.length - 1);
+  });
 
   function place() {
     const r = anchor.getBoundingClientRect();
@@ -73,7 +83,7 @@
     if (!it) return;
     if (it.kind === "pair") onpair(it.pair);
     else onpick({ name: it.name, remote: it.remote });
-    onclose();
+    close();
   }
 
   async function move(d: number) {
@@ -93,9 +103,14 @@
       e.preventDefault();
       e.stopPropagation();
       close();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") {
+      // The keyboard way to ★: the star itself is not a tab stop.
+      e.preventDefault();
+      const it = items[active];
+      if (it?.kind === "name") onfavorite({ name: it.name, remote: it.remote }, !it.favorite);
     } else if (e.key === "Tab") {
-      // Leaving the search box leaves the picker.
-      onclose();
+      // Leaving the search box leaves the picker: focus goes back to the anchor, and the browser moves on from there.
+      close();
     }
   }
 
@@ -115,35 +130,39 @@
     autocomplete="off"
     role="combobox"
     aria-expanded="true"
-    aria-controls="branch-picker-list"
+    aria-controls="{uid}-list"
+    aria-keyshortcuts="Control+D Meta+D"
     aria-autocomplete="list"
-    aria-activedescendant={items.length ? `pick-${active}` : undefined}
+    aria-activedescendant={items.length ? `${uid}-pick-${active}` : undefined}
     aria-label="Search branches"
   />
   <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="list" id="branch-picker-list" role="listbox" tabindex="-1" bind:this={listEl} style:max-height="{box.maxHeight}px" onmousedown={(e) => e.preventDefault()}>
+  <div class="list" id="{uid}-list" role="listbox" tabindex="-1" bind:this={listEl} style:max-height="{box.maxHeight}px" onmousedown={(e) => e.preventDefault()}>
     {#if items.length === 0}
       <div class="empty">{emptyText}</div>
     {:else}
       {#each groups as g, gi (g.title)}
-        <div class="group" role="presentation">{g.title}</div>
+        <div class="group" id="{uid}-g{gi}">{g.title}</div>
+        <div role="group" aria-labelledby="{uid}-g{gi}">
         {#each g.items as it, k (it.kind === "pair" ? `p${it.pair.left}|${it.pair.leftRemote}|${it.pair.right}|${it.pair.rightRemote}` : `${it.remote}:${it.name}`)}
           {@const i = groups.slice(0, gi).reduce((n, x) => n + x.items.length, 0) + k}
           {#if it.kind === "pair"}
-            <div class="row" class:active={i === active} role="option" id="pick-{i}" data-i={i} aria-selected={i === active} tabindex="-1" onclick={() => choose(it)} onmouseenter={() => (active = i)}>
+            <div class="row" class:active={i === active} role="option" id="{uid}-pick-{i}" data-i={i} aria-selected={i === active} tabindex="-1" onclick={() => choose(it)} onmouseenter={() => (active = i)}>
               <span class="side left" aria-hidden="true">◀</span>
               <span class="name">{it.pair.left}</span>
+              {#if it.pair.leftRemote}<span class="tag">remote</span>{/if}
               <span class="side right" aria-hidden="true">▶</span>
               <span class="name">{it.pair.right}</span>
+              {#if it.pair.rightRemote}<span class="tag">remote</span>{/if}
             </div>
           {:else}
             {@const h = highlight(it.name, query)}
-            <div class="row" class:active={i === active} role="option" id="pick-{i}" data-i={i} aria-selected={i === active} tabindex="-1" onclick={() => choose(it)} onmouseenter={() => (active = i)}>
+            <div class="row" class:active={i === active} role="option" id="{uid}-pick-{i}" data-i={i} aria-selected={i === active} tabindex="-1" onclick={() => choose(it)} onmouseenter={() => (active = i)}>
               <button
                 class="star"
                 class:on={it.favorite}
                 tabindex="-1"
-                title={it.favorite ? "Remove from Favorites" : "Add to Favorites"}
+                title="{it.favorite ? 'Remove from Favorites' : 'Add to Favorites'} (Ctrl+D)"
                 aria-label="Favorite {it.name} ({sideTag(it.remote)})"
                 aria-pressed={it.favorite}
                 onclick={(e) => {
@@ -151,12 +170,13 @@
                   onfavorite({ name: it.name, remote: it.remote }, !it.favorite);
                 }}>★</button
               >
-              <span class="name">{h.pre}{#if h.hit}<mark>{h.hit}</mark>{/if}{h.post}</span>
+              <span class="name">{h.pre}{#if h.hit}<mark>{h.hit}</mark>{/if}{h.post}</span>{#if it.favorite}<span class="sr">, favourite</span>{/if}
               {#if g.title === "Favorites" && it.remote}<span class="tag">remote</span>{/if}
               <span class="count">{inReposText(it.count)}</span>
             </div>
           {/if}
         {/each}
+        </div>
       {/each}
     {/if}
   </div>
@@ -254,6 +274,14 @@
   }
   .star.on {
     color: var(--pending);
+  }
+  .sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .empty {
     padding: 10px;

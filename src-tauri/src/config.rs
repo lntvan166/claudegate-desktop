@@ -731,6 +731,8 @@ pub struct FavoriteView {
     pub remote: bool,
 }
 
+// Entries of an old or malformed shape (no kind on a pair or favourite) read as absent, and the next
+// write of that key drops them. Nothing has shipped in an old shape.
 fn pair_of(v: &serde_json::Value) -> Option<PairView> {
     let o = v.as_object()?;
     let name = |k: &str| o.get(k).and_then(|x| x.as_str()).filter(|n| claudegate_core::gitlog::is_valid_ref(n)).map(str::to_string);

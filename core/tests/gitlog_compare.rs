@@ -175,6 +175,7 @@ fn branch_refs_skip_head() {
     let out = "refs/heads/main\nrefs/heads/feat/billing\nrefs/heads/origin/x\nrefs/remotes/origin/HEAD\nrefs/remotes/origin/main\nrefs/remotes/origin/x\nrefs/remotes/bare\n";
     let b = |name: &str, remote: bool| BranchRef { name: s(name), remote };
     assert_eq!(parse_branch_refs(out), [b("main", false), b("feat/billing", false), b("origin/x", false), b("origin/main", true), b("origin/x", true)]);
+    assert_eq!(parse_branch_refs("refs/remotes/a/b/HEAD\nrefs/remotes/a/b/main\n"), [b("a/b/main", true)], "a remote named a/b");
     assert_eq!(parse_branch_refs(""), []);
 }
 

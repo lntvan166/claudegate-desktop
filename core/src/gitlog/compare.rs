@@ -284,7 +284,8 @@ pub struct BranchRef {
 }
 
 /// Each branch once, in git's order, classified by its refname: a local `origin/x` is local.
-/// `refs/remotes/*/HEAD` is dropped, and so is any name git would not take as a branch.
+/// A remote-tracking ref ending in `HEAD` (`refs/remotes/origin/HEAD`, or `refs/remotes/a/b/HEAD` for a
+/// remote named `a/b`) is dropped, and so is any name git would not take as a branch.
 pub fn parse_branch_refs(out: &str) -> Vec<BranchRef> {
     let mut v: Vec<BranchRef> = Vec::new();
     let mut seen: HashSet<BranchRef> = HashSet::new();
@@ -292,7 +293,7 @@ pub fn parse_branch_refs(out: &str) -> Vec<BranchRef> {
         let (name, remote) = if let Some(n) = line.strip_prefix("refs/heads/") {
             (n, false)
         } else if let Some(n) = line.strip_prefix("refs/remotes/") {
-            if n.split_once('/').is_none_or(|(_, rest)| rest == "HEAD") {
+            if n.split_once('/').is_none() || n.rsplit('/').next() == Some("HEAD") {
                 continue;
             }
             (n, true)

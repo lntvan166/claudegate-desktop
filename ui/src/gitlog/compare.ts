@@ -59,9 +59,9 @@ export function noMatchText(q: string): string {
   return `No branch named "${q}" in any repository.`;
 }
 
-/** The view's description: the pair, without "origin/". */
+/** The view's description: the pair, without "origin/" on a remote side (a local `origin/x` keeps it). */
 export function tabTitle(p: Pair | null): string {
   if (!p || !p.left || !p.right) return "";
-  const short = (n: string) => n.replace(/^origin\//, "");
-  return `${short(p.left)} ↔ ${short(p.right)}`;
+  const short = (n: string, remote: boolean) => (remote ? n.replace(/^origin\//, "") : n);
+  return `${short(p.left, p.leftRemote)} ↔ ${short(p.right, p.rightRemote)}`;
 }
