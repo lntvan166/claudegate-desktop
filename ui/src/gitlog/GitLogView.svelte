@@ -3,6 +3,8 @@
   import DiffView from "../components/DiffView.svelte";
   import Splitter from "../components/Splitter.svelte";
   import {
+    gitlogBlame,
+    gitlogBlameSetting,
     gitlogChanges,
     gitlogCombined,
     gitlogCombinedLeft,
@@ -55,12 +57,13 @@
     type ChangedFile,
     type DiffPane,
   } from "./changes";
+  import { combinedBlameSides, commitBlameSides, type BlameLine, type BlameRef, type BlameSides } from "./blame";
   import Filters from "./Filters.svelte";
   import LogList from "./LogList.svelte";
   import { EMPTY_SELECTION, type Selection } from "./selection";
   import RepoPane from "./RepoPane.svelte";
   import { reposForLaunch } from "../lib/launch";
-  import { DEFAULT_FILTER, debounce, HISTORY_PREFIX, isStale, sameHistory, parseFilter, rowKey, type FilterState, type HistoryReq, type RowView } from "./log";
+  import { DEFAULT_FILTER, debounce, queryGate, HISTORY_PREFIX, isStale, sameHistory, parseFilter, rowKey, type FilterState, type HistoryReq, type RowView } from "./log";
   import {
     DEFAULT_GITLOG_CONFIG,
     PANE_DEFAULTS,
@@ -630,7 +633,34 @@
     };
   });
 
-  const external = $derived(combinedOn ? combinedExternal : singleExternal);
+  /** The revisions each side of the open diff is blamed at; null when no file is open. */
+  function blameSides(): BlameSides | null {
+    if (combinedOn) return cActive ? combinedBlameSides(cActive.repo, cActive.file, cLeft?.kind === "text") : null;
+    return changesFor && activeFile ? commitBlameSides(changesFor, activeFile) : null;
+  }
+
+  /** Who last changed a line of one side, asked as the cursor rests on it; a superseded or failed read is no answer. */
+  async function blameAt(side: "original" | "modified", line: number): Promise<BlameLine | null> {
+    const sides = blameSides();
+    const ref: BlameRef | null | undefined = sides?.[side];
+    if (!ref) return null;
+    try {
+      return await gitlogBlame(queryGate.begin(), ref.repo, ref.rev, ref.path, line);
+    } catch {
+      return null;
+    }
+  }
+
+  async function setBlame(on: boolean) {
+    try {
+      cfg = await gitlogBlameSetting(on);
+    } catch (e) {
+      onnotice(`Couldn't save the Blame setting: ${e}`);
+    }
+  }
+
+  const blame = $derived({ on: cfg.blame, at: blameAt, toggle: (on: boolean) => void setBlame(on) });
+  const external = $derived({ ...(combinedOn ? combinedExternal : singleExternal), blame });
 
   /** "Open in editor": the working-tree file, never written to. It may be gone since the commit. */
   async function openInWorktree(line: number, col: number, template: string | null = null): Promise<boolean> {

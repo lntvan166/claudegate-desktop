@@ -10,6 +10,8 @@ import "monaco-editor/features/folding/register.js";
 import "monaco-editor/features/clipboard/register.js";
 import "monaco-editor/features/contextmenu/register.js";
 import "monaco-editor/features/bracketMatching/register.js";
+// The blame decoration's hover card (a diff has no other hover providers).
+import "monaco-editor/features/hover/register.js";
 import EditorWorker from "monaco-editor/editor/editor.worker.js?worker";
 import { EncodedTokenMetadata, INITIAL, type StateStack } from "@shikijs/vscode-textmate";
 import { GRAMMARS, SHIKI_THEME, createDiffHighlighter } from "./grammars";

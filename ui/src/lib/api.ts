@@ -18,6 +18,7 @@ import type { GitLogConfig, RepoView } from "../gitlog/repos";
 import type { FilterView, HistoryReq, PageView } from "../gitlog/log";
 import type { ChangedFile, FileSide, FileView } from "../gitlog/changes";
 import type { CombinedLeft, CombinedView } from "../gitlog/combined";
+import type { BlameLine } from "../gitlog/blame";
 
 export type { AuditView, CaptureView, HookReplacedView, HookView, InstallView, UpdateView };
 export type { GitLogConfig, RepoView };
@@ -239,6 +240,10 @@ export interface Api {
   gitlogCombinedLeft(queryId: number, repo: string, last: string, path: string, without: string[]): Promise<CombinedLeft>;
   /** The file `path` at commit `rev`. */
   gitlogRevFile(repo: string, rev: string, path: string): Promise<FileView>;
+  /** Who last changed the 1-based `line` of `path` as of commit `rev`; null when git has no answer. A newer call supersedes this one. */
+  gitlogBlame(queryId: number, repo: string, rev: string, path: string, line: number): Promise<BlameLine | null>;
+  /** Blame on the cursor line, on or off. */
+  gitlogBlameSetting(on: boolean): Promise<GitLogConfig>;
 }
 
 const tauriApi: Api = {
@@ -298,6 +303,8 @@ const tauriApi: Api = {
   gitlogCombined: (queryId, items) => invoke<CombinedView>("gitlog_combined", { queryId, items }),
   gitlogCombinedLeft: (queryId, repo, last, path, without) => invoke<CombinedLeft>("gitlog_combined_left", { queryId, repo, last, path, without }),
   gitlogRevFile: (repo, rev, path) => invoke<FileView>("gitlog_rev_file", { repo, rev, path }),
+  gitlogBlame: (queryId, repo, rev, path, line) => invoke<BlameLine | null>("gitlog_blame", { queryId, repo, rev, path, line }),
+  gitlogBlameSetting: (on) => invoke<GitLogConfig>("gitlog_blame_setting", { on }),
 };
 
 let chosen: Promise<Api> | undefined;
@@ -385,3 +392,6 @@ export const gitlogCombined = async (queryId: number, items: { repo: string; sha
 export const gitlogCombinedLeft = async (queryId: number, repo: string, last: string, path: string, without: string[]) =>
   (await api()).gitlogCombinedLeft(queryId, repo, last, path, without);
 export const gitlogRevFile = async (repo: string, rev: string, path: string) => (await api()).gitlogRevFile(repo, rev, path);
+export const gitlogBlame = async (queryId: number, repo: string, rev: string, path: string, line: number) =>
+  (await api()).gitlogBlame(queryId, repo, rev, path, line);
+export const gitlogBlameSetting = async (on: boolean) => (await api()).gitlogBlameSetting(on);

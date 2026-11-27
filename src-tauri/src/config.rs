@@ -684,7 +684,7 @@ pub const GITLOG_SCAN_DEPTH: u64 = 2;
 pub const GITLOG_SCAN_DEPTH_MAX: u64 = 8;
 
 /// `gitLog` as the UI reads it. Lenient: a key of the wrong shape reads as absent.
-#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitLogConfig {
     /// The ticked repositories; `None` means every repository.
@@ -698,6 +698,22 @@ pub struct GitLogConfig {
     pub exclude_repos: Vec<String>,
     /// Pane widths by name, in px.
     pub panes: std::collections::BTreeMap<String, f64>,
+    /// Blame on the cursor's line in Git log diffs (on unless set to `false`).
+    pub blame: bool,
+}
+
+impl Default for GitLogConfig {
+    fn default() -> Self {
+        GitLogConfig {
+            ticked: None,
+            profiles: Default::default(),
+            last_filter: None,
+            scan_depth: GITLOG_SCAN_DEPTH,
+            exclude_repos: Vec::new(),
+            panes: Default::default(),
+            blame: true,
+        }
+    }
 }
 
 fn strings_of(v: Option<&serde_json::Value>) -> Option<Vec<String>> {
@@ -720,6 +736,7 @@ fn gitlog_of(v: &serde_json::Value) -> GitLogConfig {
             .and_then(|p| p.as_object())
             .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_f64().filter(|w| w.is_finite() && *w > 0.0)?))).collect())
             .unwrap_or_default(),
+        blame: get("blame").and_then(|b| b.as_bool()).unwrap_or(true),
     }
 }
 
@@ -967,6 +984,17 @@ pub fn gitlog_set_pane(path: &Path, pane: &str, width: f64, guard: Option<&Path>
     })
 }
 
+/// Sets `gitLog.blame` and nothing else.
+pub fn gitlog_set_blame(path: &Path, on: bool, guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    update_gitlog(path, guard, |g| {
+        if g.get("blame").and_then(|b| b.as_bool()) == Some(on) {
+            return Ok(false);
+        }
+        g.insert("blame".into(), serde_json::json!(on));
+        Ok(true)
+    })
+}
+
 /// The Tauri side of the writers above: the real config path, guarded by the ClaudeGate home.
 fn gitlog_write<T: Send + 'static>(f: impl FnOnce(&Path, Option<&Path>) -> T + Send + 'static) -> impl std::future::Future<Output = Result<T, String>> {
     crate::commands::blocking(move || {
@@ -984,6 +1012,11 @@ fn known_ids(state: &crate::gitlog::GitLogState) -> impl FnOnce() -> Result<Vec<
 #[tauri::command]
 pub async fn gitlog_config() -> Result<GitLogConfig, String> {
     crate::commands::blocking(|| read_gitlog(&config_path())).await
+}
+
+#[tauri::command]
+pub async fn gitlog_blame_setting(on: bool) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_set_blame(p, on, g)).await?
 }
 
 #[tauri::command]

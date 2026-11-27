@@ -4,6 +4,7 @@
   import type { DecideAction } from "../lib/decide";
   import { WAITING_REFUSAL } from "../lib/keys";
   import { editorLabel, type EditorConfig } from "../lib/editors";
+  import { BLAME_DEBOUNCE_MS, blameHover, blameText, type BlameLine } from "../gitlog/blame";
   import { iconFor, type IconTheme } from "../lib/icons";
   import { languageFor } from "../lib/language";
   import { modifiedPositionFor } from "../lib/navigate";
@@ -88,8 +89,73 @@
       noStats?: boolean;
       /** A note under the header (what a combined diff includes). Never drawn on the review. */
       banner?: { tone: "info" | "warn"; text: string } | null;
+      /**
+       * Blame on the cursor's line: `at` asks the backend who last changed that line of one side
+       * (null: nothing to say), `toggle` stores the setting. Only the Git log passes it.
+       */
+      blame?: {
+        on: boolean;
+        at: (side: "original" | "modified", line: number) => Promise<BlameLine | null>;
+        toggle: (on: boolean) => void;
+      } | null;
     } | null;
   } = $props();
+
+  // ---- blame on the cursor line (Git log diffs only) -----------------------------------------
+  const blameDecos: Partial<Record<"original" | "modified", ReturnType<CodeEditor["createDecorationsCollection"]>>> = {};
+  let blameTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Bumped by every cursor move and every clear: an answer that arrives under an old one is dropped. */
+  let blameSeq = 0;
+  /** The line a decoration is drawn on now. */
+  let blamed: { side: "original" | "modified"; line: number } | null = null;
+
+  function clearBlame() {
+    blameSeq++;
+    if (blameTimer) clearTimeout(blameTimer);
+    blameTimer = null;
+    blamed = null;
+    blameDecos.original?.clear();
+    blameDecos.modified?.clear();
+  }
+
+  /** The cursor the user placed is on `line` of `side`: draw that line's blame once it rests. */
+  function onBlameCursor(side: "original" | "modified", line: number) {
+    const b = external?.blame;
+    if (!b?.on) return;
+    // The same line again (a column move) keeps what is drawn; anything else starts over.
+    if (blamed && blamed.side === side && blamed.line === line) return;
+    clearBlame();
+    const mine = blameSeq;
+    const ident = shownIdent;
+    blameTimer = setTimeout(async () => {
+      blameTimer = null;
+      let hit: BlameLine | null = null;
+      try {
+        hit = await b.at(side, line);
+      } catch {
+        hit = null;
+      }
+      // The cursor moved on, another file or the other side took over, or blame was turned off.
+      if (!hit || mine !== blameSeq || ident !== shownIdent || !external?.blame?.on || cursor?.side !== side || cursor.line !== line) return;
+      const model = side === "original" ? editor?.getModel()?.original : editor?.getModel()?.modified;
+      const deco = blameDecos[side];
+      if (!model || !deco || line > model.getLineCount()) return;
+      const col = model.getLineMaxColumn(line);
+      const now = Date.now();
+      deco.set([
+        {
+          range: { startLineNumber: line, startColumn: col, endLineNumber: line, endColumn: col },
+          options: { showIfCollapsed: true, after: { content: blameText(hit, now), inlineClassName: "cg-blame" }, hoverMessage: { value: blameHover(hit, now) } },
+        },
+      ]);
+      blamed = { side, line };
+    }, BLAME_DEBOUNCE_MS);
+  }
+
+  // Turned off, or no longer a Git log diff: nothing stays drawn.
+  $effect(() => {
+    if (!external?.blame?.on) untrack(clearBlame);
+  });
 
   /** The last cursor position in either side of the diff, for "Open at cursor". */
   let cursor: { side: "original" | "modified"; line: number; col: number } | null = null;
@@ -163,6 +229,7 @@
   /** VS Code's go-to gesture on one side: Ctrl/Cmd+hover underlines the word, click or F12 opens. */
   function wireNavigation(m: Monaco, side: "original" | "modified", e: CodeEditor) {
     const link = e.createDecorationsCollection();
+    blameDecos[side] = e.createDecorationsCollection();
     const held = (ev: { ctrlKey: boolean; metaKey: boolean }) => (isMac ? ev.metaKey : ev.ctrlKey);
     const onText = (t: { type: number; position: unknown }) => t.type === m.editor.MouseTargetType.CONTENT_TEXT && !!t.position;
     e.onMouseMove((ev) => {
@@ -190,6 +257,7 @@
       // must not replace "the first change" with line 1.
       if (ev.source !== "mouse" && ev.source !== "keyboard") return;
       cursor = { side, line: ev.position.lineNumber, col: ev.position.column };
+      onBlameCursor(side, ev.position.lineNumber);
     });
     // Monaco's right-click menu: the diff's entry for "Copy reference for Claude" (the review's:
     // a commit's file has no reference to copy).
@@ -439,6 +507,7 @@
   function clearModels(ed: DiffEditor) {
     const cur = ed.getModel();
     if (!cur) return;
+    clearBlame();
     ed.setModel(null);
     cur.original.dispose();
     cur.modified.dispose();
@@ -469,6 +538,7 @@
         if (!changed) return;
         // Claude wrote the shown file again: new text, same place. setValue alone sends the
         // cursor and the scroll back to line 1.
+        clearBlame();
         const kept = ed.saveViewState();
         if (cur.original.getValue() !== before) cur.original.setValue(before);
         if (cur.modified.getValue() !== after) cur.modified.setValue(after);
@@ -476,6 +546,7 @@
         return;
       }
       const lang = languageFor(p.path);
+      clearBlame();
       ed.setModel({ original: m.editor.createModel(before, lang), modified: m.editor.createModel(after, lang) });
       cur?.original.dispose();
       cur?.modified.dispose();
@@ -594,6 +665,23 @@
         </svg>
         <span class="crlabel">Copy @ref</span>
       </button>
+      {/if}
+      {#if external?.blame}
+        {@const bl = external.blame}
+        <button
+          class="blame-toggle"
+          class:on={bl.on}
+          aria-pressed={bl.on}
+          aria-label="Blame"
+          title="Blame: who last changed the cursor's line"
+          onclick={() => bl.toggle(!bl.on)}
+        >
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <circle cx="8" cy="5.5" r="2.5" fill="none" stroke="currentColor" stroke-width="1.3" />
+            <path d="M3 13.5c.5-2.6 2.5-4 5-4s4.5 1.4 5 4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          </svg>
+          <span class="crlabel">Blame</span>
+        </button>
       {/if}
       <OpenWith {config} onopen={pane === "editor" ? openAtCursor : onopen} {onpick} onopencursor={pane === "editor" ? openAtCursor : null} />
     </div>
@@ -847,6 +935,33 @@
     background: var(--active);
   }
 
+  /* The Git log's blame switch: same footprint as Copy @ref, pressed state like the layout toggle. */
+  .blame-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex: none;
+    height: 28px;
+    padding: 0 8px;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-control);
+    font-size: var(--fs-small);
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--faint);
+    transition:
+      background 120ms var(--ease),
+      color 120ms var(--ease);
+  }
+  .blame-toggle:hover {
+    color: var(--text);
+    background: var(--hover);
+  }
+  .blame-toggle.on {
+    color: var(--text);
+    background: var(--active);
+  }
+
   /* Side by side or inline: the same segmented control as the file list's tree/list toggle. */
   .view {
     display: flex;
@@ -956,6 +1071,13 @@
     display: none;
   }
   /* Ctrl/Cmd held over a token: it reads as a link, as in VS Code. */
+  /* The end-of-line blame: quiet, set apart from the code. */
+  .editor :global(.cg-blame) {
+    margin-left: 3em;
+    color: var(--muted);
+    font-style: normal;
+    pointer-events: auto;
+  }
   .editor :global(.cg-link) {
     text-decoration: underline;
     cursor: pointer;

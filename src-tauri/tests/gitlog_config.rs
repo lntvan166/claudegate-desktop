@@ -2,7 +2,7 @@
 //! Every writer adds, removes or sets one key; none overwrites a list with the UI's copy.
 use claudegate_desktop_lib::config::{
     config_path_in, gitlog_apply_profile, gitlog_delete_profile, gitlog_exclude_repo, gitlog_include_repo, gitlog_rename_profile,
-    gitlog_save_profile, gitlog_set_last_filter, gitlog_set_pane, gitlog_set_scan_depth, gitlog_tick_all, gitlog_tick_only,
+    gitlog_save_profile, gitlog_set_blame, gitlog_set_last_filter, gitlog_set_pane, gitlog_set_scan_depth, gitlog_tick_all, gitlog_tick_only,
     gitlog_tick_repos, gitlog_untick_repos, read_gitlog, GITLOG_SCAN_DEPTH,
 };
 use serde_json::json;
@@ -144,4 +144,23 @@ fn refuses_inside_the_claudegate_home() {
     let t = tempfile::tempdir().unwrap();
     let p = t.path().join("config.json");
     assert!(gitlog_tick_all(&p, Some(t.path())).is_err());
+}
+
+#[test]
+fn blame_setting_is_one_key() {
+    let (_t, p) = cfg();
+    assert!(read_gitlog(&p).blame, "on by default");
+    let before = json!({"theme": "dark", "gitLog": {"ticked": ["a"], "panes": {"repos": 200}, "scanDepth": 3}});
+    fs::write(&p, before.to_string()).unwrap();
+    let g = gitlog_set_blame(&p, false, None).unwrap();
+    assert!(!g.blame);
+    let mut after = raw(&p);
+    assert_eq!(after["gitLog"]["blame"], json!(false));
+    after["gitLog"].as_object_mut().unwrap().remove("blame");
+    assert_eq!(after, before, "every other key is untouched");
+    assert!(gitlog_set_blame(&p, true, None).unwrap().blame);
+    fs::write(&p, json!({"gitLog": {"blame": "yes"}}).to_string()).unwrap();
+    assert!(read_gitlog(&p).blame, "a non-bool reads as on");
+    fs::write(&p, json!({"gitLog": {"blame": 0}}).to_string()).unwrap();
+    assert!(read_gitlog(&p).blame);
 }

@@ -21,7 +21,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use claudegate_core::gitlog::{
-    ahead_behind, count_records, discover, heads_for, history_args, history_paths_args, is_sha, is_valid_ref, log_args, par_map, parse_changes, parse_history, parse_history_paths, parse_log,
+    ahead_behind, blame_args, count_records, discover, heads_for, history_args, history_paths_args, is_sha, is_valid_ref, log_args, par_map, parse_blame_porcelain, parse_changes, parse_history, parse_history_paths, parse_log,
     repo_searched, take_ready, web_url, BranchUse, ChangedFile, Commit, FileStatus, Filter, GitRun, HistoryFile, Repo, RepoProgress, DEFAULT_SCAN_DEPTH, PARALLEL,
 };
 use serde::{Deserialize, Serialize};
@@ -564,6 +564,22 @@ struct HistoryState {
 /// The cancellation channel of File History, so it never supersedes the log's paging.
 pub const HISTORY_CHANNEL: &str = "history";
 
+/// The cancellation channel of Blame: the cursor moving on supersedes only the previous blame.
+pub const BLAME_CHANNEL: &str = "blame";
+/// The largest line number Blame asks git about; anything above is not a line of a file we show.
+pub const MAX_BLAME_LINE: u32 = 100_000_000;
+
+/// Who last changed one line, as the UI reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlameLineView {
+    pub sha: String,
+    pub author: String,
+    pub email: String,
+    pub time: i64,
+    pub summary: String,
+}
+
 /// What discovery ran over; a change means the cached list is stale.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RepoKey {
@@ -1025,6 +1041,41 @@ impl GitLog {
         self.blob_view(&cwd, &format!("{rev}:{path}"))
     }
 
+    /// Who last changed the 1-based `line` of `path` as of commit `rev`, or `None` when git has
+    /// no answer (the line is past the end, the file is not in that commit). On its own channel
+    /// (`<window>#blame`): the next call supersedes this one and kills its git. Takes a reserved
+    /// slot, so it never waits behind paging.
+    pub fn blame(&self, window: &str, query_id: u64, repo: &str, rev: &str, path: &str, line: u32) -> Result<Option<BlameLineView>, String> {
+        if !is_sha(rev) {
+            return Err("Not a commit id".into());
+        }
+        if !tree_path_ok(path) {
+            return Err("Not a path in the repository".into());
+        }
+        if line < 1 || line > MAX_BLAME_LINE {
+            return Err("Not a line number".into());
+        }
+        let cwd = self.cwd_of(repo)?;
+        let tag = Tag { window: channel(window, BLAME_CHANNEL), query: query_id };
+        if !self.runner.set_current(&tag.window, query_id) {
+            return Err(STALE.into());
+        }
+        let args = blame_args(rev, path, line);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        match self.runner.run_in(Some(&tag), Share::Reserved, &cwd, &args) {
+            Ok(out) => Ok(parse_blame_porcelain(&String::from_utf8_lossy(&out)).map(|b| BlameLineView {
+                sha: b.sha,
+                author: b.author,
+                email: b.email,
+                time: b.time,
+                summary: b.summary,
+            })),
+            Err(RunError::Cancelled) => Err(STALE.into()),
+            Err(RunError::Failed(_)) => Ok(None),
+            Err(e) => Err(e.reason()),
+        }
+    }
+
     /// The object `spec` names. No such object: missing. The size first, so a huge blob is never read.
     fn blob_view(&self, cwd: &Path, spec: &str) -> Result<FileView, String> {
         let size = match self.runner.text(None, cwd, &["cat-file", "-s", spec]) {
@@ -1213,6 +1264,22 @@ pub fn worktree_file(root: &std::path::Path, path: &str) -> Result<String, Strin
 pub async fn gitlog_rev_file(repo: String, rev: String, path: String, state: tauri::State<'_, GitLogState>) -> Result<FileView, String> {
     let gl = state.inner().0.clone();
     crate::commands::blocking(move || gl.rev_file(&repo, &rev, &path)).await?
+}
+
+/// Who last changed one line of `path` as of commit `rev`.
+#[tauri::command]
+pub async fn gitlog_blame(
+    query_id: u64,
+    repo: String,
+    rev: String,
+    path: String,
+    line: u32,
+    window: tauri::Window,
+    state: tauri::State<'_, GitLogState>,
+) -> Result<Option<BlameLineView>, String> {
+    let gl = state.inner().0.clone();
+    let label = window.label().to_string();
+    crate::commands::blocking(move || gl.blame(&label, query_id, &repo, &rev, &path, line)).await?
 }
 
 #[tauri::command]

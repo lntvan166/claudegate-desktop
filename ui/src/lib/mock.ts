@@ -628,7 +628,8 @@ const glAll: RowView[] = (() => {
   gitRepos.forEach((r, ri) => {
     const wt = r.checkouts.filter((c) => !c.isMain);
     for (let k = 0; k < 400; k++) {
-      const sha = ((((ri + 1) * 2_654_435_761 + k * 40_503) >>> 0).toString(16).padStart(8, "0")).repeat(5);
+      const shaOf = (n: number) => ((((ri + 1) * 2_654_435_761 + n * 40_503) >>> 0).toString(16).padStart(8, "0")).repeat(5);
+      const sha = shaOf(k);
       const [author, email] = GL_AUTHORS[(k + ri) % 3];
       // Every 9th commit of a repository with worktrees lives only on one of them.
       const only = wt.length && k % 9 === 0 ? wt[k % wt.length] : null;
@@ -639,7 +640,8 @@ const glAll: RowView[] = (() => {
         author,
         email,
         subject: GL_SUBJECTS[(k * 3 + ri) % GL_SUBJECTS.length] + (k % 5 === 0 ? ` (#${1000 + k})` : ""),
-        parents: [],
+        // The next older commit; the oldest is a root.
+        parents: k < 399 ? [shaOf(k + 1)] : [],
         source: only ? (only.branch ? `refs/heads/${only.branch}` : only.head) : "HEAD",
       });
     }
@@ -813,6 +815,8 @@ const gitlogMock: Pick<
   | "gitlogCombined"
   | "gitlogCombinedLeft"
   | "gitlogRevFile"
+  | "gitlogBlame"
+  | "gitlogBlameSetting"
 > = {
   gitlogRepos: async () => {
     await new Promise((r) => setTimeout(r, 300));
@@ -947,6 +951,24 @@ const gitlogMock: Pick<
     const { before, after } = sample(path, false);
     const text = rev === BEFORE_REF ? before : after;
     return text === null ? { kind: "missing" } : { kind: "text", value: text };
+  },
+  gitlogBlame: async (_queryId, _repo, rev, path, line) => {
+    await new Promise((r) => setTimeout(r, 60));
+    if (line > 400) return null;
+    // Deterministic: a few authors and commits spread over the lines, a quote and a bracket in one subject.
+    const who = [
+      ["Ann Lindqvist", "ann@example.com", "Fix the retry loop"],
+      ["Dana Whitfield", "dana@example.com", "Rename the client option [breaking] (see *notes*)"],
+      ["Mira Okafor", "mira@example.com", "Extract the pricing rules into their own module so the checkout stops importing the cart"],
+    ];
+    const k = (line + path.length + rev.charCodeAt(0)) % who.length;
+    const [author, email, summary] = who[k];
+    const time = Math.floor(Date.now() / 1000) - (k + 1) * 3 * 86400 - line * 60;
+    return { sha: `${k + 1}${rev.slice(1, 39)}${k}`.padEnd(40, "0").slice(0, 40), author, email, time, summary };
+  },
+  gitlogBlameSetting: (on) => {
+    gitLog = { ...gitLog, blame: on };
+    return gl();
   },
 };
 

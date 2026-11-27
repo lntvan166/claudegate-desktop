@@ -714,3 +714,78 @@ fn signed_commits_survive_show_signature() {
     let h = g.page("main", 2, &ids, &FilterView::default(), false, Some(&hist(&ids[0], "a.txt"))).unwrap();
     assert_eq!(h.rows.len(), 2);
 }
+
+fn blamed(g: &GitLog, q: u64, id: &str, rev: &str, path: &str, line: u32) -> Option<(String, String)> {
+    g.blame("main", q, id, rev, path, line).unwrap().map(|b| (b.author, b.summary))
+}
+
+#[test]
+fn blame_names_the_line_author() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    init(&d);
+    let t1 = commit_as(&d, "ann", &[("a.txt", Some(b"one\ntwo\n"))], "first draft", BASE);
+    let t2 = commit_as(&d, "dana", &[("a.txt", Some(b"one\nTWO\n"))], "shout line two", BASE + 60);
+    let g = gl();
+    let id = ids_of(&g, &[root])[0].clone();
+    let who = |q, rev: &str, line| blamed(&g, q, &id, rev, "a.txt", line).unwrap();
+    assert_eq!(who(1, &t2, 1), ("ann".into(), "first draft".into()));
+    assert_eq!(who(2, &t2, 2), ("dana".into(), "shout line two".into()));
+    assert_eq!(who(3, &t1, 2), ("ann".into(), "first draft".into()));
+    let b = g.blame("main", 4, &id, &t2, "a.txt", 2).unwrap().unwrap();
+    assert_eq!((b.sha.as_str(), b.email.as_str(), b.time), (t2.as_str(), "dana@example.com", BASE + 60));
+}
+
+#[test]
+fn blame_past_the_end_is_none() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    init(&d);
+    let sha = commit_as(&d, "ann", &[("a.txt", Some(b"one\n"))], "first", BASE);
+    let g = gl();
+    let id = ids_of(&g, &[root])[0].clone();
+    assert_eq!(g.blame("main", 1, &id, &sha, "a.txt", 9).unwrap(), None);
+    assert_eq!(g.blame("main", 2, &id, &sha, "nope.txt", 1).unwrap(), None);
+}
+
+#[test]
+fn blame_deleted_side_is_none() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    init(&d);
+    commit_as(&d, "ann", &[("a.txt", Some(b"one\n"))], "first", BASE);
+    let gone = commit_as(&d, "ann", &[("a.txt", None)], "remove", BASE + 60);
+    let g = gl();
+    let id = ids_of(&g, &[root])[0].clone();
+    assert_eq!(g.blame("main", 1, &id, &gone, "a.txt", 1).unwrap(), None);
+}
+
+#[test]
+fn blame_refuses_what_the_webview_could_forge() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    init(&d);
+    let sha = commit_as(&d, "ann", &[("a.txt", Some(b"one\n"))], "first", BASE);
+    let g = gl();
+    let id = ids_of(&g, &[root])[0].clone();
+    assert!(g.blame("main", 1, &id, "HEAD", "a.txt", 1).is_err());
+    assert!(g.blame("main", 2, &id, "--contents=/etc/passwd", "a.txt", 1).is_err());
+    assert!(g.blame("main", 3, &id, &sha, "../a.txt", 1).is_err());
+    assert!(g.blame("main", 4, &id, &sha, "a.txt", 0).is_err());
+    assert!(g.blame("main", 5, &id, &sha, "a.txt", u32::MAX).is_err());
+    assert!(g.blame("main", 6, "/not/a/listed/repo", &sha, "a.txt", 1).is_err());
+}
+
+#[test]
+fn blame_never_supersedes_the_log_and_a_newer_blame_supersedes_it() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    init(&d);
+    let sha = commit_as(&d, "ann", &[("a.txt", Some(b"one\n"))], "first", BASE);
+    let g = gl();
+    let id = ids_of(&g, &[root])[0].clone();
+    first_page(&g, 10, &[id.clone()], &FilterView::default());
+    assert!(g.blame("main", 5, &id, &sha, "a.txt", 1).unwrap().is_some());
+    assert!(g.runner.is_current(&Tag { window: "main".into(), query: 10 }), "blame leaves the log's query current");
+    assert_eq!(g.blame("main", 4, &id, &sha, "a.txt", 1), Err(STALE.into()), "an older blame arriving late");
+}

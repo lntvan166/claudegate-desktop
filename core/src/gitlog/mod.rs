@@ -1,6 +1,7 @@
 //! Read-only git log: parsing of `git log` / `git show` output and remote URLs, filters as
 //! git argv, and the paged merge across repositories.
 
+pub mod blame;
 pub mod combined;
 pub mod discover;
 pub mod filter;
@@ -10,6 +11,7 @@ pub mod merge;
 pub mod parse;
 pub mod remote;
 
+pub use blame::{blame_args, parse_blame_porcelain, BlameLine};
 pub use combined::{
     combine_repo, exclude_for, left_and_right, left_side, merge_base_args, parse_range_log, range_log_args, read_combined, show_raw_args, Blob, CombinedFile, CombinedRead, Fallback, GitRead, LeftSide, Mode, NetStatus, RangeCommit, RawChange, ReadError, RepoRead, COMBINED_LIMIT, GITLINK_MODE, MERGE_LIMIT_BYTES,
     MERGE_LIMIT_LINES, RANGE_FORMAT, SLOW_FILES_AT_ONCE,

@@ -99,6 +99,8 @@ pub fn run() {
             gitlog::gitlog_file,
             gitlog::gitlog_worktree_file,
             gitlog::gitlog_message,
+            gitlog::gitlog_blame,
+            config::gitlog_blame_setting,
             gitlog::gitlog_rev_file,
             gitlog_combined::gitlog_combined,
             gitlog_combined::gitlog_combined_left,

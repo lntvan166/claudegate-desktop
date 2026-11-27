@@ -23,6 +23,8 @@ export type GitLogConfig = {
   scanDepth: number;
   excludeRepos: string[];
   panes: Record<string, number>;
+  /** Blame on the cursor's line in Git log diffs. */
+  blame: boolean;
 };
 
 export const DEFAULT_GITLOG_CONFIG: GitLogConfig = {
@@ -32,6 +34,7 @@ export const DEFAULT_GITLOG_CONFIG: GitLogConfig = {
   scanDepth: 2,
   excludeRepos: [],
   panes: {},
+  blame: true,
 };
 
 /** The deepest discovery walk the backend accepts (config.rs `GITLOG_SCAN_DEPTH_MAX`). */
