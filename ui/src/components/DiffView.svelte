@@ -86,6 +86,8 @@
       tag?: { text: string; tone: "new" | "deleted" } | null;
       /** No +/- counts (a combined file's counts are not known before the diff is drawn). */
       noStats?: boolean;
+      /** A note under the header (what a combined diff includes). Never drawn on the review. */
+      banner?: { tone: "info" | "warn"; text: string } | null;
     } | null;
   } = $props();
 
@@ -597,6 +599,18 @@
     </div>
   {/if}
 
+  {#if row && external?.banner}
+    <div class="banner {external.banner.tone}" role="note">
+      {#if external.banner.tone === "warn"}
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path d="M8 2 1.5 13.5h13L8 2Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
+          <path d="M8 6.5v3.2M8 11.6v.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+      {/if}
+      <p>{external.banner.text}</p>
+    </div>
+  {/if}
+
   {#if openError}
     <div class="alert" role="alert">
       <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
@@ -866,6 +880,32 @@
     background: var(--active);
   }
 
+  .banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px var(--pad);
+    border-bottom: 1px solid var(--rule);
+    font-size: var(--fs-small);
+    line-height: 1.45;
+    flex: none;
+    user-select: text;
+  }
+  .banner p {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .banner svg {
+    flex: none;
+    margin-top: 2px;
+  }
+  .banner.info {
+    color: var(--muted);
+  }
+  .banner.warn {
+    color: var(--warning-ink);
+    background: var(--warning-bg);
+  }
   .alert {
     display: flex;
     align-items: flex-start;

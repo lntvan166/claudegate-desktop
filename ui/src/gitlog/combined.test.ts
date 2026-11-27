@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CombinedLoad,
   combinedFirst,
+  combinedNotice,
   combinedPlan,
   combinedTitle,
   enterStep,
@@ -214,5 +215,52 @@ describe("races of the open file", () => {
     expect(staleStep({ superseded: false, loading: true, retried: false })).toBe("wait");
     expect(staleStep({ superseded: false, loading: false, retried: false })).toBe("retry");
     expect(staleStep({ superseded: false, loading: false, retried: true })).toBe("fail");
+  });
+});
+
+describe("combinedNotice", () => {
+  const a = sha("a");
+  const c = sha("c");
+  const x = sha("9");
+  const subjects = { [x]: "header: wider title", [sha("1")]: "fix: x" };
+  const f = (extra: Partial<CombinedFile>) => file("a.ts", { shas: [a, c], last: c, ...extra });
+  const range = "aaaaaaa^ ↔ ccccccc";
+  it("says nothing for one commit on the fast path", () => {
+    expect(combinedNotice(file("a.ts"), {}, null)).toBeNull();
+  });
+  it("names the selected commits on the fast path", () => {
+    expect(combinedNotice(f({}), {}, null)).toEqual({ tone: "info", text: "2 selected commits: aaaaaaa · ccccccc" });
+  });
+  it("says unselected edits are context after a clean merge", () => {
+    expect(combinedNotice(f({ mode: "merge", included: [x] }), subjects, null)?.text).toBe(
+      "2 selected commits: aaaaaaa · ccccccc · edits from 1 unselected commit shown as unchanged context",
+    );
+    expect(combinedNotice(f({ mode: "merge" }), subjects, null)?.text).toBe("2 selected commits: aaaaaaa · ccccccc");
+    expect(combinedNotice(file("a.ts", { mode: "merge", included: [x] }), subjects, null)?.text).toMatch(/^1 selected commit: aaaaaaa · edits/);
+  });
+  it("warns when the changes can't be shown apart", () => {
+    const conflict = (included: string[]) => f({ mode: "fallback", reason: "conflict", included });
+    expect(combinedNotice(conflict([x]), subjects, null)).toEqual({
+      tone: "warn",
+      text: `${range} · includes 1 unselected commit: 9999999 header: wider title`,
+    });
+    expect(combinedNotice(conflict([x, sha("1")]), subjects, null)?.text).toBe(
+      `${range} · includes 2 unselected commits: 9999999 header: wider title; 1111111 fix: x`,
+    );
+    expect(combinedNotice(conflict([]), subjects, null)?.text).toBe(`${range} · the selected changes can't be shown apart`);
+  });
+  it("labels binary and too-large fallbacks and still names included commits", () => {
+    expect(combinedNotice(f({ mode: "fallback", reason: "binary" }), subjects, null)?.text).toBe(`${range} · binary`);
+    expect(combinedNotice(f({ mode: "fallback", reason: "tooLarge" }), subjects, null)?.text).toBe(`${range} · too large`);
+    expect(combinedNotice(f({ mode: "fallback", reason: "binary", included: [x] }), subjects, null)?.text).toBe(
+      `${range} · binary · includes 1 unselected commit: 9999999 header: wider title`,
+    );
+  });
+  it("a fallback from the left-side read overrides a merge", () => {
+    expect(combinedNotice(f({ mode: "merge", included: [x] }), subjects, { kind: "fallback", value: "conflict" })).toEqual({
+      tone: "warn",
+      text: `${range} · includes 1 unselected commit: 9999999 header: wider title`,
+    });
+    expect(combinedNotice(f({ mode: "merge" }), subjects, { kind: "text", value: "" })?.tone).toBe("info");
   });
 });

@@ -50,9 +50,7 @@
   type Row =
     | { kind: "repo"; id: string; repo: CombinedRepo }
     | { kind: "folder"; id: string; repo: CombinedRepo; node: CombinedNode; depth: number }
-    | { kind: "file"; id: string; repo: CombinedRepo; node: CombinedNode; file: CombinedFile; depth: number }
-    | { kind: "note"; id: string; text: string }
-    | { kind: "error"; id: string; text: string };
+    | { kind: "file"; id: string; repo: CombinedRepo; node: CombinedNode; file: CombinedFile; depth: number };
 
   // Collapsed folders and repos, keyed `repo U+0001 rel` (a repo root: `repo U+0001`).
   let collapsed = $state(new Set<string>());
@@ -64,11 +62,8 @@
     const out: Row[] = [];
     for (const r of repos) {
       out.push({ kind: "repo", id: `repo:${r.repo}`, repo: r });
-      if (collapsed.has(key(r.repo, ""))) continue;
-      if (r.error) {
-        out.push({ kind: "error", id: `error:${r.repo}`, text: `Couldn't read ${repoName(r.repo)}: ${r.error}` });
-        continue;
-      }
+      // A repo that could not be read has nothing under it (its error is in the status region).
+      if (r.error || collapsed.has(key(r.repo, ""))) continue;
       const mine = new Set([...collapsed].filter((k) => k.startsWith(`${r.repo}\u0001`)).map((k) => k.slice(r.repo.length + 1)));
       for (const v of visibleNodes(combinedTree(r.files), mine)) {
         const node = v.node;
@@ -76,12 +71,23 @@
         if (node.kind === "folder") out.push({ kind: "folder", id, repo: r, node, depth: v.depth + 1 });
         else if (node.item) out.push({ kind: "file", id, repo: r, node, file: node.item.file, depth: v.depth + 1 });
       }
-      const note = noNetChangeText(r.noNetChange);
-      if (note) out.push({ kind: "note", id: `note:${r.repo}`, text: repos.length > 1 ? `${repoName(r.repo)}: ${note}` : note });
     }
     return out;
   });
-  const focusable = $derived(rows.filter((r) => r.kind !== "note" && r.kind !== "error"));
+  // What the tree leaves out, from the whole answer (a collapsed repo still says it): unreadable
+  // repositories and files with no net change.
+  const notes = $derived.by(() => {
+    const out: { id: string; text: string; err: boolean }[] = [];
+    for (const r of repos) {
+      if (r.error) out.push({ id: `error:${r.repo}`, text: `Couldn't read ${repoName(r.repo)}: ${r.error}`, err: true });
+      else {
+        const note = noNetChangeText(r.noNetChange);
+        if (note) out.push({ id: `note:${r.repo}`, text: repos.length > 1 ? `${repoName(r.repo)}: ${note}` : note, err: false });
+      }
+    }
+    return out;
+  });
+  const focusable = $derived(rows);
   const ids = $derived(focusable.map((r) => r.id));
   const activeId = $derived(active ? `file:${key(active.repo, active.path)}` : null);
   // The one tab stop: the focused row, else the open file, else the first row.
@@ -143,8 +149,10 @@
   }
   const toggleKey = (r: Row) => (r.kind === "repo" ? key(r.repo.repo, "") : r.kind === "folder" ? key(r.repo.repo, r.node.rel) : "");
 
+  const canToggle = (r: Row) => r.kind === "folder" || (r.kind === "repo" && !r.repo.error);
+
   function activate(r: Row) {
-    if (r.kind === "repo" || r.kind === "folder") toggle(toggleKey(r));
+    if (canToggle(r)) toggle(toggleKey(r));
     else if (r.kind === "file") onopenfile(r.repo.repo, r.file);
   }
   const depthOf = (r: Row) => (r.kind === "repo" ? 0 : r.kind === "folder" || r.kind === "file" ? r.depth : 1);
@@ -157,14 +165,14 @@
       e.preventDefault();
       const to = navigate(focusable.length, i, e.key as NavKey, 8);
       if (to >= 0) void focusRow(ids[to]);
-    } else if (e.key === "ArrowRight" && cur && (cur.kind === "folder" || cur.kind === "repo")) {
+    } else if (e.key === "ArrowRight" && cur && canToggle(cur)) {
       e.preventDefault();
       const k = toggleKey(cur);
       if (collapsed.has(k)) toggle(k, true);
       else if (focusable[i + 1] && depthOf(focusable[i + 1]) > depthOf(cur)) void focusRow(ids[i + 1]);
     } else if (e.key === "ArrowLeft" && cur) {
       e.preventDefault();
-      if ((cur.kind === "folder" || cur.kind === "repo") && !collapsed.has(toggleKey(cur))) toggle(toggleKey(cur), false);
+      if (canToggle(cur) && !collapsed.has(toggleKey(cur))) toggle(toggleKey(cur), false);
       else {
         for (let j = i - 1; j >= 0; j--) {
           if (depthOf(focusable[j]) < depthOf(cur)) {
@@ -214,24 +222,29 @@
       {#each rows as r (r.id)}
         {#if r.kind === "repo"}
           {@const open = !collapsed.has(key(r.repo.repo, ""))}
+          {@const expandable = !r.repo.error}
           <button
             class="row root"
             role="treeitem"
             aria-selected="false"
             aria-level={1}
-            aria-expanded={open}
+            aria-expanded={expandable ? open : undefined}
             data-id={r.id}
             tabindex={tabId === r.id ? 0 : -1}
             style:--c={colorVar(repoColor(r.repo.repo))}
             title={repoTip(r.repo)}
             onclick={() => {
               focusId = r.id;
-              toggle(key(r.repo.repo, ""));
+              if (expandable) toggle(key(r.repo.repo, ""));
             }}
           >
-            <svg class="chev" class:open viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-              <path d="M6 4.5 9.5 8 6 11.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
+            {#if expandable}
+              <svg class="chev" class:open viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+                <path d="M6 4.5 9.5 8 6 11.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            {:else}
+              <span class="chev-gap" aria-hidden="true"></span>
+            {/if}
             <span class="chip"><span class="dot"></span><span class="cname">{repoName(r.repo.repo)}</span></span>
             <span class="spacer"></span>
             <span class="meta num">{r.repo.commits.length} {r.repo.commits.length === 1 ? "commit" : "commits"}</span>
@@ -298,10 +311,8 @@
     </div>
     <!-- Not tree rows: a tree holds only items. One polite region says what the tree leaves out. -->
     <div class="notes" role="status" aria-live="polite">
-      {#each rows as r (r.id)}
-        {#if r.kind === "note" || r.kind === "error"}
-          <p class="note" class:err={r.kind === "error"}>{r.text}</p>
-        {/if}
+      {#each notes as n (n.id)}
+        <p class="note" class:err={n.err}>{n.text}</p>
       {/each}
     </div>
   {/if}

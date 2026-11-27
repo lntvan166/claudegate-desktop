@@ -69,6 +69,47 @@ export function warnText(f: CombinedFile, subjects: Record<string, string>): str
   return `Includes changes from ${f.included.length} unselected ${f.included.length === 1 ? "commit" : "commits"}: ${list}`;
 }
 
+export type Banner = { tone: "info" | "warn"; text: string };
+
+const commitsWord = (n: number) => (n === 1 ? "commit" : "commits");
+
+/** `9c4e1a8 header: wider title; 1b2c3d4 fix: x` */
+function includedList(included: string[], subjects: Record<string, string>): string {
+  return included
+    .map((s) => {
+      const subject = subjects[s] ?? subjects[shortSha(s)];
+      return subject ? `${shortSha(s)} ${subject}` : shortSha(s);
+    })
+    .join("; ");
+}
+
+/**
+ * The note under the diff header: what the combined diff covers. Null for one commit on the fast
+ * path. `left` is the `gitlogCombinedLeft` answer of a merge file (null otherwise): a fallback
+ * there overrides the mode. A fallback names the unselected commits it carries, whatever the reason.
+ */
+export function combinedNotice(f: CombinedFile, subjects: Record<string, string>, left: CombinedLeft | null): Banner | null {
+  const fellBack = f.mode === "fallback" || left?.kind === "fallback";
+  if (!fellBack) {
+    const n = f.shas.length;
+    if (f.mode === "fast" && n === 1) return null;
+    let text = `${n} selected ${commitsWord(n)}: ${shaList(f.shas)}`;
+    if (f.mode === "merge" && f.included.length > 0) {
+      text += ` · edits from ${f.included.length} unselected ${commitsWord(f.included.length)} shown as unchanged context`;
+    }
+    return { tone: "info", text };
+  }
+  const reason: FallbackReason | null = left?.kind === "fallback" ? left.value : f.reason;
+  const range = `${shortSha(f.shas[0] ?? f.last)}^ ↔ ${shortSha(f.last)}`;
+  const inc = f.included.length > 0 ? `includes ${f.included.length} unselected ${commitsWord(f.included.length)}: ${includedList(f.included, subjects)}` : null;
+  const parts = [range];
+  if (reason === "binary") parts.push("binary");
+  else if (reason === "tooLarge") parts.push("too large");
+  if (inc) parts.push(inc);
+  else if (reason !== "binary" && reason !== "tooLarge") parts.push("the selected changes can't be shown apart");
+  return { tone: "warn", text: parts.join(" · ") };
+}
+
 /** `2 files with no net change: a.ts, b.ts`; null when there are none. */
 export function noNetChangeText(paths: string[]): string | null {
   if (paths.length === 0) return null;

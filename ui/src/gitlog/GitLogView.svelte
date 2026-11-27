@@ -35,7 +35,8 @@
     EMPTY_COMBINED,
     type CombinedFile,
     type CombinedState,
-    type FallbackReason,
+    type CombinedLeft,
+    combinedNotice,
   } from "./combined";
   import {
     CHANGES_DEBOUNCE_MS,
@@ -216,8 +217,8 @@
   let combinedTree: CombinedChanges | undefined = $state();
   /** The combined file whose diff is open. */
   let cActive = $state<{ repo: string; file: CombinedFile } | null>(null);
-  /** Why the open file's left side fell back to one diff across the selection (shown by Task 6). */
-  let cFallback = $state<FallbackReason | null>(null);
+  /** The whole `gitlogCombinedLeft` answer of the open file (null unless it took the merge path): a fallback in it overrides the file's mode in the banner. */
+  let cLeft = $state<CombinedLeft | null>(null);
   /** Enter was pressed before the answer landed: open the first file when it does. */
   let enterWanted = false;
   /** The open file's read was cut short by a superseded query: read it again when the answer lands. */
@@ -245,7 +246,7 @@
           cActive = null;
           clearDiff();
         }
-        cFallback = null;
+        cLeft = null;
         return;
       }
       combinedState = { ...combinedState, loading: true, error: null };
@@ -291,13 +292,13 @@
     const g = fileGate.next();
     cRetry = false;
     cActive = { repo, file: f };
-    cFallback = null;
+    cLeft = null;
     shownPane = null;
     diffLoading = true;
     diffError = null;
     openError = null;
     const qid = combinedLoad.id;
-    let fallback: FallbackReason | null = null;
+    let answer: CombinedLeft | null = null;
     const plan = combinedPlan(f);
     const readRev = (): Promise<FileView> =>
       f.beforeRef === null ? Promise.resolve<FileView>({ kind: "missing" }) : gitlogRevFile(repo, f.beforeRef, f.beforePath);
@@ -305,9 +306,9 @@
       if (plan.left === "missing") return { kind: "missing" };
       if (plan.left === "rev") return readRev();
       const ans = await gitlogCombinedLeft(qid, repo, f.last, f.path, [...f.shas].reverse());
+      answer = ans;
       if (ans.kind === "text") return { kind: "text", value: ans.value };
       // The backend could not take the selection apart after all: one diff across it.
-      fallback = ans.value;
       return readRev();
     };
     try {
@@ -316,7 +317,7 @@
         plan.right === "missing" ? Promise.resolve<FileView>({ kind: "missing" }) : gitlogRevFile(repo, f.last, f.path),
       ]);
       if (!fileGate.isCurrent(g)) return;
-      cFallback = fallback;
+      cLeft = answer;
       shownPane = diffPane(f.path, before, after);
       diffLoading = false;
     } catch (e) {
@@ -541,6 +542,10 @@
       : null,
   );
   const diffRow = $derived(combinedOn ? combinedRow : singleRow);
+  // While the diff is being read a merge file may still turn out to fall back: say nothing yet.
+  const cBanner = $derived(
+    cActive && !diffLoading ? combinedNotice(cActive.file, combinedRepos.find((r) => r.repo === cActive!.repo)?.subjects ?? {}, cLeft) : null,
+  );
   const combinedExternal = $derived.by(() => {
     const pane = shownPane;
     const f = cActive?.file;
@@ -549,6 +554,7 @@
       loading: diffLoading,
       error: diffError,
       noStats: true,
+      banner: cBanner,
       notice: !f
         ? { title: "Select a file to see its diff", body: "Click a file in Changes, or press Enter on it." }
         : pane && pane.kind !== "diff"
