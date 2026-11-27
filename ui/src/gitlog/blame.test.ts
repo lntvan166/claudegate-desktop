@@ -92,3 +92,16 @@ describe("blame sides", () => {
     expect(combinedBlameSides("/r", cf({ status: "deleted" }), false).modified).toBeNull();
   });
 });
+
+describe("compare blame", () => {
+  it("blames a compare diff at the base and the tip", async () => {
+    const { compareBlameSides } = await import("./blame");
+    const base = "b".repeat(40);
+    const tip = "t".repeat(40);
+    expect(compareBlameSides("/r/.git", base, tip, "src/new.ts", "src/old.ts")).toEqual({
+      original: { repo: "/r/.git", rev: base, path: "src/old.ts" },
+      modified: { repo: "/r/.git", rev: tip, path: "src/new.ts" },
+    });
+    expect(compareBlameSides("/r/.git", base, tip, "a.ts", null).original).toEqual({ repo: "/r/.git", rev: base, path: "a.ts" });
+  });
+});

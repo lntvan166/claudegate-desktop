@@ -58,7 +58,9 @@
     type ChangedFile,
     type DiffPane,
   } from "./changes";
-  import { combinedBlameSides, commitBlameSides, type BlameLine, type BlameRef, type BlameSides } from "./blame";
+  import { combinedBlameSides, commitBlameSides, compareBlameSides, type BlameLine, type BlameRef, type BlameSides } from "./blame";
+  import ComparePane from "./ComparePane.svelte";
+  import { compareBanner, compareOpenKey, type CompareOpen } from "./compare";
   import Filters from "./Filters.svelte";
   import LogList from "./LogList.svelte";
   import { EMPTY_SELECTION, type Selection } from "./selection";
@@ -108,6 +110,7 @@
   let repoPane: RepoPane | undefined = $state();
   /** Puts the keyboard in the Repositories pane (App calls it after switching to this view). */
   export function focusStart() {
+    if (mode === "compare") return comparePane?.focus();
     // The commit list when there is one to read; the Repositories pane when nothing is ticked yet.
     if (logList && queryRepos.length > 0) logList.focusList();
     else void repoPane?.focusStart();
@@ -132,6 +135,20 @@
   }
 
   const COLLAPSED_KEY = "claudegate.gitlog.reposCollapsed";
+
+  /**
+   * Log or Compare: two modes of the one view. Compare sets the filter bar and commit list aside
+   * (both stay mounted, with their query and selection) and shows the branch comparison instead.
+   */
+  let mode = $state<"log" | "compare">("log");
+  let comparePane: ComparePane | undefined = $state();
+  async function setMode(m: "log" | "compare") {
+    if (m === mode) return;
+    mode = m;
+    await tick();
+    if (m === "compare") comparePane?.focus();
+    else logList?.focusList();
+  }
 
   let repos = $state<RepoView[] | null>(null);
   let reposError = $state<string | null>(null);
@@ -548,8 +565,106 @@
     // Esc in the tree (it handles its own) or the diff: back to the commit list.
     if (e.key !== "Escape" || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
     e.preventDefault();
-    logList?.focusList();
+    if (mode === "compare") comparePane?.focus();
+    else logList?.focusList();
   }
+
+  // ---- Compare: a file opened from the columns ---------------------------------------------
+  // Its own diff state, so the log's open file is still there when Log comes back.
+  let cmpOpen = $state<CompareOpen | null>(null);
+  let cmpPane = $state<DiffPane | null>(null);
+  let cmpLoading = $state(false);
+  let cmpError = $state<string | null>(null);
+  const cmpGate = createGate();
+
+  function clearCompareDiff() {
+    cmpGate.next();
+    cmpOpen = null;
+    cmpPane = null;
+    cmpLoading = false;
+    cmpError = null;
+    if (mode === "compare") openError = null;
+  }
+
+  async function showCompareFile(o: CompareOpen) {
+    const g = cmpGate.next();
+    cmpOpen = o;
+    cmpPane = null;
+    cmpLoading = true;
+    cmpError = null;
+    openError = null;
+    const f = o.file;
+    const missing = Promise.resolve<FileView>({ kind: "missing" });
+    try {
+      const [before, after] = await Promise.all(
+        o.kind === "side"
+          ? [
+              // The merge base at the path before a rename on this side, against this side's tip.
+              f.status === "added" ? missing : gitlogRevFile(o.repo, o.base, f.from ?? f.path),
+              f.status === "deleted" ? missing : gitlogRevFile(o.repo, o.tip, f.path),
+            ]
+          : [f.status === "added" ? missing : gitlogFile(o.repo, o.commit.sha, f.path, "before", beforeFrom(f)), gitlogFile(o.repo, o.commit.sha, f.path, "after")],
+      );
+      if (!cmpGate.isCurrent(g)) return;
+      cmpPane = diffPane(f.path, before, after);
+      cmpLoading = false;
+    } catch (e) {
+      if (!cmpGate.isCurrent(g)) return;
+      cmpError = String(e);
+      cmpLoading = false;
+    }
+  }
+
+  /** A compare commit as the single-commit helpers take it. */
+  const commitRow = (o: Extract<CompareOpen, { kind: "commit" }>): RowView => ({
+    repo: o.repo,
+    sha: o.commit.sha,
+    time: o.commit.time,
+    author: o.commit.author,
+    email: "",
+    subject: o.commit.subject,
+    parents: o.commit.parents,
+    source: "HEAD",
+  });
+
+  const compareRow = $derived<Row | null>(
+    cmpOpen
+      ? {
+          key: `cmp:${compareOpenKey(cmpOpen)}`,
+          path: cmpOpen.file.path,
+          rel: cmpOpen.file.path,
+          scope: cmpOpen.repo,
+          added: cmpOpen.file.added ?? 0,
+          removed: cmpOpen.file.removed ?? 0,
+          newFile: cmpOpen.file.status === "added",
+          decidedAt: null,
+          waiting: false,
+          rejectOutcome: null,
+        }
+      : null,
+  );
+  const compareExternal = $derived.by(() => {
+    const pane = cmpPane;
+    const o = cmpOpen;
+    const f = o?.file;
+    return {
+      payload: pane?.kind === "diff" ? pane.payload : null,
+      loading: cmpLoading,
+      error: cmpError,
+      banner: bannerWhenSettled(o?.kind === "side" ? compareBanner(o.side, o.pair) : null, { loading: cmpLoading, error: cmpError }),
+      notice: !f
+        ? { title: "Select a file to see its diff", body: "Click a file in the columns below, or press Enter on it." }
+        : pane && pane.kind !== "diff"
+          ? paneMessage(pane)
+          : null,
+      tag:
+        f?.status === "deleted"
+          ? { text: "Deleted", tone: "deleted" as const }
+          : f && (f.status === "renamed" || f.status === "copied")
+            ? { text: statusText(f), tone: "new" as const }
+            : null,
+    };
+  });
 
   /** The row the shared diff header draws: a commit's file, never a review row. */
   const singleRow = $derived<Row | null>(
@@ -584,7 +699,7 @@
         }
       : null,
   );
-  const diffRow = $derived(combinedOn ? combinedRow : singleRow);
+  const diffRow = $derived(mode === "compare" ? compareRow : combinedOn ? combinedRow : singleRow);
   const cBanner = $derived(
     bannerWhenSettled(
       cActive ? combinedNotice(cActive.file, combinedRepos.find((r) => r.repo === cActive!.repo)?.subjects ?? {}, cLeft) : null,
@@ -636,6 +751,13 @@
 
   /** The revisions each side of the open diff is blamed at; null when no file is open. */
   function blameSides(): BlameSides | null {
+    if (mode === "compare") {
+      const o = cmpOpen;
+      if (!o) return null;
+      if (o.kind === "commit") return commitBlameSides(commitRow(o), o.file);
+      const b = compareBlameSides(o.repo, o.base, o.tip, o.file.path, o.file.from ?? null);
+      return { original: o.file.status === "added" ? null : b.original, modified: o.file.status === "deleted" ? null : b.modified };
+    }
     if (combinedOn) return cActive ? combinedBlameSides(cActive.repo, cActive.file, cLeft?.kind === "text") : null;
     return changesFor && activeFile ? commitBlameSides(changesFor, activeFile) : null;
   }
@@ -661,14 +783,15 @@
   }
 
   const blame = $derived({ on: cfg.blame, at: blameAt, toggle: (on: boolean) => void setBlame(on), cancel: () => void gitlogBlameCancel(queryGate.begin()).catch(() => {}) });
-  const external = $derived({ ...(combinedOn ? combinedExternal : singleExternal), blame });
+  const external = $derived({ ...(mode === "compare" ? compareExternal : combinedOn ? combinedExternal : singleExternal), blame });
 
   /** "Open in editor": the working-tree file, never written to. It may be gone since the commit. */
   async function openInWorktree(line: number, col: number, template: string | null = null): Promise<boolean> {
     const r = changesFor;
     const f = activeFile;
     const c = cActive;
-    const target = combinedOn ? (c ? { repo: c.repo, path: c.file.path, source: undefined } : null) : r && f ? { repo: r.repo, path: f.path, source: r.source } : null;
+    const o = cmpOpen;
+    const target = mode === "compare" ? (o ? { repo: o.repo, path: o.file.path, source: undefined } : null) : combinedOn ? (c ? { repo: c.repo, path: c.file.path, source: undefined } : null) : r && f ? { repo: r.repo, path: f.path, source: r.source } : null;
     if (!target) return false;
     openError = null;
     try {
@@ -802,7 +925,7 @@
     {onnotice}
     {launchTicks}
     onlaunchdone={() => (launchTicks = null)}
-    onslash={() => filters?.focusSearch()}
+    onslash={() => (mode === "log" ? filters?.focusSearch() : undefined)}
   />
 
   {#if !collapsed}
@@ -823,6 +946,29 @@
   <div class="sheet" bind:clientHeight={sheetH}>
     <!-- The commit list comes first in the DOM, so Tab runs list, tree, diff; the top row is drawn above it. -->
     <div class="log">
+      <div class="modes" role="group" aria-label="Git log mode">
+        <button type="button" aria-pressed={mode === "log"} onclick={() => void setMode("log")}>Log</button>
+        <button type="button" aria-pressed={mode === "compare"} onclick={() => void setMode("compare")}>Compare</button>
+      </div>
+      {#if mode === "compare" || comparePane}
+        <div class="cmpwrap" class:hidden={mode !== "compare"}>
+          <ComparePane
+            bind:this={comparePane}
+            shown={active && mode === "compare"}
+            {configReady}
+            repos={repos ?? []}
+            {queryRepos}
+            {cfg}
+            {theme}
+            open={cmpOpen}
+            onconfig={(c) => (cfg = { ...cfg, comparePair: c.comparePair, compareRecent: c.compareRecent, compareFavorites: c.compareFavorites, compareMode: c.compareMode })}
+            onopen={(o) => void showCompareFile(o)}
+            onclear={clearCompareDiff}
+            {onnotice}
+          />
+        </div>
+      {/if}
+      <div class="logbody" class:hidden={mode !== "log"}>
       <Filters bind:this={filters} bind:filter loading={logBusy} disabled={!!history} onrefresh={() => logList?.refresh()} onexit={() => logList?.focusList()} />
       {#if history}
         <div class="history" role="group" aria-label="File History">
@@ -852,12 +998,16 @@
           onfocussearch={() => filters?.focusSearch()}
           onloading={(b) => (logBusy = b)}
           {onnotice}
+          hidden={mode !== "log"}
         />
       {/if}
+      </div>
     </div>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="top" style:height={topH > 0 ? `${topH}px` : `${TOP_DEFAULT * 100}%`} onkeydown={leaveBottom}>
-      {#if combinedOn}
+    <div class="top" class:solo={mode === "compare"} style:height={topH > 0 ? `${topH}px` : `${TOP_DEFAULT * 100}%`} onkeydown={leaveBottom}>
+      {#if mode === "compare"}
+        <!-- Compare: the diff alone; the files are in the columns below. -->
+      {:else if combinedOn}
         <CombinedChanges
           bind:this={combinedTree}
           title={combinedHeading}
@@ -891,7 +1041,7 @@
           onhistory={openHistory}
         />
       {/if}
-      <div class="split split-changes">
+      <div class="split split-changes" class:hidden={mode === "compare"}>
         <Splitter
           label="Resize changes"
           value={panes.changes}
@@ -908,7 +1058,7 @@
           bind:this={diffView}
           row={diffRow}
           kind="pending"
-          root={combinedOn ? (cActive?.repo ?? "") : (changesFor?.repo ?? "")}
+          root={mode === "compare" ? (cmpOpen?.repo ?? "") : combinedOn ? (cActive?.repo ?? "") : (changesFor?.repo ?? "")}
           version={0}
           {theme}
           {config}
@@ -997,6 +1147,53 @@
   .top > :global(.changes) {
     border-right: 1px solid var(--rule);
   }
+  .top.solo {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .split-changes.hidden,
+  .cmpwrap.hidden,
+  .logbody.hidden {
+    display: none;
+  }
+  .logbody {
+    display: contents;
+  }
+  .cmpwrap {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .modes {
+    flex: none;
+    display: inline-flex;
+    align-self: flex-start;
+    margin: 6px var(--pad) 0;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-control);
+    overflow: hidden;
+  }
+  .modes button {
+    height: 24px;
+    padding: 0 12px;
+    font-size: var(--fs-small);
+    color: var(--muted);
+  }
+  .modes button + button {
+    border-left: 1px solid var(--control-border);
+  }
+  .modes button[aria-pressed="true"] {
+    background: var(--active);
+    color: var(--text);
+    font-weight: 600;
+  }
+  .modes button:hover:not([aria-pressed="true"]) {
+    background: var(--hover);
+  }
+  .modes button:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -2px;
+  }
   .diffcol {
     display: flex;
     flex-direction: column;
@@ -1079,6 +1276,9 @@
     .top {
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: minmax(0, 2fr) minmax(0, 3fr);
+    }
+    .top.solo {
+      grid-template-rows: minmax(0, 1fr);
     }
     .top > :global(.changes) {
       border-right: 0;

@@ -70,3 +70,135 @@ describe("compare helpers", () => {
     expect(recent).toHaveLength(5);
   });
 });
+
+// ---- Compare mode (Task 12) ------------------------------------------------------------------
+import { QueryGate } from "./log";
+import {
+  bothStripText,
+  columnHeader,
+  compareBanner,
+  compareMessage,
+  CompareLoad,
+  emptyColumnText,
+  missingText,
+  mirror,
+  repoCounts,
+  sidePage,
+  summaryLabel,
+  type CompareState,
+  type CompareView,
+  type RepoCompare,
+} from "./compare";
+
+const A = "a".repeat(40);
+const B = "b".repeat(40);
+const C = "c".repeat(40);
+const differs = (left: number, right: number, sameLeft = 0, sameRight = sameLeft): RepoCompare => ({ kind: "differs", leftSha: A, rightSha: B, base: C, left, right, sameLeft, sameRight });
+
+describe("compare mode", () => {
+  it("summarises the comparison without commit numbers", () => {
+    const d = differs(2, 1, 1);
+    const results: RepoCompare[] = [d, { ...differs(5, 0) }, { kind: "identical" }, { kind: "missing" }, { kind: "missing" }, { kind: "nobase" }];
+    expect(summaryLabel(results, 6)).toBe("3 repositories differ · 1 identical · 2 missing a branch · in 6 repositories");
+    expect(summaryLabel([{ kind: "identical" }], 1)).toBe("0 repositories differ · 1 identical · in 1 repository");
+    expect(summaryLabel([differs(5, 0)], 1)).toBe("1 repository differs · in 1 repository");
+  });
+
+  it("counts each side and the duplicates, zeros left out", () => {
+    expect(repoCounts(differs(3, 1, 1))).toBe("◀3 ▶1 =1");
+    expect(repoCounts(differs(3, 0))).toBe("◀3");
+    expect(repoCounts(differs(0, 2))).toBe("▶2");
+    expect(repoCounts(differs(0, 0, 3))).toBe("=3");
+    expect(repoCounts({ kind: "nobase" })).toBe("no common history");
+    expect(repoCounts({ kind: "error", reason: "fatal: x" })).toBe("git error");
+  });
+
+  it("mirrors a result on swap", () => {
+    expect(mirror(differs(2, 1, 1, 3))).toEqual({ kind: "differs", leftSha: B, rightSha: A, base: C, left: 1, right: 2, sameLeft: 3, sameRight: 1 });
+    expect(mirror({ kind: "missing" })).toEqual({ kind: "missing" });
+    expect(mirror({ kind: "error", reason: "x" })).toEqual({ kind: "error", reason: "x" });
+  });
+
+  it("names the repositories missing a branch", () => {
+    expect(missingText(p1, 12)).toBe("origin/release-1.4 or origin/main is missing in 12 repositories");
+    expect(missingText(p1, 1)).toBe("origin/release-1.4 or origin/main is missing in 1 repository");
+  });
+
+  it("heads each column", () => {
+    expect(columnHeader("left", "files", 3, p1)).toBe("3 files · since the split");
+    expect(columnHeader("right", "files", 1, p1)).toBe("1 file · since the split");
+    expect(columnHeader("left", "commits", 2, p1)).toBe("2 commits · the merge brings these in");
+    expect(columnHeader("right", "commits", 2, p1)).toBe("2 commits · missing from origin/release-1.4");
+    expect(columnHeader("left", "commits", 1, p1)).toBe("1 commit · the merge brings these in");
+  });
+
+  it("says when a side has nothing", () => {
+    expect(emptyColumnText("left", p1)).toBe("Nothing here: origin/main already has every commit of origin/release-1.4.");
+    expect(emptyColumnText("right", p1)).toBe("Nothing here: origin/release-1.4 already has every commit of origin/main.");
+  });
+
+  it("explains the On both strip", () => {
+    expect(bothStripText(1)).toBe("= 1 on both — the same change committed on each side (cherry-picked): the merge does not repeat it, but history lists it twice");
+  });
+
+  it("shows the right message for each state", () => {
+    const rows = (...r: RepoCompare[]) => r;
+    expect(compareMessage(pair("main", "main"), 3, null)).toBe("Pick two different branches. Both sides are `main`.");
+    // The same name as a local and a remote-tracking branch is two refs.
+    expect(compareMessage(pair("origin/x", "origin/x", false, true), 3, rows(differs(1, 0)))).toBeNull();
+    expect(compareMessage(pair("main", ""), 3, null)).toBe("Pick the branch to merge from (◀) and the branch it goes into (▶).");
+    expect(compareMessage(null, 3, null)).toBe("Pick the branch to merge from (◀) and the branch it goes into (▶).");
+    expect(compareMessage(p1, 3, rows({ kind: "identical" }, { kind: "identical" }, { kind: "missing" }))).toBe("origin/release-1.4 and origin/main are the same in every repository.");
+    expect(compareMessage(p1, 0, null)).toBe("No repositories are ticked in the Repo List.");
+    expect(compareMessage(p1, 3, rows(differs(1, 0), { kind: "identical" }))).toBeNull();
+    expect(compareMessage(p1, 3, rows({ kind: "nobase" }))).toBeNull();
+    expect(compareMessage(p1, 68, null)).toBe("Reading 68 repositories…");
+    expect(compareMessage(p1, 1, null)).toBe("Reading 1 repository…");
+  });
+
+  it("offers more commits whenever git returned more than the page", () => {
+    const sc = (sha: string, mark: "+" | "=") => ({ mark, sha, parents: [], time: 0, author: "dana", subject: sha });
+    expect(sidePage([sc("a", "+"), sc("b", "="), sc("c", "+")], 2)).toEqual({ rows: [sc("a", "+")], more: true });
+    expect(sidePage([sc("a", "+"), sc("c", "+")], 2)).toEqual({ rows: [sc("a", "+"), sc("c", "+")], more: false });
+  });
+
+  it("labels a compare diff", () => {
+    expect(compareBanner("left", p1)).toEqual({ tone: "info", text: "merge base ↔ release-1.4" });
+    expect(compareBanner("right", p1)).toEqual({ tone: "info", text: "merge base ↔ main" });
+    // A local branch keeps its whole name.
+    expect(compareBanner("left", pair("origin/x", "main"))).toEqual({ tone: "info", text: "merge base ↔ origin/x" });
+  });
+
+  it("a superseded compare answer is ignored", async () => {
+    const deferred = <T>() => {
+      let resolve!: (v: T) => void;
+      const promise = new Promise<T>((a) => (resolve = a));
+      return { promise, resolve };
+    };
+    const calls: { id: number; d: ReturnType<typeof deferred<CompareView>> }[] = [];
+    const states: CompareState[] = [];
+    const load = new CompareLoad(
+      (id) => {
+        const d = deferred<CompareView>();
+        calls.push({ id, d });
+        return d.promise;
+      },
+      (s) => states.push(s),
+      new QueryGate(1000),
+    );
+    const view = (queryId: number, repo: string): CompareView => ({ queryId, rows: [{ repo, kind: "identical" }] });
+    const a = load.start(["r"], p1);
+    const b = load.start(["r"], p2);
+    expect(calls[1].id).toBeGreaterThan(calls[0].id);
+    expect(load.id).toBe(calls[1].id);
+    calls[1].d.resolve(view(calls[1].id, "B"));
+    await b;
+    calls[0].d.resolve(view(calls[0].id, "A"));
+    await a;
+    expect(states.at(-1)?.view?.rows[0].repo).toBe("B");
+    expect(states.at(-1)?.loading).toBe(false);
+    // Swap mirrors what is shown, without a read.
+    load.mirror();
+    expect(calls).toHaveLength(2);
+  });
+});

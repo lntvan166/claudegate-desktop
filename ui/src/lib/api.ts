@@ -19,6 +19,7 @@ import type { FilterView, HistoryReq, PageView } from "../gitlog/log";
 import type { ChangedFile, FileSide, FileView } from "../gitlog/changes";
 import type { CombinedLeft, CombinedView } from "../gitlog/combined";
 import type { BlameLine } from "../gitlog/blame";
+import type { BranchName, CompareFiles, CompareView, Pair, SideCommit } from "../gitlog/compare";
 
 export type { AuditView, CaptureView, HookReplacedView, HookView, InstallView, UpdateView };
 export type { GitLogConfig, RepoView };
@@ -255,6 +256,18 @@ export interface Api {
   /** Removes a favourite branch (remove-only). */
   gitlogUnfavorite(name: string, remote: boolean): Promise<GitLogConfig>;
   gitlogCompareMode(mode: "files" | "commits"): Promise<GitLogConfig>;
+  /**
+   * Compare Branches (gitlog_compare.rs): the pair across `repos`, answered in one response. Starts
+   * query `queryId` on the window's `#compare` channel, superseding the previous pair's reads. Each
+   * side is resolved as exactly the ref picked (`leftRemote`/`rightRemote`).
+   */
+  gitlogCompare(queryId: number, repos: string[], pair: Pair): Promise<CompareView>;
+  /** Files mode for one repository, under the pair's query (never starts one). */
+  gitlogCompareFiles(queryId: number, repo: string, leftSha: string, rightSha: string, base: string): Promise<CompareFiles>;
+  /** Commits mode for one side, newest first, `max` at most, duplicates (`=`) included. */
+  gitlogCompareCommits(queryId: number, repo: string, side: "left" | "right", leftSha: string, rightSha: string, max: number): Promise<SideCommit[]>;
+  /** Branch names across `repos` for the picker, with how many repositories have each. */
+  gitlogBranches(repos: string[]): Promise<BranchName[]>;
 }
 
 const tauriApi: Api = {
@@ -322,6 +335,11 @@ const tauriApi: Api = {
   gitlogFavorite: (name, remote) => invoke<GitLogConfig>("gitlog_favorite", { name, remote }),
   gitlogUnfavorite: (name, remote) => invoke<GitLogConfig>("gitlog_unfavorite", { name, remote }),
   gitlogCompareMode: (mode) => invoke<GitLogConfig>("gitlog_compare_mode", { mode }),
+  gitlogCompare: (queryId, repos, p) =>
+    invoke<CompareView>("gitlog_compare", { queryId, repos, left: p.left, leftRemote: p.leftRemote, right: p.right, rightRemote: p.rightRemote }),
+  gitlogCompareFiles: (queryId, repo, leftSha, rightSha, base) => invoke<CompareFiles>("gitlog_compare_files", { queryId, repo, leftSha, rightSha, base }),
+  gitlogCompareCommits: (queryId, repo, side, leftSha, rightSha, max) => invoke<SideCommit[]>("gitlog_compare_commits", { queryId, repo, side, leftSha, rightSha, max }),
+  gitlogBranches: (repos) => invoke<BranchName[]>("gitlog_branches", { repos }),
 };
 
 let chosen: Promise<Api> | undefined;
@@ -420,3 +438,9 @@ export const gitlogCompareRecent = async (left: string, leftRemote: boolean, rig
 export const gitlogFavorite = async (name: string, remote: boolean) => (await api()).gitlogFavorite(name, remote);
 export const gitlogUnfavorite = async (name: string, remote: boolean) => (await api()).gitlogUnfavorite(name, remote);
 export const gitlogCompareMode = async (mode: "files" | "commits") => (await api()).gitlogCompareMode(mode);
+export const gitlogCompare = async (queryId: number, repos: string[], pair: Pair) => (await api()).gitlogCompare(queryId, repos, pair);
+export const gitlogCompareFiles = async (queryId: number, repo: string, leftSha: string, rightSha: string, base: string) =>
+  (await api()).gitlogCompareFiles(queryId, repo, leftSha, rightSha, base);
+export const gitlogCompareCommits = async (queryId: number, repo: string, side: "left" | "right", leftSha: string, rightSha: string, max: number) =>
+  (await api()).gitlogCompareCommits(queryId, repo, side, leftSha, rightSha, max);
+export const gitlogBranches = async (repos: string[]) => (await api()).gitlogBranches(repos);

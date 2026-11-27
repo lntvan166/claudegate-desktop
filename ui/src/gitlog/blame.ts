@@ -54,3 +54,8 @@ export function combinedBlameSides(repo: string, f: CombinedFile, leftMerged: bo
     modified: f.status === "deleted" ? null : { repo, rev: f.last, path: f.path },
   };
 }
+
+/** A compare file: the merge base (at the path before a rename on that side) against that side's tip. */
+export function compareBlameSides(repo: string, base: string, tip: string, path: string, from: string | null): BlameSides {
+  return { original: { repo, rev: base, path: from ?? path }, modified: { repo, rev: tip, path } };
+}

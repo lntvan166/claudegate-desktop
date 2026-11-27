@@ -54,6 +54,7 @@
     queryRepos,
     filter,
     active,
+    hidden = false,
     selection = $bindable(EMPTY_SELECTION),
     multi = true,
     history = null,
@@ -70,6 +71,11 @@
     queryRepos: string[];
     filter: FilterState;
     active: boolean;
+    /**
+     * Set aside behind Compare: the query and selection are kept (and a new scope still re-reads), but
+     * `/` and paging by scroll wait until the list is back on screen.
+     */
+    hidden?: boolean;
     /** The picked commits: `focus` is the row the keyboard is on (it drives the single-commit Changes). */
     selection?: Selection;
     /** Ctrl/Shift pick several; off, every click is a plain click (File History). */
@@ -147,6 +153,13 @@
         else later();
       }
     });
+  });
+  // Back from Compare: the list was display:none, so its scroll position and height are re-read.
+  let wasHidden = false;
+  $effect(() => {
+    const h = hidden;
+    if (wasHidden && !h) void tick().then(resync);
+    wasHidden = h;
   });
   onDestroy(() => {
     later.cancel();
@@ -229,7 +242,7 @@
   }
   // Fetch the next page before the end is reached; `more()` itself refuses a second in flight.
   $effect(() => {
-    if (!active || q.done || q.loading || q.loadingMore || q.error || !nearEnd(range.end, rows.length)) return;
+    if (!active || hidden || q.done || q.loading || q.loadingMore || q.error || !nearEnd(range.end, rows.length)) return;
     // Bounded: a sparse filter must not page through all of history while nobody scrolls.
     if (!autoMoreAllowed(untrack(() => idle))) return;
     idle++;
@@ -277,7 +290,7 @@
   // `/` from anywhere in the Git log that is not a field or a menu.
   function onwindowkey(e: KeyboardEvent) {
     // The filters are set aside in File History: `/` has nowhere to go, so it is left alone.
-    if (history || !active || e.defaultPrevented || e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+    if (history || !active || hidden || e.defaultPrevented || e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
     if (!slashTarget(e.target as HTMLElement | null)) return;
     if (overlayShown(document.querySelectorAll<HTMLElement>(OVERLAY_SELECTOR))) return;
     e.preventDefault();

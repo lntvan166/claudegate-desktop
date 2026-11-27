@@ -22,7 +22,7 @@ import type {
 import type { FilterView, PageView, RowView } from "../gitlog/log";
 import type { ChangedFile, FileView } from "../gitlog/changes";
 import type { CombinedFile, CombinedLeft, CombinedRepo, CombinedView } from "../gitlog/combined";
-import { pushRecent } from "../gitlog/compare";
+import { mirror, pushRecent, type BranchName, type CompareFiles, type CompareRow, type Pair, type RepoCompare, type SideCommit } from "../gitlog/compare";
 import { DEFAULT_GITLOG_CONFIG, SCAN_DEPTH_MAX, type GitLogConfig, type RepoView } from "../gitlog/repos";
 import { DEFAULT_PROTECTED, globMatcher, type ExcludeOwner, type Resolved } from "./settings";
 
@@ -790,6 +790,103 @@ async function mockCombined(queryId: number, items: { repo: string; sha: string 
   return { queryId, repos: order.map((repo, gi) => mockCombinedRepo(repo, by.get(repo)!.slice().reverse(), gi)) };
 }
 
+// Compare Branches: a fixture with every row kind. The pair as written (release on the left, main on
+// the right) gives the rows below; swapped, each row is mirrored. A name the fixture does not know is
+// missing everywhere. Shas encode the side (`a…` left tip, `b…` right tip) so the reads can tell a
+// mirrored call apart; the base is BEFORE_REF, so `gitlogRevFile` draws the "before" text for it.
+const GL_BRANCHES: (BranchName & { in: string[] })[] = [
+  { name: "main", remote: false, count: 0, in: ["*"] },
+  { name: "origin/main", remote: true, count: 0, in: ["*"] },
+  { name: "origin/release-1.4", remote: true, count: 0, in: ["shop-api", "umbrella-web", "umbrella-payments", "umbrella-orders", "svc-lib", "umbrella", "legacy-billing", "tide-sim"] },
+  { name: "release-1.4", remote: false, count: 0, in: ["shop-api", "umbrella-web"] },
+  { name: "feat/refund-export", remote: false, count: 0, in: ["shop-api"] },
+  // A local branch that happens to be called origin/x, beside the remote-tracking origin/x.
+  { name: "origin/x", remote: false, count: 0, in: ["shop-api"] },
+  { name: "origin/x", remote: true, count: 0, in: ["shop-api", "umbrella-web"] },
+];
+const glHas = (b: { in: string[] }, name: string) => b.in.includes("*") || b.in.includes(name);
+const glNameOf = (id: string) => gitRepos.find((r) => r.id === id)?.name ?? "";
+const glSha = (c: string, i: number) => c + i.toString(16).padStart(39, "0");
+/** The rows as the fixture's own orientation sees them (release-ish left, main-ish right). */
+function glCompareRow(repo: string): RepoCompare {
+  const i = gitRepos.findIndex((r) => r.id === repo);
+  const d = (left: number, right: number, same: number): RepoCompare => ({ kind: "differs", leftSha: glSha("a", i), rightSha: glSha("b", i), base: BEFORE_REF, left, right, sameLeft: same, sameRight: same });
+  switch (glNameOf(repo)) {
+    case "shop-api":
+      return d(3, 1, 1);
+    case "umbrella-web":
+      return d(620, 0, 0);
+    case "umbrella-payments":
+      return d(0, 2, 0);
+    case "umbrella-orders":
+      return d(0, 0, 2);
+    case "legacy-billing":
+      return { kind: "error", reason: "fatal: bad object refs/remotes/origin/release-1.4" };
+    case "tide-sim":
+      return { kind: "nobase" };
+    case "field-notes":
+      return { kind: "missing" };
+    default:
+      return { kind: "identical" };
+  }
+}
+const glFlipped = (leftSha: string) => leftSha.startsWith("b");
+let glCompareNewest = 0;
+async function mockCompare(queryId: number, repos: string[], p: Pair) {
+  glCompareNewest = Math.max(glCompareNewest, queryId);
+  // `?gitlog=slowcompare` keeps "Reading N repositories…" up for a while.
+  await new Promise((r) => setTimeout(r, new URLSearchParams(location.search).get("gitlog") === "slowcompare" ? 3000 : 350));
+  if (queryId < glCompareNewest) throw "stale query";
+  const known = (name: string, remote: boolean, repo: string) => GL_BRANCHES.some((b) => b.name === name && b.remote === remote && glHas(b, glNameOf(repo)));
+  const flip = /main$/.test(p.left) && !/main$/.test(p.right);
+  const rows: CompareRow[] = repos.map((repo) => {
+    if (!known(p.left, p.leftRemote, repo) || !known(p.right, p.rightRemote, repo)) return { repo, kind: "missing" };
+    const r = glCompareRow(repo);
+    return { repo, ...(flip ? mirror(r) : r) };
+  });
+  return { queryId, rows };
+}
+function glCanonical(repo: string): Extract<RepoCompare, { kind: "differs" }> {
+  const r = glCompareRow(repo);
+  if (r.kind !== "differs") throw "Not a commit id";
+  return r;
+}
+function mockCompareFiles(queryId: number, repo: string, leftSha: string): CompareFiles {
+  if (queryId < glCompareNewest) throw "stale query";
+  const r = glCanonical(repo);
+  const left = r.left > 0 ? [ch("web/src/client.ts", "renamed", 6, 2, "web/src/api.ts"), ch("internal/refunds/refund.go", "modified", 12, 3), ch("docs/release-notes.md", "added", 24, 0), ch("web/public/logo.png", "modified", null, null)] : [];
+  const right = r.right > 0 ? [ch("internal/refunds/refund.go", "modified", 2, 1), ch("config/deploy.yml", "modified", 3, 0)] : r.sameLeft > 0 ? [ch("service/billing.py", "modified", 5, 5)] : [];
+  const leftAll = r.left === 0 && r.sameLeft > 0 ? [ch("service/billing.py", "modified", 5, 5)] : left;
+  const both = leftAll.map((f) => f.path).filter((x) => right.some((f) => f.path === x)).sort();
+  return glFlipped(leftSha) ? { left: right, right: leftAll, both } : { left: leftAll, right, both };
+}
+function mockCompareCommits(queryId: number, repo: string, side: "left" | "right", leftSha: string, max: number): SideCommit[] {
+  if (queryId < glCompareNewest) throw "stale query";
+  const r = glCanonical(repo);
+  const own = (glFlipped(leftSha) ? side === "right" : side === "left") ? "left" : "right";
+  const n = own === "left" ? r.left : r.right;
+  const same = own === "left" ? r.sameLeft : r.sameRight;
+  const now = Math.floor(Date.now() / 1000);
+  const out: SideCommit[] = [];
+  let plus = 0;
+  let dupes = 0;
+  for (let k = 0; k < n + same; k++) {
+    // The duplicates sit among the side's own commits; their subjects match across the two sides.
+    const dup = dupes < same && (plus >= n || k % 3 === 1);
+    if (dup) dupes++;
+    else plus++;
+    out.push({
+      mark: dup ? "=" : "+",
+      sha: glSha(own === "left" ? "c" : "d", k * 7 + 3),
+      parents: [glSha("e", k)],
+      time: now - (k + 1) * 5400,
+      author: GL_AUTHORS[k % 3][0],
+      subject: dup ? `Round refunds to the cent (#${1199 + dupes})` : GL_SUBJECTS[(k * 5 + (own === "left" ? 0 : 2)) % GL_SUBJECTS.length],
+    });
+  }
+  return out.slice(0, max);
+}
+
 const gitlogMock: Pick<
   Api,
   | "gitlogRepos"
@@ -824,6 +921,10 @@ const gitlogMock: Pick<
   | "gitlogFavorite"
   | "gitlogUnfavorite"
   | "gitlogCompareMode"
+  | "gitlogCompare"
+  | "gitlogCompareFiles"
+  | "gitlogCompareCommits"
+  | "gitlogBranches"
 > = {
   gitlogRepos: async () => {
     await new Promise((r) => setTimeout(r, 300));
@@ -997,6 +1098,21 @@ const gitlogMock: Pick<
   gitlogCompareMode: (mode) => {
     gitLog = { ...gitLog, compareMode: mode };
     return gl();
+  },
+  gitlogCompare: mockCompare,
+  gitlogCompareFiles: async (queryId, repo, leftSha) => {
+    await new Promise((r) => setTimeout(r, 60));
+    return mockCompareFiles(queryId, repo, leftSha);
+  },
+  gitlogCompareCommits: async (queryId, repo, side, leftSha, _rightSha, max) => {
+    await new Promise((r) => setTimeout(r, 60));
+    return mockCompareCommits(queryId, repo, side, leftSha, max);
+  },
+  gitlogBranches: async (repos) => {
+    await new Promise((r) => setTimeout(r, 120));
+    return GL_BRANCHES.map((b) => ({ name: b.name, remote: b.remote, count: repos.filter((id) => glHas(b, glNameOf(id))).length }))
+      .filter((b) => b.count > 0)
+      .sort((a, b) => b.count - a.count || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   },
 };
 

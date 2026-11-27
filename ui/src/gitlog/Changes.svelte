@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, type Snippet } from "svelte";
   import { iconFor, type IconTheme } from "../lib/icons";
   import ContextMenu from "../components/ContextMenu.svelte";
   import { isTypingTarget } from "../lib/keys";
   import { HISTORY_KEY, NAV_KEYS, navigate, type NavKey } from "./log";
+  import { BOTH_TOOLTIP } from "./compare";
   import {
     changeTree,
     countsText,
@@ -30,6 +31,10 @@
     onopenfile,
     onescape,
     onhistory,
+    header,
+    both = null,
+    emptyText = "This commit changes no files.",
+    label = "Changes",
   }: {
     title: string;
     /** The repository the files belong to (File History needs it); null: none. */
@@ -45,7 +50,15 @@
     onescape: () => void;
     /** "File History": the commits that changed this file. */
     onhistory?: (repo: string, path: string) => void;
+    /** Drawn in place of the title (Compare's sticky column header). */
+    header?: Snippet;
+    /** Compare: paths changed on both sides, tagged "both". */
+    both?: ReadonlySet<string> | null;
+    /** What an empty list says. */
+    emptyText?: string;
+    label?: string;
   } = $props();
+
 
   let collapsed = $state(new Set<string>());
   let focusId = $state<string | null>(null);
@@ -165,8 +178,8 @@
   }
 </script>
 
-<section class="changes" aria-label="Changes">
-  <p class="pane-title" title={title}>{title}</p>
+<section class="changes" aria-label={label}>
+  {#if header}{@render header()}{:else}<p class="pane-title" title={title}>{title}</p>{/if}
   {#if error}
     <p class="state-body pad" role="alert">Couldn't load the changes: {error}</p>
   {:else if files === null}
@@ -178,7 +191,7 @@
       <p class="state-body pad">Select a commit to see the files it changed.</p>
     {/if}
   {:else if files.length === 0}
-    <p class="state-body pad">This commit changes no files.</p>
+    <p class="state-body pad">{emptyText}</p>
   {:else}
     <!-- svelte-ignore a11y_interactive_supports_focus -->
     <div class="tree" role="tree" aria-label="Changed files" tabindex="-1" bind:this={treeEl} {onkeydown} class:stale={loading}>
@@ -220,7 +233,7 @@
             tabindex={tabId === id ? 0 : -1}
             style:padding-left="{pad(r.depth)}px"
             title="{f.path} · {statusText(f)}"
-            aria-label="{n.name}, {statusText(f)}, {countsText(f)}"
+            aria-label="{n.name}, {statusText(f)}, {countsText(f)}{both?.has(f.path) ? ', changed on both sides' : ''}"
             onclick={() => {
               focusId = id;
               onopenfile(f);
@@ -232,6 +245,7 @@
             <span class="name">{n.name}</span>
             {#if f.from}<span class="from" aria-hidden="true">← {f.from.split("/").pop()}</span>{/if}
             <span class="spacer"></span>
+            {#if both?.has(f.path)}<span class="both" title={BOTH_TOOLTIP} aria-hidden="true">both</span>{/if}
             <span class="counts num" aria-hidden="true">
               {#if f.added === null || f.removed === null}
                 <span class="faint">binary</span>
@@ -371,6 +385,15 @@
     font-size: var(--fs-meta);
   }
   .add {
+    color: var(--positive);
+  }
+  .both {
+    flex: none;
+    padding: 0 5px;
+    border: 1px solid currentColor;
+    border-radius: var(--radius-chip);
+    font-size: var(--fs-meta);
+    line-height: 14px;
     color: var(--positive);
   }
   .del {

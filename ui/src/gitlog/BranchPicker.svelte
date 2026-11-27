@@ -43,9 +43,23 @@
   const items = $derived(groups.flatMap((g) => g.items));
   const emptyText = $derived(names === null ? "Reading branch names…" : names.length === 0 ? "No branches in the ticked repositories." : noMatchText(query.trim()));
 
-  // The list shrinks as you type: the active row never points past its end.
+  /** Ctrl+D was pressed on this branch: the active row follows it once the Favorites group changes. */
+  let keep: BranchKey | null = null;
+  // The list shrinks as you type: the active row never points past its end. A favourite toggled
+  // from the keyboard adds or removes a Favorites row above it, so the row is found again by its
+  // branch (its own group's copy, the last one), or Enter would pick a different branch.
   $effect(() => {
-    if (active >= items.length) active = Math.max(0, items.length - 1);
+    const list = items;
+    if (keep) {
+      const k = keep;
+      let at = -1;
+      list.forEach((it, i) => {
+        if (it.kind === "name" && it.name === k.name && it.remote === k.remote) at = i;
+      });
+      if (at >= 0) active = at;
+      keep = null;
+    }
+    if (active >= list.length) active = Math.max(0, list.length - 1);
   });
 
   function place() {
@@ -107,7 +121,10 @@
       // The keyboard way to ★: the star itself is not a tab stop.
       e.preventDefault();
       const it = items[active];
-      if (it?.kind === "name") onfavorite({ name: it.name, remote: it.remote }, !it.favorite);
+      if (it?.kind === "name") {
+        keep = { name: it.name, remote: it.remote };
+        onfavorite({ name: it.name, remote: it.remote }, !it.favorite);
+      }
     } else if (e.key === "Tab") {
       // Leaving the search box leaves the picker: focus goes back to the anchor, and the browser moves on from there.
       close();
@@ -142,8 +159,8 @@
       <div class="empty">{emptyText}</div>
     {:else}
       {#each groups as g, gi (g.title)}
-        <div class="group" id="{uid}-g{gi}">{g.title}</div>
         <div role="group" aria-labelledby="{uid}-g{gi}">
+        <div class="group" id="{uid}-g{gi}" role="presentation">{g.title}</div>
         {#each g.items as it, k (it.kind === "pair" ? `p${it.pair.left}|${it.pair.leftRemote}|${it.pair.right}|${it.pair.rightRemote}` : `${it.remote}:${it.name}`)}
           {@const i = groups.slice(0, gi).reduce((n, x) => n + x.items.length, 0) + k}
           {#if it.kind === "pair"}
