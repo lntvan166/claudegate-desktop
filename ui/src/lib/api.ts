@@ -15,8 +15,11 @@ import type { UpdateView } from "./update";
 import type { AuditView } from "./audit";
 import { AUDIT_EVENT } from "./audit";
 import type { GitLogConfig, RepoView } from "../gitlog/repos";
-import type { FilterView, PageView } from "../gitlog/log";
+import type { FilterView, HistoryReq, PageView } from "../gitlog/log";
 import type { ChangedFile, FileSide, FileView } from "../gitlog/changes";
+import type { CombinedLeft, CombinedView } from "../gitlog/combined";
+import type { BlameLine } from "../gitlog/blame";
+import type { BranchName, CompareFiles, CompareView, Pair, SideCommit } from "../gitlog/compare";
 
 export type { AuditView, CaptureView, HookReplacedView, HookView, InstallView, UpdateView };
 export type { GitLogConfig, RepoView };
@@ -221,7 +224,7 @@ export interface Api {
   /** The filter bar as last left; null drops it. */
   gitlogLastFilter(filter: Record<string, unknown> | null): Promise<GitLogConfig>;
   /** One page of the merged log. `more: false` starts query `queryId`; `more: true` continues it. */
-  gitlogPage(queryId: number, repos: string[], filter: FilterView, more: boolean): Promise<PageView>;
+  gitlogPage(queryId: number, repos: string[], filter: FilterView, more: boolean, history: HistoryReq | null): Promise<PageView>;
   /** A commit's full message. */
   gitlogMessage(repo: string, sha: string): Promise<string>;
   /** The files `sha` changed against its first parent, with +/- counts. */
@@ -232,6 +235,41 @@ export interface Api {
   gitlogWorktreeFile(repo: string, path: string, source?: string): Promise<string>;
   /** Opens the commit's page on its remote in the system browser; false when the remote has no link. */
   gitlogOpenRemote(repo: string, sha: string): Promise<boolean>;
+  /** Combined Changes (gitlog_combined.rs): the selected commits, each file once. A refused request supersedes nothing. */
+  gitlogCombined(queryId: number, items: { repo: string; sha: string }[]): Promise<CombinedView>;
+  /** A file's left side without the selected commits (`without`, newest first), for the selection's query `queryId`; the read is query `leftId` on its own channel (a newer left read supersedes it). */
+  gitlogCombinedLeft(queryId: number, repo: string, last: string, path: string, without: string[], leftId: number): Promise<CombinedLeft>;
+  /** Cancels the window's combined read in flight (the selection went back to one commit). */
+  gitlogCombinedCancel(queryId: number): Promise<void>;
+  /** The file `path` at commit `rev`. */
+  gitlogRevFile(repo: string, rev: string, path: string): Promise<FileView>;
+  /** Who last changed the 1-based `line` of `path` as of commit `rev`; null when git has no answer. A newer call supersedes this one. */
+  gitlogBlame(queryId: number, repo: string, rev: string, path: string, line: number): Promise<BlameLine | null>;
+  /** Drops the blame in flight (kills its git). */
+  gitlogBlameCancel(queryId: number): Promise<void>;
+  /** Blame on the cursor line, on or off. */
+  gitlogBlameSetting(on: boolean): Promise<GitLogConfig>;
+  /** Sets the compare pair; each side says whether it is the remote-tracking branch. */
+  gitlogComparePair(left: string, leftRemote: boolean, right: string, rightRemote: boolean): Promise<GitLogConfig>;
+  /** Puts the pair first in the recent pairs (the backend keeps the list and the cap). */
+  gitlogCompareRecent(left: string, leftRemote: boolean, right: string, rightRemote: boolean): Promise<GitLogConfig>;
+  /** Adds a favourite branch (add-only). */
+  gitlogFavorite(name: string, remote: boolean): Promise<GitLogConfig>;
+  /** Removes a favourite branch (remove-only). */
+  gitlogUnfavorite(name: string, remote: boolean): Promise<GitLogConfig>;
+  gitlogCompareMode(mode: "files" | "commits"): Promise<GitLogConfig>;
+  /**
+   * Compare Branches (gitlog_compare.rs): the pair across `repos`, answered in one response. Starts
+   * query `queryId` on the window's `#compare` channel, superseding the previous pair's reads. Each
+   * side is resolved as exactly the ref picked (`leftRemote`/`rightRemote`).
+   */
+  gitlogCompare(queryId: number, repos: string[], pair: Pair): Promise<CompareView>;
+  /** Files mode for one repository, under the pair's query (never starts one). */
+  gitlogCompareFiles(queryId: number, repo: string, leftSha: string, rightSha: string, base: string): Promise<CompareFiles>;
+  /** Commits mode for one side, newest first, `max` at most, duplicates (`=`) included. */
+  gitlogCompareCommits(queryId: number, repo: string, side: "left" | "right", leftSha: string, rightSha: string, max: number): Promise<SideCommit[]>;
+  /** Branch names across `repos` for the picker, with how many repositories have each. */
+  gitlogBranches(repos: string[]): Promise<BranchName[]>;
 }
 
 const tauriApi: Api = {
@@ -282,12 +320,29 @@ const tauriApi: Api = {
   gitlogInclude: (glob) => invoke<GitLogConfig>("gitlog_include", { glob }),
   gitlogPane: (pane, width) => invoke<GitLogConfig>("gitlog_pane", { pane, width }),
   gitlogLastFilter: (filter) => invoke<GitLogConfig>("gitlog_last_filter", { filter }),
-  gitlogPage: (queryId, repos, filter, more) => invoke<PageView>("gitlog_page", { queryId, repos, filter, more }),
+  gitlogPage: (queryId, repos, filter, more, history) => invoke<PageView>("gitlog_page", { queryId, repos, filter, more, history }),
   gitlogMessage: (repo, sha) => invoke<string>("gitlog_message", { repo, sha }),
   gitlogChanges: (repo, sha) => invoke<ChangedFile[]>("gitlog_changes", { repo, sha }),
   gitlogFile: (repo, sha, path, side, from) => invoke<FileView>("gitlog_file", { repo, sha, path, side, from: from ?? null }),
   gitlogWorktreeFile: (repo, path, source) => invoke<string>("gitlog_worktree_file", { repo, path, source }),
   gitlogOpenRemote: (repo, sha) => invoke<boolean>("gitlog_open_remote", { repo, sha }),
+  gitlogCombined: (queryId, items) => invoke<CombinedView>("gitlog_combined", { queryId, items }),
+  gitlogCombinedLeft: (queryId, repo, last, path, without, leftId) => invoke<CombinedLeft>("gitlog_combined_left", { queryId, repo, last, path, without, leftId }),
+  gitlogCombinedCancel: (queryId) => invoke<void>("gitlog_combined_cancel", { queryId }),
+  gitlogRevFile: (repo, rev, path) => invoke<FileView>("gitlog_rev_file", { repo, rev, path }),
+  gitlogBlame: (queryId, repo, rev, path, line) => invoke<BlameLine | null>("gitlog_blame", { queryId, repo, rev, path, line }),
+  gitlogBlameCancel: (queryId) => invoke<void>("gitlog_blame_cancel", { queryId }),
+  gitlogBlameSetting: (on) => invoke<GitLogConfig>("gitlog_blame_setting", { on }),
+  gitlogComparePair: (left, leftRemote, right, rightRemote) => invoke<GitLogConfig>("gitlog_compare_pair", { left, leftRemote, right, rightRemote }),
+  gitlogCompareRecent: (left, leftRemote, right, rightRemote) => invoke<GitLogConfig>("gitlog_compare_recent", { left, leftRemote, right, rightRemote }),
+  gitlogFavorite: (name, remote) => invoke<GitLogConfig>("gitlog_favorite", { name, remote }),
+  gitlogUnfavorite: (name, remote) => invoke<GitLogConfig>("gitlog_unfavorite", { name, remote }),
+  gitlogCompareMode: (mode) => invoke<GitLogConfig>("gitlog_compare_mode", { mode }),
+  gitlogCompare: (queryId, repos, p) =>
+    invoke<CompareView>("gitlog_compare", { queryId, repos, left: p.left, leftRemote: p.leftRemote, right: p.right, rightRemote: p.rightRemote }),
+  gitlogCompareFiles: (queryId, repo, leftSha, rightSha, base) => invoke<CompareFiles>("gitlog_compare_files", { queryId, repo, leftSha, rightSha, base }),
+  gitlogCompareCommits: (queryId, repo, side, leftSha, rightSha, max) => invoke<SideCommit[]>("gitlog_compare_commits", { queryId, repo, side, leftSha, rightSha, max }),
+  gitlogBranches: (repos) => invoke<BranchName[]>("gitlog_branches", { repos }),
 };
 
 let chosen: Promise<Api> | undefined;
@@ -362,8 +417,8 @@ export const gitlogExclude = async (glob: string) => (await api()).gitlogExclude
 export const gitlogInclude = async (glob: string) => (await api()).gitlogInclude(glob);
 export const gitlogPane = async (pane: string, width: number) => (await api()).gitlogPane(pane, width);
 export const gitlogLastFilter = async (filter: Record<string, unknown> | null) => (await api()).gitlogLastFilter(filter);
-export const gitlogPage = async (queryId: number, repos: string[], filter: FilterView, more: boolean) =>
-  (await api()).gitlogPage(queryId, repos, filter, more);
+export const gitlogPage = async (queryId: number, repos: string[], filter: FilterView, more: boolean, history: HistoryReq | null = null) =>
+  (await api()).gitlogPage(queryId, repos, filter, more, history);
 export const gitlogMessage = async (repo: string, sha: string) => (await api()).gitlogMessage(repo, sha);
 export const gitlogChanges = async (repo: string, sha: string) => (await api()).gitlogChanges(repo, sha);
 export const gitlogFile = async (repo: string, sha: string, path: string, side: FileSide, from?: string) =>
@@ -371,3 +426,25 @@ export const gitlogFile = async (repo: string, sha: string, path: string, side: 
 export const gitlogWorktreeFile = async (repo: string, path: string, source?: string) =>
   (await api()).gitlogWorktreeFile(repo, path, source);
 export const gitlogOpenRemote = async (repo: string, sha: string) => (await api()).gitlogOpenRemote(repo, sha);
+export const gitlogCombined = async (queryId: number, items: { repo: string; sha: string }[]) => (await api()).gitlogCombined(queryId, items);
+export const gitlogCombinedLeft = async (queryId: number, repo: string, last: string, path: string, without: string[], leftId: number) =>
+  (await api()).gitlogCombinedLeft(queryId, repo, last, path, without, leftId);
+export const gitlogCombinedCancel = async (queryId: number) => (await api()).gitlogCombinedCancel(queryId);
+export const gitlogRevFile = async (repo: string, rev: string, path: string) => (await api()).gitlogRevFile(repo, rev, path);
+export const gitlogBlame = async (queryId: number, repo: string, rev: string, path: string, line: number) =>
+  (await api()).gitlogBlame(queryId, repo, rev, path, line);
+export const gitlogBlameCancel = async (queryId: number) => (await api()).gitlogBlameCancel(queryId);
+export const gitlogBlameSetting = async (on: boolean) => (await api()).gitlogBlameSetting(on);
+export const gitlogComparePair = async (left: string, leftRemote: boolean, right: string, rightRemote: boolean) =>
+  (await api()).gitlogComparePair(left, leftRemote, right, rightRemote);
+export const gitlogCompareRecent = async (left: string, leftRemote: boolean, right: string, rightRemote: boolean) =>
+  (await api()).gitlogCompareRecent(left, leftRemote, right, rightRemote);
+export const gitlogFavorite = async (name: string, remote: boolean) => (await api()).gitlogFavorite(name, remote);
+export const gitlogUnfavorite = async (name: string, remote: boolean) => (await api()).gitlogUnfavorite(name, remote);
+export const gitlogCompareMode = async (mode: "files" | "commits") => (await api()).gitlogCompareMode(mode);
+export const gitlogCompare = async (queryId: number, repos: string[], pair: Pair) => (await api()).gitlogCompare(queryId, repos, pair);
+export const gitlogCompareFiles = async (queryId: number, repo: string, leftSha: string, rightSha: string, base: string) =>
+  (await api()).gitlogCompareFiles(queryId, repo, leftSha, rightSha, base);
+export const gitlogCompareCommits = async (queryId: number, repo: string, side: "left" | "right", leftSha: string, rightSha: string, max: number) =>
+  (await api()).gitlogCompareCommits(queryId, repo, side, leftSha, rightSha, max);
+export const gitlogBranches = async (repos: string[]) => (await api()).gitlogBranches(repos);

@@ -21,8 +21,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use claudegate_core::gitlog::{
-    ahead_behind, count_records, discover, heads_for, is_sha, is_valid_ref, log_args, par_map, parse_changes, parse_log, repo_searched, take_ready, web_url,
-    BranchUse, ChangedFile, Commit, FileStatus, Filter, GitRun, Repo, RepoProgress, DEFAULT_SCAN_DEPTH, PARALLEL,
+    ahead_behind, blame_args, blame_args_no_ignore_revs, count_records, discover, heads_for, history_args, history_paths_args, is_missing_ignore_revs, is_sha, is_valid_ref, log_args, par_map, parse_blame_porcelain, parse_changes, parse_history, parse_history_paths, parse_log,
+    repo_searched, take_ready, web_url, BranchUse, ChangedFile, Commit, FileStatus, Filter, GitRun, HistoryFile, Repo, RepoProgress, DEFAULT_SCAN_DEPTH, PARALLEL,
 };
 use serde::{Deserialize, Serialize};
 
@@ -61,7 +61,14 @@ impl RunError {
     }
 }
 
-/// A query's identity: the window it belongs to and its id.
+/// The cancellation channel of one feature of a window (`<window>#<name>`): its queries supersede
+/// only each other, so a new Combined Changes selection never kills the log's paging.
+/// `Runner::forget_window` drops every channel of the window.
+pub fn channel(window: &str, name: &str) -> String {
+    format!("{window}#{name}")
+}
+
+/// A query's identity: the window (or a channel of it, see [`channel`]) it belongs to and its id.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Tag {
     pub window: String,
@@ -90,6 +97,11 @@ fn kill(slot: &Slot) {
     }
 }
 
+/// The first non-empty line of git's stderr.
+fn first_line(err: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(err).lines().map(str::trim).find(|l| !l.is_empty()).map(String::from)
+}
+
 /// Runs `git` with at most `PARALLEL` children alive, each tracked by its query.
 pub struct Runner {
     /// The git binary; resolved on the first run, so nothing is probed at app start.
@@ -100,7 +112,17 @@ pub struct Runner {
 }
 
 /// One pool slot, given back on drop.
-struct Permit<'a>(&'a Runner);
+pub(crate) struct Permit<'a>(&'a Runner);
+
+/// Which part of the pool a call waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Share {
+    /// Background reads (paging, a Combined Changes tree): `PARALLEL - RESERVED` slots at most.
+    Paging,
+    /// A click (a changed file, a message, a Combined Changes left side): the whole pool, so it
+    /// never waits behind paging.
+    Reserved,
+}
 
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
@@ -153,12 +175,15 @@ impl Runner {
         true
     }
 
-    /// A closed window: no query of it is current any more, and its children are killed.
+    /// A closed window: no query of it or of any of its channels (`<window>#…`) is current any
+    /// more, and their children are killed.
     pub fn forget_window(&self, window: &str) {
+        let prefix = format!("{window}#");
+        let mine = |w: &str| w == window || w.starts_with(&prefix);
         let doomed: Vec<Slot> = {
             let mut reg = lock(&self.reg);
-            reg.current.remove(window);
-            let old: Vec<Tag> = reg.children.keys().filter(|t| t.window == window).cloned().collect();
+            reg.current.retain(|w, _| !mine(w));
+            let old: Vec<Tag> = reg.children.keys().filter(|t| mine(&t.window)).cloned().collect();
             old.iter().flat_map(|t| reg.children.remove(t).unwrap_or_default()).map(|(_, s)| s).collect()
         };
         for s in &doomed {
@@ -176,7 +201,7 @@ impl Runner {
         lock(&self.reg).children.get(tag).map(|v| v.iter().map(|(p, _)| *p).collect()).unwrap_or_default()
     }
 
-    fn acquire(&self, tag: Option<&Tag>) -> Result<Permit<'_>, RunError> {
+    pub(crate) fn acquire(&self, tag: Option<&Tag>, share: Share) -> Result<Permit<'_>, RunError> {
         let mut n = lock(&self.running);
         loop {
             if tag.is_some_and(|t| !self.is_current(t)) {
@@ -184,7 +209,10 @@ impl Runner {
             }
             // Paging (tagged) leaves `RESERVED` slots free, so a click on a changed file or a
             // message never waits behind a page of dozens of repositories.
-            let limit = if tag.is_some() { PARALLEL - RESERVED } else { PARALLEL };
+            let limit = match share {
+                Share::Paging => PARALLEL - RESERVED,
+                Share::Reserved => PARALLEL,
+            };
             if *n < limit {
                 *n += 1;
                 return Ok(Permit(self));
@@ -194,12 +222,50 @@ impl Runner {
     }
 
     /// `git <args>` in `cwd`: its stdout bytes. With a `tag`, the child belongs to that query
-    /// and is killed when the query is superseded.
+    /// and is killed when the query is superseded. Tagged calls take the paging share of the
+    /// pool, untagged ones the whole pool.
     pub fn run(&self, tag: Option<&Tag>, cwd: &Path, args: &[&str]) -> Result<Vec<u8>, RunError> {
+        let share = if tag.is_some() { Share::Paging } else { Share::Reserved };
+        self.run_in(tag, share, cwd, args)
+    }
+
+    /// [`Runner::run`] waiting for the given `share` of the pool: a click that still belongs to
+    /// a query (killed with it) takes `Share::Reserved`.
+    pub fn run_in(&self, tag: Option<&Tag>, share: Share, cwd: &Path, args: &[&str]) -> Result<Vec<u8>, RunError> {
+        let (status, out, err) = self.exec(tag, share, cwd, args)?;
+        if status.success() {
+            return Ok(out);
+        }
+        Err(RunError::Failed(first_line(&err).unwrap_or_else(|| format!("git exited with {status}"))))
+    }
+
+    /// `git <args>` in `cwd`: its exit code and stdout bytes, for a command whose exit code is an
+    /// answer (`merge-base` exits 1 for no common history). A non-zero exit is not an error here;
+    /// a child killed by a newer query is `Cancelled`, and one killed by anything else `Failed`.
+    /// The pool share is [`Runner::run`]'s.
+    pub fn run_code(&self, tag: Option<&Tag>, cwd: &Path, args: &[&str]) -> Result<(i32, Vec<u8>), RunError> {
+        self.run_code_err(tag, cwd, args).map(|(code, out, _)| (code, out))
+    }
+
+    /// [`Runner::run_code`] with git's first stderr line, if any, to explain an exit code that is
+    /// not an answer.
+    pub fn run_code_err(&self, tag: Option<&Tag>, cwd: &Path, args: &[&str]) -> Result<(i32, Vec<u8>, Option<String>), RunError> {
+        let share = if tag.is_some() { Share::Paging } else { Share::Reserved };
+        let (status, out, err) = self.exec(tag, share, cwd, args)?;
+        match status.code() {
+            Some(code) => Ok((code, out, first_line(&err))),
+            // Killed by a signal nobody here sent.
+            None => Err(RunError::Failed(first_line(&err).unwrap_or_else(|| format!("git exited with {status}")))),
+        }
+    }
+
+    /// The one place a child is spawned: exit status, stdout, stderr. `Cancelled` only when a
+    /// newer query killed it.
+    fn exec(&self, tag: Option<&Tag>, share: Share, cwd: &Path, args: &[&str]) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), RunError> {
         if !cwd.is_dir() {
             return Err(RunError::Spawn(format!("The folder {} is missing", cwd.display())));
         }
-        let _permit = self.acquire(tag)?;
+        let _permit = self.acquire(tag, share)?;
         let mut cmd = Command::new(self.git.get_or_init(resolve_git));
         cmd.args(["--no-pager", "-c", "color.ui=never", "-c", "core.quotepath=off", "-c", "i18n.logOutputEncoding=UTF-8"]).args(args).current_dir(cwd);
         claudegate_core::gitlog::sanitize_git_env(&mut cmd);
@@ -243,16 +309,11 @@ impl Runner {
         match status {
             // Killed by `set_current`, which reaped it.
             None => Err(RunError::Cancelled),
-            Some(s) if s.success() => Ok(out),
-            Some(s) => {
-                let msg = String::from_utf8_lossy(&err);
-                let line = msg.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from);
-                Err(RunError::Failed(line.unwrap_or_else(|| format!("git exited with {s}"))))
-            }
+            Some(s) => Ok((s, out, err)),
         }
     }
 
-    fn text(&self, tag: Option<&Tag>, cwd: &Path, args: &[&str]) -> Result<String, RunError> {
+    pub(crate) fn text(&self, tag: Option<&Tag>, cwd: &Path, args: &[&str]) -> Result<String, RunError> {
         self.run(tag, cwd, args).map(|b| String::from_utf8_lossy(&b).into_owned())
     }
 }
@@ -336,11 +397,52 @@ pub struct RowView {
     /// that worktree's branch), a sha (only on that detached worktree), or, with the branch
     /// filter on, the branch as typed.
     pub source: String,
+    /// File History only: the file as this commit saw it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<HistoryFileView>,
 }
 
 impl RowView {
-    fn of(c: Commit, source: String) -> Self {
-        RowView { repo: c.repo, sha: c.sha, time: c.time, author: c.author, email: c.email, subject: c.subject, parents: c.parents, source }
+    fn of(c: Commit, source: String, file: Option<HistoryFileView>) -> Self {
+        RowView { repo: c.repo, sha: c.sha, time: c.time, author: c.author, email: c.email, subject: c.subject, parents: c.parents, source, file }
+    }
+}
+
+/// One file's history in one repository, as the UI asks for it. The repository must be one of the
+/// backend's own, and the path a plain path in it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryReq {
+    pub repo: String,
+    pub path: String,
+}
+
+/// The file a File History row is about: its name after the commit, the name it was renamed or
+/// copied from, and the status words of `ChangedFileView` (`None` when git listed no change, as for
+/// a merge).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryFileView {
+    pub path: String,
+    pub from: Option<String>,
+    pub status: Option<&'static str>,
+}
+
+impl From<HistoryFile> for HistoryFileView {
+    fn from(h: HistoryFile) -> Self {
+        HistoryFileView { path: h.path, from: h.from, status: h.status.as_ref().map(status_word) }
+    }
+}
+
+/// The UI's word for a status.
+fn status_word(s: &FileStatus) -> &'static str {
+    match s {
+        FileStatus::Added => "added",
+        FileStatus::Modified => "modified",
+        FileStatus::Deleted => "deleted",
+        FileStatus::Renamed { .. } => "renamed",
+        FileStatus::Copied { .. } => "copied",
+        FileStatus::TypeChanged => "typeChanged",
     }
 }
 
@@ -396,13 +498,10 @@ pub struct ChangedFileView {
 
 impl From<ChangedFile> for ChangedFileView {
     fn from(c: ChangedFile) -> Self {
-        let (status, from) = match c.status {
-            FileStatus::Added => ("added", None),
-            FileStatus::Modified => ("modified", None),
-            FileStatus::Deleted => ("deleted", None),
-            FileStatus::Renamed { from } => ("renamed", Some(from)),
-            FileStatus::Copied { from } => ("copied", Some(from)),
-            FileStatus::TypeChanged => ("typeChanged", None),
+        let status = status_word(&c.status);
+        let from = match c.status {
+            FileStatus::Renamed { from } | FileStatus::Copied { from } => Some(from),
+            _ => None,
         };
         ChangedFileView { path: c.path, status, from, added: c.added, removed: c.removed }
     }
@@ -477,6 +576,38 @@ struct QueryState {
     progress: BTreeMap<String, RepoProgress>,
     failures: Vec<Failure>,
     branch_use: Option<BranchUse>,
+    /// File History only.
+    history: Option<HistoryState>,
+}
+
+/// A File History query: every name the file has had (read once, on the first page), the name
+/// it had at the oldest commit read so far (where a status-less record on the next page starts),
+/// and each pending commit's file.
+struct HistoryState {
+    /// What the query was started for; a Load more for another file is stale.
+    req: HistoryReq,
+    paths: Vec<String>,
+    last: String,
+    files: HashMap<String, HistoryFile>,
+}
+
+/// The cancellation channel of File History, so it never supersedes the log's paging.
+pub const HISTORY_CHANNEL: &str = "history";
+
+/// The cancellation channel of Blame: the cursor moving on supersedes only the previous blame.
+pub const BLAME_CHANNEL: &str = "blame";
+/// The largest line number Blame asks git about; anything above is not a line of a file we show.
+pub const MAX_BLAME_LINE: u32 = 100_000_000;
+
+/// Who last changed one line, as the UI reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlameLineView {
+    pub sha: String,
+    pub author: String,
+    pub email: String,
+    pub time: i64,
+    pub summary: String,
 }
 
 /// What discovery ran over; a change means the cached list is stale.
@@ -529,7 +660,7 @@ fn main_path(r: &Repo) -> PathBuf {
 /// A path as git reports it, relative to the repository root. Refused when `<rev>:<path>`
 /// would read it relative to the working directory instead (`./`, `../`), or it leaves the
 /// repository.
-fn tree_path_ok(p: &str) -> bool {
+pub(crate) fn tree_path_ok(p: &str) -> bool {
     // Every component must be a plain name: a Windows `C:\x` or `\\server\share` would otherwise
     // replace the root when joined, and a backslash is never a separator in a git path.
     !p.is_empty()
@@ -610,35 +741,58 @@ impl GitLog {
         lock(&self.repos).is_some()
     }
 
-    /// A window closed: drop its query and kill its children.
+    /// A window closed: drop its queries (the log's and File History's) and kill their children.
     pub fn forget_window(&self, window: &str) {
         self.runner.forget_window(window);
-        lock(&self.queries).remove(window);
+        let prefix = format!("{window}#");
+        lock(&self.queries).retain(|k, _| k != window && !k.starts_with(&prefix));
     }
 
-    fn cached(&self) -> Arc<Vec<Repo>> {
+    pub(crate) fn cached(&self) -> Arc<Vec<Repo>> {
         lock(&self.repos).as_ref().map(|(_, l)| l.clone()).unwrap_or_default()
     }
 
-    fn cwd_of(&self, repo: &str) -> Result<PathBuf, String> {
+    pub(crate) fn cwd_of(&self, repo: &str) -> Result<PathBuf, String> {
         self.cached().iter().find(|r| r.id == repo).map(main_path).ok_or_else(|| "Unknown repository; refresh the list".to_string())
     }
 
     /// One page of the merged log. `more: false` starts query `query_id` (superseding the
     /// window's previous one, whose children are killed); `more: true` continues it.
-    pub fn page(&self, window: &str, query_id: u64, repos: &[String], filter: &FilterView, more: bool) -> Result<PageView, String> {
-        let tag = Tag { window: window.to_string(), query: query_id };
+    ///
+    /// With `history`: one file's history in one repository, followed across renames, on its own
+    /// channel (`<window>#history`) so it never supersedes the log. Only `history.repo` is
+    /// searched, whatever `repos` says, and of the filter only the branch applies.
+    pub fn page(&self, window: &str, query_id: u64, repos: &[String], filter: &FilterView, more: bool, history: Option<&HistoryReq>) -> Result<PageView, String> {
+        if let Some(h) = history {
+            if !tree_path_ok(&h.path) {
+                return Err("Not a path in the repository".into());
+            }
+            // Only a repository from the backend's own list.
+            self.cwd_of(&h.repo)?;
+        }
+        let key = match history {
+            Some(_) => channel(window, HISTORY_CHANNEL),
+            None => window.to_string(),
+        };
+        let tag = Tag { window: key.clone(), query: query_id };
         let state = if more {
-            let existing = lock(&self.queries).get(window).cloned();
+            let existing = lock(&self.queries).get(&key).cloned();
             match existing {
-                Some(s) if lock(&s).query == query_id && self.runner.is_current(&tag) => s,
+                // The same query, still current, and (for File History) the same file.
+                Some(s) if self.runner.is_current(&tag) && {
+                    let st = lock(&s);
+                    st.query == query_id && st.history.as_ref().map(|h| &h.req) == history
+                } => s,
                 _ => return Err(STALE.into()),
             }
         } else {
-            if !self.runner.set_current(window, query_id) {
+            if !self.runner.set_current(&key, query_id) {
                 return Err(STALE.into());
             }
-            let st = self.start(&tag, repos, filter)?;
+            let st = match history {
+                None => self.start(&tag, repos, filter)?,
+                Some(h) => self.start_history(&tag, h, filter)?,
+            };
             Arc::new(Mutex::new(st))
         };
         let view = {
@@ -651,9 +805,42 @@ impl GitLog {
             return Err(STALE.into());
         }
         if !more {
-            q.insert(window.to_string(), state);
+            q.insert(key, state);
         }
         Ok(view)
+    }
+
+    /// A new File History query: the repository's heads under the branch filter (nothing else of
+    /// the filter), then one unfiltered `--follow` walk for every name the file has had. That
+    /// walk failing makes the repository a failure row, like a log that fails.
+    fn start_history(&self, tag: &Tag, h: &HistoryReq, fv: &FilterView) -> Result<QueryState, String> {
+        let only_branch = FilterView { branch: fv.branch.clone(), ..Default::default() };
+        let mut st = self.start(tag, std::slice::from_ref(&h.repo), &only_branch)?;
+        let mut paths = vec![h.path.clone()];
+        if let Some(q) = st.repos.first() {
+            // A folder has no history of its own here: its pathspec would match every file in it.
+            // A path missing at the head (a deleted file) still has one, so only "tree" refuses.
+            if let Some(head) = q.heads.first() {
+                match self.runner.text(Some(tag), &q.cwd, &["cat-file", "-t", &format!("{head}:{}", h.path)]) {
+                    Ok(kind) if kind.trim() == "tree" => return Err("Not a file".into()),
+                    Err(RunError::Cancelled) => return Err(STALE.into()),
+                    _ => {}
+                }
+            }
+            let args = history_paths_args(&h.path, &q.heads);
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            match self.runner.text(Some(tag), &q.cwd, &args) {
+                Ok(out) => paths = parse_history_paths(&out, &h.path),
+                Err(RunError::Cancelled) => return Err(STALE.into()),
+                Err(e) => {
+                    let id = q.id.clone();
+                    st.progress.remove(&id);
+                    st.failures.push(Failure { repo: id, reason: e.reason() });
+                }
+            }
+        }
+        st.history = Some(HistoryState { req: h.clone(), paths, last: h.path.clone(), files: HashMap::new() });
+        Ok(st)
     }
 
     /// A new query: each selected repository's `user.email` (for Me), whether it has the
@@ -716,7 +903,7 @@ impl GitLog {
         }
         let branch_use = branch.as_deref().map(|b| BranchUse::tally(b, has));
         let progress = rq.iter().map(|q| (q.id.clone(), RepoProgress::default())).collect();
-        Ok(QueryState { query: tag.query, filter, repos: rq, progress, failures: Vec::new(), branch_use })
+        Ok(QueryState { query: tag.query, filter, repos: rq, progress, failures: Vec::new(), branch_use, history: None })
     }
 
     /// Refill and take ready rows until a page is full, everything is drained, or
@@ -734,9 +921,13 @@ impl GitLog {
             if !need.is_empty() {
                 let filter = &st.filter;
                 let progress = &st.progress;
+                let history = st.history.as_ref();
                 let got = par_map(&need, |q| {
                     let skip = progress.get(&q.id).map_or(0, |p| p.fetched);
-                    let args = log_args(filter, &q.heads, q.me.as_deref(), page, skip);
+                    let args = match history {
+                        Some(h) => history_args(&q.heads, page, skip, &h.paths),
+                        None => log_args(filter, &q.heads, q.me.as_deref(), page, skip),
+                    };
                     let args: Vec<&str> = args.iter().map(String::as_str).collect();
                     self.runner.run(Some(tag), &q.cwd, &args)
                 });
@@ -749,11 +940,26 @@ impl GitLog {
                             st.failures.push(Failure { repo: id, reason: e.reason() });
                         }
                         Ok(out) => {
-                            let n = count_records(&out);
+                            let text = String::from_utf8_lossy(&out);
+                            let (n, commits) = match st.history.as_mut() {
+                                Some(h) => {
+                                    let (rows, n) = parse_history(&text, &h.last);
+                                    if let Some((_, f)) = rows.last() {
+                                        h.last = f.from.clone().unwrap_or_else(|| f.path.clone());
+                                    }
+                                    let mut commits = Vec::with_capacity(rows.len());
+                                    for (c, f) in rows {
+                                        h.files.insert(c.sha.clone(), f);
+                                        commits.push(c);
+                                    }
+                                    (n, commits)
+                                }
+                                None => (count_records(&out), parse_log(&text)),
+                            };
                             let Some(p) = st.progress.get_mut(&id) else { continue };
                             p.fetched += n;
                             p.exhausted = n < page;
-                            p.pending.extend(parse_log(&String::from_utf8_lossy(&out)).into_iter().map(|mut c| {
+                            p.pending.extend(commits.into_iter().map(|mut c| {
                                 c.repo = id.clone();
                                 c
                             }));
@@ -781,7 +987,8 @@ impl GitLog {
                 .into_iter()
                 .map(|c| {
                     let src = st.repos.iter().find(|q| q.id == c.repo).map(|q| q.source_of(&c.sha)).unwrap_or_default();
-                    RowView::of(c, src)
+                    let file = st.history.as_mut().and_then(|h| h.files.remove(&c.sha)).map(HistoryFileView::from);
+                    RowView::of(c, src, file)
                 })
                 .collect(),
             failures: st.failures.clone(),
@@ -790,8 +997,10 @@ impl GitLog {
         })
     }
 
-    fn show_args<'a>(kind: &'a str, sha: &'a str) -> [&'a str; 6] {
-        ["show", "-M", "--diff-merges=first-parent", "--format=", kind, sha]
+    /// `--no-show-signature` overrides a user's `log.showSignature=true`, which writes the
+    /// signature check ("No signature", "Good … signature") ahead of the file list.
+    fn show_args<'a>(kind: &'a str, sha: &'a str) -> [&'a str; 7] {
+        ["show", "-M", "--diff-merges=first-parent", "--no-show-signature", "--format=", kind, sha]
     }
 
     /// The files `sha` changed against its first parent. Two calls: git drops `--numstat`
@@ -849,8 +1058,73 @@ impl GitLog {
                 format!("{p0}:{name}")
             }
         };
-        // No such object at that side: missing. The size first, so a huge blob is never read.
-        let size = match self.runner.text(None, &cwd, &["cat-file", "-s", &spec]) {
+        self.blob_view(&cwd, &spec)
+    }
+
+    /// The file `path` at commit `rev` (`<rev>:<path>`): Combined Changes' right side.
+    pub fn rev_file(&self, repo: &str, rev: &str, path: &str) -> Result<FileView, String> {
+        if !is_sha(rev) {
+            return Err("Not a commit id".into());
+        }
+        if !tree_path_ok(path) {
+            return Err("Not a path in the repository".into());
+        }
+        let cwd = self.cwd_of(repo)?;
+        self.blob_view(&cwd, &format!("{rev}:{path}"))
+    }
+
+    /// Who last changed the 1-based `line` of `path` as of commit `rev`, or `None` when git has
+    /// no answer (the line is past the end, the file is not in that commit). On its own channel
+    /// (`<window>#blame`): the next call supersedes this one and kills its git. Takes a reserved
+    /// slot, so it never waits behind paging.
+    pub fn blame(&self, window: &str, query_id: u64, repo: &str, rev: &str, path: &str, line: u32) -> Result<Option<BlameLineView>, String> {
+        if !is_sha(rev) {
+            return Err("Not a commit id".into());
+        }
+        if !tree_path_ok(path) {
+            return Err("Not a path in the repository".into());
+        }
+        if line < 1 || line > MAX_BLAME_LINE {
+            return Err("Not a line number".into());
+        }
+        let cwd = self.cwd_of(repo)?;
+        let tag = Tag { window: channel(window, BLAME_CHANNEL), query: query_id };
+        if !self.runner.set_current(&tag.window, query_id) {
+            return Err(STALE.into());
+        }
+        let run = |args: Vec<String>| {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            self.runner.run_in(Some(&tag), Share::Reserved, &cwd, &args)
+        };
+        let out = match run(blame_args(rev, path, line)) {
+            // `blame.ignoreRevsFile` names a file that isn't there (a repository that doesn't
+            // ship one): every blame would fail, so ask once more without the ignore list.
+            Err(RunError::Failed(why)) if is_missing_ignore_revs(&why) => run(blame_args_no_ignore_revs(rev, path, line)),
+            r => r,
+        };
+        match out {
+            Ok(out) => Ok(parse_blame_porcelain(&String::from_utf8_lossy(&out)).map(|b| BlameLineView {
+                sha: b.sha,
+                author: b.author,
+                email: b.email,
+                time: b.time,
+                summary: b.summary,
+            })),
+            Err(RunError::Cancelled) => Err(STALE.into()),
+            Err(RunError::Failed(_)) => Ok(None),
+            Err(e) => Err(e.reason()),
+        }
+    }
+
+    /// Drops the window's in-flight blame: its git is killed, and a blame older than `query_id`
+    /// arriving late is stale.
+    pub fn blame_cancel(&self, window: &str, query_id: u64) {
+        self.runner.set_current(&channel(window, BLAME_CHANNEL), query_id);
+    }
+
+    /// The object `spec` names. No such object: missing. The size first, so a huge blob is never read.
+    fn blob_view(&self, cwd: &Path, spec: &str) -> Result<FileView, String> {
+        let size = match self.runner.text(None, cwd, &["cat-file", "-s", spec]) {
             Ok(s) => s,
             Err(RunError::Failed(_)) => return Ok(FileView::Missing),
             Err(e) => return Err(e.reason()),
@@ -859,7 +1133,7 @@ impl GitLog {
         if size > MAX_FILE {
             return Ok(FileView::TooLarge(size));
         }
-        let bytes = self.runner.run(None, &cwd, &["cat-file", "blob", &spec]).map_err(|e| e.reason())?;
+        let bytes = self.runner.run(None, cwd, &["cat-file", "blob", spec]).map_err(|e| e.reason())?;
         Ok(file_view_of(bytes))
     }
 
@@ -885,7 +1159,7 @@ impl GitLog {
             return Err("Not a commit id".into());
         }
         let cwd = self.cwd_of(repo)?;
-        let m = self.runner.text(None, &cwd, &["show", "-s", "--format=%B", sha]).map_err(|e| e.reason())?;
+        let m = self.runner.text(None, &cwd, &["show", "-s", "--no-show-signature", "--format=%B", sha]).map_err(|e| e.reason())?;
         Ok(m.trim_end().to_string())
     }
 }
@@ -954,6 +1228,7 @@ pub async fn gitlog_page(
     repos: Vec<String>,
     filter: FilterView,
     more: bool,
+    history: Option<HistoryReq>,
     window: tauri::Window,
     state: tauri::State<'_, GitLogState>,
 ) -> Result<PageView, String> {
@@ -965,7 +1240,7 @@ pub async fn gitlog_page(
             let (roots, depth, exclude) = workspace_scan(&crate::config::config_path(), &claudegate_core::paths::claudegate_home());
             gl.repos_for(&roots, depth, &exclude, false);
         }
-        gl.page(&label, query_id, &repos, &filter, more)
+        gl.page(&label, query_id, &repos, &filter, more, history.as_ref())
     })
     .await?
 }
@@ -1028,6 +1303,37 @@ pub fn worktree_file(root: &std::path::Path, path: &str) -> Result<String, Strin
         return Err(format!("{path} is no longer in the working tree"));
     }
     Ok(full.to_string_lossy().into_owned())
+}
+
+/// The file `path` at commit `rev`.
+#[tauri::command]
+pub async fn gitlog_rev_file(repo: String, rev: String, path: String, state: tauri::State<'_, GitLogState>) -> Result<FileView, String> {
+    let gl = state.inner().0.clone();
+    crate::commands::blocking(move || gl.rev_file(&repo, &rev, &path)).await?
+}
+
+/// Who last changed one line of `path` as of commit `rev`.
+#[tauri::command]
+pub async fn gitlog_blame(
+    query_id: u64,
+    repo: String,
+    rev: String,
+    path: String,
+    line: u32,
+    window: tauri::Window,
+    state: tauri::State<'_, GitLogState>,
+) -> Result<Option<BlameLineView>, String> {
+    let gl = state.inner().0.clone();
+    let label = window.label().to_string();
+    crate::commands::blocking(move || gl.blame(&label, query_id, &repo, &rev, &path, line)).await?
+}
+
+/// Cancels the window's blame in flight (the cursor left the line, blame was switched off).
+#[tauri::command]
+pub async fn gitlog_blame_cancel(query_id: u64, window: tauri::Window, state: tauri::State<'_, GitLogState>) -> Result<(), String> {
+    let gl = state.inner().0.clone();
+    let label = window.label().to_string();
+    crate::commands::blocking(move || gl.blame_cancel(&label, query_id)).await
 }
 
 #[tauri::command]
@@ -1135,13 +1441,55 @@ mod tests {
         let r = Runner::lazy();
         assert!(r.set_current("w", 1));
         let tag = Tag { window: "w".into(), query: 1 };
-        let held: Vec<_> = (0..PARALLEL - RESERVED).map(|_| r.acquire(Some(&tag)).ok().expect("a paging slot")).collect();
+        let held: Vec<_> = (0..PARALLEL - RESERVED).map(|_| r.acquire(Some(&tag), Share::Paging).ok().expect("a paging slot")).collect();
         // Paging is out of slots, but an untagged call still gets one.
-        let extra: Vec<_> = (0..RESERVED).map(|_| r.acquire(None).ok().expect("a reserved slot")).collect();
+        let extra: Vec<_> = (0..RESERVED).map(|_| r.acquire(None, Share::Reserved).ok().expect("a reserved slot")).collect();
         assert_eq!(*lock(&r.running), PARALLEL);
         drop(extra);
         drop(held);
         assert_eq!(*lock(&r.running), 0);
+    }
+
+    #[test]
+    fn forget_window_kills_every_channel() {
+        let r = Runner::lazy();
+        let w = Tag { window: "w".into(), query: 1 };
+        let wc = Tag { window: channel("w", "combined"), query: 2 };
+        let other = Tag { window: channel("wx", "combined"), query: 3 };
+        for t in [&w, &wc, &other] {
+            assert!(r.set_current(&t.window, t.query));
+            assert!(r.is_current(t));
+        }
+        // A query on one channel leaves the window's other channels current.
+        assert!(r.set_current(&wc.window, 4));
+        assert!(r.is_current(&w));
+        assert!(!r.set_current(&wc.window, 2), "an older id on the channel is late");
+        let wc = Tag { query: 4, ..wc };
+        r.forget_window("w");
+        assert!(!r.is_current(&w));
+        assert!(!r.is_current(&wc));
+        assert!(r.is_current(&other), "\"wx\" is another window");
+    }
+
+    /// Every child runs with the sanitized environment, lazy fetch off included.
+    #[cfg(unix)]
+    #[test]
+    fn children_never_lazy_fetch() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("envgit");
+        std::fs::write(&fake, "#!/bin/sh\nexec env\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let r = Runner::new(fake);
+        let env = r.text(None, dir.path(), &["status"]).unwrap();
+        for want in ["GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0"] {
+            assert!(env.lines().any(|l| l == want), "{want} missing from:\n{env}");
+        }
+        // The same helper builds core's `RealGit` command.
+        let mut cmd = Command::new("git");
+        claudegate_core::gitlog::sanitize_git_env(&mut cmd);
+        let set: Vec<_> = cmd.get_envs().filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string()))).collect();
+        assert!(set.contains(&("GIT_NO_LAZY_FETCH".to_string(), "1".to_string())), "{set:?}");
     }
 
     #[test]

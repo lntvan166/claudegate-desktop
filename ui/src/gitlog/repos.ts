@@ -23,7 +23,21 @@ export type GitLogConfig = {
   scanDepth: number;
   excludeRepos: string[];
   panes: Record<string, number>;
+  /** Blame on the cursor's line in Git log diffs. */
+  blame: boolean;
+  /** Compare Branches: the pair as last picked, newest recent first (at most 5). */
+  comparePair: ComparePair | null;
+  compareRecent: ComparePair[];
+  compareFavorites: BranchKey[];
+  /** "files" (default) or "commits". */
+  compareMode: "files" | "commits";
 };
+
+/** A branch as the backend names it: a local `origin/x` and the remote-tracking one differ by `remote`. */
+export type BranchKey = { name: string; remote: boolean };
+
+/** config.rs `PairView`: each side records its kind, and the compare resolves exactly that ref. */
+export type ComparePair = { left: string; leftRemote: boolean; right: string; rightRemote: boolean };
 
 export const DEFAULT_GITLOG_CONFIG: GitLogConfig = {
   ticked: null,
@@ -32,6 +46,11 @@ export const DEFAULT_GITLOG_CONFIG: GitLogConfig = {
   scanDepth: 2,
   excludeRepos: [],
   panes: {},
+  blame: true,
+  comparePair: null,
+  compareRecent: [],
+  compareFavorites: [],
+  compareMode: "files",
 };
 
 /** The deepest discovery walk the backend accepts (config.rs `GITLOG_SCAN_DEPTH_MAX`). */

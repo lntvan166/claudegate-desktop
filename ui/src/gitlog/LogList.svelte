@@ -16,8 +16,8 @@
     commitDate,
     debounce,
     footerText,
+    historyRequest,
     indexOfKey,
-    keepSelection,
     navigate,
     nearEnd,
     rowKey,
@@ -26,11 +26,25 @@
     toFilterView,
     visibleRange,
     type FilterState,
+    type HistoryReq,
     type NavKey,
     type QueryState,
+    type Request,
     type RowView,
   } from "./log";
   import { colorVar, type RepoView } from "./repos";
+  import {
+    EMPTY_SELECTION,
+    LIMIT_NOTICE,
+    applyGesture,
+    clickGesture,
+    keepListed,
+    pickedRows,
+    samePicked,
+    single,
+    type Gesture,
+    type Selection,
+  } from "./selection";
 
   // The merged commit list: one virtualised column of rows across the ticked repositories, its
   // keyboard, its context menu and Load more. The query it runs is a function of the repositories
@@ -40,7 +54,11 @@
     queryRepos,
     filter,
     active,
-    selectedKey = $bindable(null),
+    hidden = false,
+    selection = $bindable(EMPTY_SELECTION),
+    multi = true,
+    history = null,
+    onhistoryclose,
     onopen,
     onselect,
     onfocussearch,
@@ -53,10 +71,22 @@
     queryRepos: string[];
     filter: FilterState;
     active: boolean;
-    selectedKey?: string | null;
+    /**
+     * Set aside behind Compare: the query and selection are kept (and a new scope still re-reads), but
+     * `/` and paging by scroll wait until the list is back on screen.
+     */
+    hidden?: boolean;
+    /** The picked commits: `focus` is the row the keyboard is on (it drives the single-commit Changes). */
+    selection?: Selection;
+    /** Ctrl/Shift pick several; off, every click is a plain click (File History). */
+    multi?: boolean;
+    /** File History: the list is that one file's commits; the filter is set aside but for its branch. */
+    history?: HistoryReq | null;
+    /** Esc with nothing selected while File History is open: close it. */
+    onhistoryclose?: () => void;
     /** Enter or a double-click: open the commit's first changed file (Task 7 wires this). */
     onopen: (row: RowView) => void;
-    onselect: (row: RowView | null) => void;
+    onselect: (focus: RowView | null, picked: RowView[]) => void;
     /** `/`: put the cursor in the search box. */
     onfocussearch: () => void;
     onnotice: (text: string) => void;
@@ -65,7 +95,7 @@
 
   let q = $state<QueryState>(EMPTY_QUERY);
   const query = new LogQuery(
-    (id, req, more) => gitlogPage(id, req.repos, req.filter, more),
+    (id, req, more) => gitlogPage(id, req.repos, req.filter, more, req.history),
     (s) => (q = s),
   );
 
@@ -73,8 +103,13 @@
   const branchFilter = $derived(filter.branch);
 
   // ---- running the query ----
-  const requestKey = $derived(JSON.stringify([queryRepos, toFilterView(filter)]));
+  const request = $derived<Request>(history ? historyRequest(filter, history) : { repos: queryRepos, filter: toFilterView(filter), history: null });
+  const requestKey = $derived(JSON.stringify(request));
   let ran: string | null = null;
+  /** The file whose history `ran` was for: opening or closing File History starts at once, not after the debounce. */
+  let ranHistory: string | null = null;
+  let prevHistory: string | null = null;
+  const historyKey = $derived(history ? `${history.repo}\u0000${history.path}` : null);
   /** Pages fetched by the scroll trigger since the user last scrolled. */
   let idle = 0;
   let wasActive = false;
@@ -83,13 +118,19 @@
   function run() {
     later.cancel();
     ran = untrack(() => requestKey);
+    ranHistory = untrack(() => historyKey);
     dismissed = new Set();
     idle = 0;
-    if (queryRepos.length === 0) {
+    const req = untrack(() => request);
+    if (req.repos.length === 0) {
       query.clear();
       return;
     }
-    void query.start({ repos: queryRepos.slice(), filter: toFilterView(filter) });
+    // Opening or closing File History: the old rows go at once, so none of them can be picked
+    // (they carry no `file`) while the first page of the new list loads.
+    if (untrack(() => historyKey) !== prevHistory) query.clear();
+    prevHistory = untrack(() => historyKey);
+    void query.start({ ...req, repos: req.repos.slice() });
   }
 
   $effect(() => {
@@ -107,8 +148,31 @@
         run();
         // The list was display:none: its scroll position and height are not what we hold.
         void tick().then(resync);
-      } else if (key !== ran) later();
+      } else if (key !== ran) {
+        if (historyKey !== ranHistory) run();
+        else later();
+      }
     });
+  });
+  // Back from Compare: display:none dropped the scroller's position, so the one it had (still in
+  // `scrollTop`) is put back and its height re-read; the place in the list is kept.
+  let wasHidden = false;
+  /** The position when it was set aside (taken then: a hidden scroller may report 0 afterwards). */
+  let hiddenTop = 0;
+  $effect(() => {
+    const h = hidden;
+    if (!wasHidden && h) hiddenTop = untrack(() => scrollTop);
+    if (wasHidden && !h) {
+      const keep = hiddenTop;
+      void tick().then(() => {
+        if (!scroller) return;
+        // Not `resync()`: that would scroll back to the selection, away from where the user was.
+        scroller.scrollTop = keep;
+        scrollTop = scroller.scrollTop;
+        viewH = scroller.clientHeight;
+      });
+    }
+    wasHidden = h;
   });
   onDestroy(() => {
     later.cancel();
@@ -123,19 +187,54 @@
   const rows = $derived(q.rows);
   const range = $derived(visibleRange(scrollTop, viewH, ROW_H, rows.length));
   const slice = $derived(rows.slice(range.start, range.end));
-  const selIndex = $derived(indexOfKey(rows, selectedKey));
+  const selIndex = $derived(indexOfKey(rows, selection.focus));
+  const pickedKeys = $derived(new Set(selection.keys));
+  const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
   const pageRows = $derived(Math.max(1, Math.floor(viewH / ROW_H) - 1));
 
-  // A new list keeps the selection while the commit is still in it.
+  // A new list keeps the picked commits that are still in it.
   $effect(() => {
-    const kept = keepSelection(rows, untrack(() => selectedKey));
-    if (kept !== untrack(() => selectedKey)) select(null, false);
+    const cur = untrack(() => selection);
+    const kept = keepListed(cur, rows.map(rowKey));
+    const same = kept.focus === cur.focus && kept.anchor === cur.anchor && kept.keys.length === cur.keys.length;
+    if (!same) return commit(kept, false);
+    // Same keys, but a reload may hand back new row objects: the parent must not keep the old ones.
+    const picked = pickedRows(rows, kept);
+    if (!samePicked(picked, emitted)) {
+      const i = indexOfKey(rows, kept.focus);
+      emitted = picked;
+      onselect(i >= 0 ? rows[i] : null, picked);
+    }
   });
 
+  /** The picked rows last handed to the parent. */
+  let emitted: RowView[] = [];
+  /** Sets the selection and tells the parent: the focused row and every picked row. */
+  function commit(next: Selection, scroll = true) {
+    selection = next;
+    const i = indexOfKey(rows, next.focus);
+    emitted = pickedRows(rows, next);
+    onselect(i >= 0 ? rows[i] : null, emitted);
+    if (i >= 0 && scroll) revealIndex(i);
+  }
+  /** Narrows the selection to the one row `key` (Clear selection): the list stays the one place that selects and tells the parent. */
+  export function selectOnly(key: string) {
+    if (rows.some((r) => rowKey(r) === key)) commit(single(key), false);
+  }
+  /** A gesture on the list; a pick beyond the limit changes nothing and says why. */
+  function gesture(g: Gesture, scroll = true) {
+    const { next, overLimit } = applyGesture(selection, g, rows.map(rowKey));
+    if (overLimit) return onnotice(LIMIT_NOTICE);
+    commit(next, scroll);
+  }
+  /** Plain selection of one row (or none), as a click or Esc used to do. */
   function select(row: RowView | null, scroll = true) {
-    selectedKey = row ? rowKey(row) : null;
-    onselect(row);
-    if (row && scroll) revealIndex(indexOfKey(rows, selectedKey));
+    if (row) gesture({ kind: "click", key: rowKey(row), ctrl: false, shift: false }, scroll);
+    else commit(EMPTY_SELECTION, scroll);
+  }
+  function onrowclick(e: MouseEvent, row: RowView) {
+    gesture(clickGesture(e, rowKey(row), isMac, multi), false);
+    scroller?.focus();
   }
   function revealIndex(i: number) {
     if (!scroller || i < 0) return;
@@ -156,7 +255,7 @@
   }
   // Fetch the next page before the end is reached; `more()` itself refuses a second in flight.
   $effect(() => {
-    if (!active || q.done || q.loading || q.loadingMore || q.error || !nearEnd(range.end, rows.length)) return;
+    if (!active || hidden || q.done || q.loading || q.loadingMore || q.error || !nearEnd(range.end, rows.length)) return;
     // Bounded: a sparse filter must not page through all of history while nobody scrolls.
     if (!autoMoreAllowed(untrack(() => idle))) return;
     idle++;
@@ -179,7 +278,7 @@
     if (NAV_KEYS.includes(e.key)) {
       e.preventDefault();
       const i = navigate(rows.length, selIndex, e.key as NavKey, pageRows);
-      if (i >= 0) select(rows[i]);
+      if (i >= 0) gesture({ kind: "arrow", key: rowKey(rows[i]), shift: e.shiftKey && multi });
     } else if (e.key === "Enter") {
       e.preventDefault();
       const r = rows[selIndex];
@@ -188,6 +287,9 @@
       if (selIndex >= 0) {
         e.preventDefault();
         select(null);
+      } else if (history && onhistoryclose) {
+        e.preventDefault();
+        onhistoryclose();
       }
     } else if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
       e.preventDefault();
@@ -200,7 +302,8 @@
 
   // `/` from anywhere in the Git log that is not a field or a menu.
   function onwindowkey(e: KeyboardEvent) {
-    if (!active || e.defaultPrevented || e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+    // The filters are set aside in File History: `/` has nowhere to go, so it is left alone.
+    if (history || !active || hidden || e.defaultPrevented || e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
     if (!slashTarget(e.target as HTMLElement | null)) return;
     if (overlayShown(document.querySelectorAll<HTMLElement>(OVERLAY_SELECTOR))) return;
     e.preventDefault();
@@ -216,7 +319,7 @@
   ];
   function oncontext(e: MouseEvent, row: RowView) {
     e.preventDefault();
-    select(row, false);
+    gesture({ kind: "context", key: rowKey(row) }, false);
     menu = { row, x: e.clientX, y: e.clientY };
   }
   async function pick(id: string) {
@@ -278,24 +381,29 @@
     tabindex="0"
     data-loglist
     role="listbox"
+    aria-multiselectable={multi}
     aria-label="Commits, newest first"
     aria-busy={q.loading}
     aria-activedescendant={selIndex >= 0 ? `c-${selIndex}` : undefined}
   >
     {#if q.error && rows.length === 0}
       <div class="state error">
-        <p class="state-title">Couldn't read the log</p>
+        <p class="state-title">{history ? "Couldn't read the history" : "Couldn't read the log"}</p>
         <p class="state-body">{q.error}</p>
         <button type="button" class="again" onclick={run}>Try again</button>
       </div>
-    {:else if queryRepos.length === 0}
+    {:else if !history && queryRepos.length === 0}
       <div class="state"><p class="state-title">No repository is shown</p><p class="state-body">Tick one or more in Repositories.</p></div>
     {:else if q.loading && rows.length === 0}
       <div class="state" aria-hidden="true">
         {#each [82, 64, 74, 58, 70] as w, i (i)}<div class="skeleton" style:width="{w}%"></div>{/each}
       </div>
     {:else if rows.length === 0}
-      <div class="state"><p class="state-title">No commits match</p><p class="state-body">Widen the date range or clear a filter.</p></div>
+      {#if history}
+        <div class="state"><p class="state-title">No commits changed this file</p><p class="state-body">Nothing on this branch touched it.</p></div>
+      {:else}
+        <div class="state"><p class="state-title">No commits match</p><p class="state-body">Widen the date range or clear a filter.</p></div>
+      {/if}
     {:else}
       <div class="spacer" style:height="{rows.length * ROW_H}px">
         <div class="window" style:transform="translateY({range.start * ROW_H}px)">
@@ -307,13 +415,14 @@
             <div
               id="c-{i}"
               class="row"
-              class:selected={i === selIndex}
+              class:selected={pickedKeys.has(rowKey(r))}
+              class:focused={i === selIndex}
               role="option"
-              aria-selected={i === selIndex}
+              aria-selected={pickedKeys.has(rowKey(r))}
               tabindex="-1"
               style:--c={colorVar(repo?.color ?? 0)}
               title={`${r.subject}\n${r.author} · ${commitDate(r.time)}`}
-              onclick={() => (select(r, false), scroller?.focus())}
+              onclick={(e) => onrowclick(e, r)}
               ondblclick={() => onopen(r)}
               oncontextmenu={(e) => oncontext(e, r)}
             >
@@ -388,10 +497,14 @@
     background: var(--hover);
   }
   .row.selected {
-    background: var(--active);
-  }
-  .scroller:focus-visible .row.selected {
+    background: color-mix(in srgb, var(--focus-ring) 14%, transparent);
     box-shadow: inset 2px 0 0 var(--focus-ring);
+  }
+  .row.selected.focused {
+    background: color-mix(in srgb, var(--focus-ring) 24%, transparent);
+  }
+  .scroller:focus-visible .row.focused {
+    box-shadow: inset 3px 0 0 var(--focus-ring);
   }
   .chip {
     display: inline-flex;

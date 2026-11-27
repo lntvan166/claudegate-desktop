@@ -41,6 +41,15 @@ pub fn commit_by(dir: &Path, name: &str, msg: &str, t: i64) -> String {
 }
 
 pub fn commit(dir: &Path, files: &[(&str, Option<&[u8]>)], msg: &str, t: i64) -> String {
+    commit_with(dir, files, msg, t, None)
+}
+
+/// [`commit`] by `name` (author and committer, email `{name}@example.com`).
+pub fn commit_as(dir: &Path, name: &str, files: &[(&str, Option<&[u8]>)], msg: &str, t: i64) -> String {
+    commit_with(dir, files, msg, t, Some(name))
+}
+
+fn commit_with(dir: &Path, files: &[(&str, Option<&[u8]>)], msg: &str, t: i64, name: Option<&str>) -> String {
     for (p, content) in files {
         let f = dir.join(p);
         match content {
@@ -55,7 +64,12 @@ pub fn commit(dir: &Path, files: &[(&str, Option<&[u8]>)], msg: &str, t: i64) ->
     }
     let out = cmd(dir, t).args(["add", "-A"]).output().unwrap();
     assert!(out.status.success());
-    let out = cmd(dir, t).args(["commit", "-q", "--allow-empty", "-m", msg]).output().unwrap();
+    let mut c = cmd(dir, t);
+    if let Some(n) = name {
+        let email = format!("{n}@example.com");
+        c.env("GIT_AUTHOR_NAME", n).env("GIT_COMMITTER_NAME", n).env("GIT_AUTHOR_EMAIL", &email).env("GIT_COMMITTER_EMAIL", &email);
+    }
+    let out = c.args(["commit", "-q", "--allow-empty", "-m", msg]).output().unwrap();
     assert!(out.status.success(), "commit: {}", String::from_utf8_lossy(&out.stderr));
     git(dir, &["rev-parse", "HEAD"])
 }

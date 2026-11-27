@@ -158,7 +158,10 @@ pub fn repo_searched(f: &Filter, me: Option<&str>) -> bool {
 /// `git log` argv for one page of one repository: `page` records starting `skip` records into
 /// git's walk. `me` is that repository's `user.email`.
 pub fn log_args(f: &Filter, heads: &[String], me: Option<&str>, page: usize, skip: usize) -> Vec<String> {
-    let mut a = vec!["log".to_string(), LOG_FORMAT.to_string(), format!("--max-count={page}")];
+    // `--no-show-signature` overrides a user's `log.showSignature=true`, which writes a signature
+    // line before each signed record: `parse_log` would drop every signed commit while
+    // `count_records` still advanced `--skip`.
+    let mut a = vec!["log".to_string(), LOG_FORMAT.to_string(), format!("--max-count={page}"), "--no-show-signature".to_string()];
     let search = f.search.as_deref().map(|t| clean_text(t).trim().to_string()).filter(|t| !t.is_empty());
     if let Some(t) = &search {
         a.push(format!("--grep={t}"));

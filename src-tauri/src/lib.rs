@@ -3,6 +3,8 @@ pub mod commands;
 pub mod config;
 pub mod editor;
 pub mod gitlog;
+pub mod gitlog_combined;
+pub mod gitlog_compare;
 pub mod launch;
 pub mod tray;
 pub mod update;
@@ -93,11 +95,27 @@ pub fn run() {
             config::gitlog_include,
             config::gitlog_last_filter,
             config::gitlog_pane,
+            config::gitlog_compare_pair,
+            config::gitlog_compare_recent,
+            config::gitlog_favorite,
+            config::gitlog_unfavorite,
+            config::gitlog_compare_mode,
             gitlog::gitlog_page,
             gitlog::gitlog_changes,
             gitlog::gitlog_file,
             gitlog::gitlog_worktree_file,
             gitlog::gitlog_message,
+            gitlog::gitlog_blame,
+            gitlog::gitlog_blame_cancel,
+            config::gitlog_blame_setting,
+            gitlog::gitlog_rev_file,
+            gitlog_combined::gitlog_combined,
+            gitlog_combined::gitlog_combined_left,
+            gitlog_combined::gitlog_combined_cancel,
+            gitlog_compare::gitlog_compare,
+            gitlog_compare::gitlog_compare_files,
+            gitlog_compare::gitlog_compare_commits,
+            gitlog_compare::gitlog_branches,
             gitlog::gitlog_open_remote,
             tray::set_pending_count,
             update::check_update,

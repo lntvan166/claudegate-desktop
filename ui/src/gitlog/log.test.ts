@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEBOUNCE_MS,
   DEFAULT_FILTER,
+  HISTORY_KEY,
   LogQuery,
   QueryGate,
   ROW_H,
@@ -14,6 +15,10 @@ import {
   commitAge,
   debounce,
   footerText,
+  historyBanner,
+  historyRequest,
+  sameHistory,
+  HISTORY_PREFIX,
   keepSelection,
   navigate,
   nearEnd,
@@ -26,6 +31,7 @@ import {
   type QueryState,
   type RowView,
 } from "./log";
+import { pickFile, type ChangedFile } from "./changes";
 
 const SHA = "a".repeat(40);
 function row(n: number, extra: Partial<RowView> = {}): RowView {
@@ -60,8 +66,8 @@ describe("query ids", () => {
     let n = 0;
     const seen: QueryState[] = [];
     const q = new LogQuery(() => calls[n++].promise, (s) => seen.push(s), new QueryGate(10));
-    const p1 = q.start({ repos: ["a"], filter: {} });
-    const p2 = q.start({ repos: ["a"], filter: { search: "x" } });
+    const p1 = q.start({ repos: ["a"], filter: {}, history: null });
+    const p2 = q.start({ repos: ["a"], filter: { search: "x" }, history: null });
     second.resolve(page(0, rows(0, 2), true));
     await p2;
     first.resolve(page(0, rows(100, 105)));
@@ -73,9 +79,9 @@ describe("query ids", () => {
   it("send rising ids, and the same id for Load more", async () => {
     const ids: [number, boolean][] = [];
     const q = new LogQuery(async (id, _r, more) => (ids.push([id, more]), page(id, rows(0, 1))), () => {}, new QueryGate(50));
-    await q.start({ repos: [], filter: {} });
+    await q.start({ repos: [], filter: {}, history: null });
     await q.more();
-    await q.start({ repos: [], filter: {} });
+    await q.start({ repos: [], filter: {}, history: null });
     expect(ids[0][0]).toBe(ids[1][0]);
     expect(ids[1][1]).toBe(true);
     expect(ids[2][0]).toBeGreaterThan(ids[0][0]);
@@ -83,7 +89,7 @@ describe("query ids", () => {
 
   it("a stale error for the current query is surfaced, not left loading", async () => {
     const q = new LogQuery(async () => Promise.reject(STALE), () => {}, new QueryGate(1));
-    await q.start({ repos: [], filter: {} });
+    await q.start({ repos: [], filter: {}, history: null });
     expect(q.state.loading).toBe(false);
     expect(q.state.error).toContain(STALE);
   });
@@ -92,8 +98,8 @@ describe("query ids", () => {
     const first = deferred<PageView>();
     let n = 0;
     const q = new LogQuery(() => (n++ === 0 ? first.promise : Promise.resolve(page(0, rows(0, 1), true))), () => {}, new QueryGate(1));
-    const p1 = q.start({ repos: [], filter: {} });
-    await q.start({ repos: [], filter: {} });
+    const p1 = q.start({ repos: [], filter: {}, history: null });
+    await q.start({ repos: [], filter: {}, history: null });
     first.reject(STALE);
     await p1;
     expect(q.state.error).toBeNull();
@@ -102,7 +108,7 @@ describe("query ids", () => {
 
   it("clear() forgets the old rows for good", async () => {
     const q = new LogQuery(async (id) => page(id, rows(0, 3)), () => {}, new QueryGate(1));
-    await q.start({ repos: [], filter: {} });
+    await q.start({ repos: [], filter: {}, history: null });
     q.clear();
     expect(q.state.rows).toEqual([]);
     expect(q.state.loading).toBe(false);
@@ -121,7 +127,7 @@ describe("Load more", () => {
       () => {},
       new QueryGate(1),
     );
-    await q.start({ repos: [], filter: {} });
+    await q.start({ repos: [], filter: {}, history: null });
     const a = q.more();
     const b = q.more();
     await b;
@@ -142,9 +148,9 @@ describe("Load more", () => {
       () => {},
       new QueryGate(1),
     );
-    await q.start({ repos: [], filter: {} });
+    await q.start({ repos: [], filter: {}, history: null });
     const pending = q.more();
-    await q.start({ repos: [], filter: { search: "y" } });
+    await q.start({ repos: [], filter: { search: "y" }, history: null });
     d.resolve(page(0, rows(3, 6)));
     await pending;
     expect(q.state.rows.map((r) => r.subject)).toEqual(["commit 50", "commit 51"]);
@@ -155,7 +161,7 @@ describe("Load more", () => {
   it("appends without losing the selection, and stops when done", async () => {
     let n = 0;
     const q = new LogQuery(async (id) => (n++ === 0 ? page(id, rows(0, 3)) : page(id, rows(3, 5), true)), () => {}, new QueryGate(1));
-    await q.start({ repos: [], filter: {} });
+    await q.start({ repos: [], filter: {}, history: null });
     const selected = rowKey(q.state.rows[1]);
     await q.more();
     expect(q.state.rows).toHaveLength(5);
@@ -168,7 +174,7 @@ describe("Load more", () => {
   it("does not add a commit it already holds", async () => {
     let n = 0;
     const q = new LogQuery(async (id) => (n++ === 0 ? page(id, rows(0, 3)) : page(id, rows(2, 5))), () => {}, new QueryGate(1));
-    await q.start({ repos: [], filter: {} });
+    await q.start({ repos: [], filter: {}, history: null });
     await q.more();
     expect(q.state.rows).toHaveLength(5);
   });
@@ -351,5 +357,38 @@ describe("windowing", () => {
     expect(nearEnd(90, 100)).toBe(true);
     expect(nearEnd(50, 100)).toBe(false);
     expect(nearEnd(0, 0)).toBe(false);
+  });
+});
+
+describe("File History", () => {
+  const R = "/w/acme-api/.git";
+  it("history sets search, authors, Me, path and dates aside and keeps the branch", () => {
+    const f = { ...DEFAULT_FILTER, search: "fix", authors: ["dana"], mine: true, path: "src", range: "7d" as const, branch: "release-1.4" };
+    expect(historyRequest(f, { repo: R, path: "a.ts" })).toEqual({ repos: [R], filter: { branch: "release-1.4" }, history: { repo: R, path: "a.ts" } });
+    expect(historyRequest({ ...f, branch: " " }, { repo: R, path: "a.ts" }).filter).toEqual({});
+  });
+  it("names the file in the banner", () => {
+    expect(historyBanner("src/new.ts")).toBe("History of src/new.ts");
+    expect(HISTORY_KEY).toBe("h");
+  });
+  it("the diff follows the file's path at each commit", () => {
+    const file = (path: string): ChangedFile => ({ path, status: "modified", from: null, added: 1, removed: 0 });
+    const files = [file("new.ts"), file("old.ts")];
+    const r = row(1, { file: { path: "old.ts", from: null, status: "modified" } });
+    expect(pickFile(files, r.file?.path ?? null)?.path).toBe("old.ts");
+    expect(pickFile(files, null)?.path).toBe("new.ts");
+  });
+  it("knows when history is already open for a file", () => {
+    expect(sameHistory({ repo: R, path: "a.ts" }, R, "a.ts")).toBe(true);
+    expect(sameHistory({ repo: R, path: "a.ts" }, R, "b.ts")).toBe(false);
+    expect(sameHistory({ repo: R, path: "a.ts" }, "/w/other/.git", "a.ts")).toBe(false);
+    expect(sameHistory(null, R, "a.ts")).toBe(false);
+    expect(historyBanner("a.ts")).toBe(HISTORY_PREFIX + "a.ts");
+  });
+  it("sends the history request through to the fetcher", async () => {
+    const seen: unknown[] = [];
+    const q = new LogQuery(async (id, req) => (seen.push(req.history), page(id, [], true)), () => {}, new QueryGate(1));
+    await q.start(historyRequest(DEFAULT_FILTER, { repo: R, path: "a.ts" }));
+    expect(seen).toEqual([{ repo: R, path: "a.ts" }]);
   });
 });

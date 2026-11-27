@@ -1,7 +1,10 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, type Snippet } from "svelte";
   import { iconFor, type IconTheme } from "../lib/icons";
-  import { NAV_KEYS, navigate, type NavKey } from "./log";
+  import ContextMenu from "../components/ContextMenu.svelte";
+  import { isTypingTarget } from "../lib/keys";
+  import { HISTORY_KEY, NAV_KEYS, navigate, type NavKey } from "./log";
+  import { BOTH_TOOLTIP } from "./compare";
   import {
     changeTree,
     countsText,
@@ -19,6 +22,7 @@
   // move, Enter opens the file's diff, Esc hands the keyboard back to the commit list.
   let {
     title,
+    repo = null,
     files,
     loading,
     error,
@@ -26,8 +30,15 @@
     theme,
     onopenfile,
     onescape,
+    onhistory,
+    header,
+    both = null,
+    emptyText = "This commit changes no files.",
+    label = "Changes",
   }: {
     title: string;
+    /** The repository the files belong to (File History needs it); null: none. */
+    repo?: string | null;
     /** null: no commit selected (or its files are not here yet). */
     files: ChangedFile[] | null;
     loading: boolean;
@@ -37,7 +48,17 @@
     theme: IconTheme;
     onopenfile: (file: ChangedFile) => void;
     onescape: () => void;
+    /** "File History": the commits that changed this file. */
+    onhistory?: (repo: string, path: string) => void;
+    /** Drawn in place of the title (Compare's sticky column header). */
+    header?: Snippet;
+    /** Compare: paths changed on both sides, tagged "both". */
+    both?: ReadonlySet<string> | null;
+    /** What an empty list says. */
+    emptyText?: string;
+    label?: string;
   } = $props();
+
 
   let collapsed = $state(new Set<string>());
   let focusId = $state<string | null>(null);
@@ -97,6 +118,19 @@
     collapsed = next;
   }
 
+  // The context menu of a file row, and the `h` key: File History.
+  const MENU = [{ id: "history", label: "File History", hint: HISTORY_KEY.toUpperCase() }];
+  let menu = $state<{ x: number; y: number; path: string; id: string } | null>(null);
+  function history(path: string) {
+    if (repo && onhistory) onhistory(repo, path);
+  }
+  function openMenu(e: MouseEvent, path: string, id: string) {
+    if (!repo || !onhistory) return;
+    e.preventDefault();
+    focusId = id;
+    menu = { x: e.clientX, y: e.clientY, path, id };
+  }
+
   function activate(n: ChangeNode) {
     if (n.kind === "folder") toggle(n);
     else if (n.item) onopenfile(n.item.file);
@@ -133,12 +167,19 @@
     } else if (e.key === "Escape") {
       e.preventDefault();
       onescape();
+    } else if (e.key.toLowerCase() === HISTORY_KEY && !e.shiftKey && !isTypingTarget(e.target as Element) && cur?.node.kind === "file" && cur.node.item) {
+      e.preventDefault();
+      history(cur.node.item.file.path);
+    } else if ((e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) && cur?.node.kind === "file" && cur.node.item && repo && onhistory) {
+      e.preventDefault();
+      const r = rowEl(nodeId(cur.node))?.getBoundingClientRect();
+      menu = { x: r ? r.left + 24 : 0, y: r ? r.bottom : 0, path: cur.node.item.file.path, id: nodeId(cur.node) };
     }
   }
 </script>
 
-<section class="changes" aria-label="Changes">
-  <p class="pane-title" title={title}>{title}</p>
+<section class="changes" aria-label={label}>
+  {#if header}{@render header()}{:else}<p class="pane-title" title={title}>{title}</p>{/if}
   {#if error}
     <p class="state-body pad" role="alert">Couldn't load the changes: {error}</p>
   {:else if files === null}
@@ -150,7 +191,7 @@
       <p class="state-body pad">Select a commit to see the files it changed.</p>
     {/if}
   {:else if files.length === 0}
-    <p class="state-body pad">This commit changes no files.</p>
+    <p class="state-body pad">{emptyText}</p>
   {:else}
     <!-- svelte-ignore a11y_interactive_supports_focus -->
     <div class="tree" role="tree" aria-label="Changed files" tabindex="-1" bind:this={treeEl} {onkeydown} class:stale={loading}>
@@ -192,17 +233,19 @@
             tabindex={tabId === id ? 0 : -1}
             style:padding-left="{pad(r.depth)}px"
             title="{f.path} · {statusText(f)}"
-            aria-label="{n.name}, {statusText(f)}, {countsText(f)}"
+            aria-label="{n.name}, {statusText(f)}, {countsText(f)}{both?.has(f.path) ? ', changed on both sides' : ''}"
             onclick={() => {
               focusId = id;
               onopenfile(f);
             }}
+            oncontextmenu={(e) => openMenu(e, f.path, id)}
           >
             <span class="chev-gap" aria-hidden="true"></span>
             <img class="icon" src={iconFor(n.name, "file", false, theme)} alt="" draggable="false" />
             <span class="name">{n.name}</span>
             {#if f.from}<span class="from" aria-hidden="true">← {f.from.split("/").pop()}</span>{/if}
             <span class="spacer"></span>
+            {#if both?.has(f.path)}<span class="both" title={BOTH_TOOLTIP} aria-hidden="true">both</span>{/if}
             <span class="counts num" aria-hidden="true">
               {#if f.added === null || f.removed === null}
                 <span class="faint">binary</span>
@@ -217,6 +260,25 @@
     </div>
   {/if}
 </section>
+
+{#if menu}
+  {@const m = menu}
+  <ContextMenu
+    x={m.x}
+    y={m.y}
+    items={MENU}
+    onpick={() => {
+      const path = m.path;
+      menu = null;
+      history(path);
+    }}
+    onclose={() => {
+      const id = m.id;
+      menu = null;
+      void tick().then(() => rowEl(id)?.focus());
+    }}
+  />
+{/if}
 
 <style>
   .changes {
@@ -323,6 +385,15 @@
     font-size: var(--fs-meta);
   }
   .add {
+    color: var(--positive);
+  }
+  .both {
+    flex: none;
+    padding: 0 5px;
+    border: 1px solid currentColor;
+    border-radius: var(--radius-chip);
+    font-size: var(--fs-meta);
+    line-height: 14px;
     color: var(--positive);
   }
   .del {

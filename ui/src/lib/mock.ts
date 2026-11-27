@@ -21,6 +21,8 @@ import type {
 } from "./api";
 import type { FilterView, PageView, RowView } from "../gitlog/log";
 import type { ChangedFile, FileView } from "../gitlog/changes";
+import type { CombinedFile, CombinedLeft, CombinedRepo, CombinedView } from "../gitlog/combined";
+import { mirror, pushRecent, type BranchName, type CompareFiles, type CompareRow, type Pair, type RepoCompare, type SideCommit } from "../gitlog/compare";
 import { DEFAULT_GITLOG_CONFIG, SCAN_DEPTH_MAX, type GitLogConfig, type RepoView } from "../gitlog/repos";
 import { DEFAULT_PROTECTED, globMatcher, type ExcludeOwner, type Resolved } from "./settings";
 
@@ -627,7 +629,8 @@ const glAll: RowView[] = (() => {
   gitRepos.forEach((r, ri) => {
     const wt = r.checkouts.filter((c) => !c.isMain);
     for (let k = 0; k < 400; k++) {
-      const sha = ((((ri + 1) * 2_654_435_761 + k * 40_503) >>> 0).toString(16).padStart(8, "0")).repeat(5);
+      const shaOf = (n: number) => ((((ri + 1) * 2_654_435_761 + n * 40_503) >>> 0).toString(16).padStart(8, "0")).repeat(5);
+      const sha = shaOf(k);
       const [author, email] = GL_AUTHORS[(k + ri) % 3];
       // Every 9th commit of a repository with worktrees lives only on one of them.
       const only = wt.length && k % 9 === 0 ? wt[k % wt.length] : null;
@@ -638,7 +641,8 @@ const glAll: RowView[] = (() => {
         author,
         email,
         subject: GL_SUBJECTS[(k * 3 + ri) % GL_SUBJECTS.length] + (k % 5 === 0 ? ` (#${1000 + k})` : ""),
-        parents: [],
+        // The next older commit; the oldest is a root.
+        parents: k < 399 ? [shaOf(k + 1)] : [],
         source: only ? (only.branch ? `refs/heads/${only.branch}` : only.head) : "HEAD",
       });
     }
@@ -686,7 +690,204 @@ const GL_CHANGES: ChangedFile[][] = [
   [ch("db/seed.sql", "modified", 9000, 8800), ch("config/deploy.yml", "modified", 3, 0), ch("scripts/export.rs", "deleted", 0, 12)],
   [],
 ];
-const glFiles = (sha: string) => GL_CHANGES[parseInt(sha.slice(-4), 16) % GL_CHANGES.length];
+// File History: every 6th commit of the repository "touched" the file; the oldest ones know it by
+// its earlier name (web/src/client.ts was web/src/api.ts), and the oldest created it. The commit's
+// own Changes is then that one file, so the diff has something to follow.
+const GL_RENAMED: Record<string, string> = { "web/src/client.ts": "web/src/api.ts" };
+const glHistoryFile = new Map<string, ChangedFile>();
+let glHistNewest = 0;
+let glHistQuery: { id: number; req: string; rows: RowView[]; at: number } | null = null;
+function glHistory(id: number, repo: string, path: string, branch?: string) {
+  if (!path.includes(".")) throw "Not a file";
+  const touched = glAll.filter((r) => r.repo === repo).filter((_, i) => i % 6 === 0).slice(0, 14);
+  const old = GL_RENAMED[path] ?? null;
+  const rows = touched.map((r, i) => {
+    const last = i === touched.length - 1;
+    const renamedHere = old !== null && i === touched.length - 4;
+    const before = old !== null && i >= touched.length - 3;
+    const name = before ? old! : path;
+    const status = last ? "added" : renamedHere ? "renamed" : "modified";
+    const file = { path: name, from: renamedHere ? old : null, status } as const;
+    glHistoryFile.set(r.sha, ch(name, status, 6 + i, last ? 0 : 2, renamedHere ? old : null));
+    return { ...r, source: branch ?? r.source, file: { ...file } };
+  });
+  return { id, req: JSON.stringify([repo, path, branch ?? ""]), rows, at: 0 };
+}
+const glFiles = (sha: string) => (glHistoryFile.has(sha) ? [glHistoryFile.get(sha)!] : GL_CHANGES[parseInt(sha.slice(-4), 16) % GL_CHANGES.length]);
+
+// Combined Changes: a fixture built from whatever commits are picked. The first repository gets a
+// file that falls back on a conflict (it carries an unselected commit), a binary, a too-large one,
+// one that needs the merge path and a file with no net change; the second gets a rename, an added
+// and a deleted file; a repository named legacy-billing fails. Every sha is the picked one or a
+// made-up unselected one, so the pane's counts and tooltips read like the real thing.
+const UNSEL_A = "9c4e1a8".padEnd(40, "0");
+const UNSEL_B = "1b2c3d4".padEnd(40, "0");
+const BEFORE_REF = "ba5e".repeat(10);
+let glCombinedNewest = 0;
+function mockCombinedRepo(repo: string, cs: string[], gi: number): CombinedRepo {
+  const last = cs[cs.length - 1];
+  const first = cs[0];
+  const f = (path: string, extra: Partial<CombinedFile> = {}): CombinedFile => ({
+    path,
+    from: null,
+    status: "modified",
+    shas: cs,
+    last,
+    beforeRef: BEFORE_REF,
+    beforePath: path,
+    included: [],
+    mode: "fast",
+    reason: null,
+    ...extra,
+  });
+  if (repo.includes("legacy-billing")) {
+    return { repo, commits: cs, files: [], noNetChange: [], subjects: {}, error: "fatal: detected dubious ownership in repository" };
+  }
+  if (gi % 2 === 0) {
+    return {
+      repo,
+      commits: cs,
+      files: [
+        f("internal/refunds/refund.go"),
+        f("internal/refunds/rules.go", { mode: "merge", included: [UNSEL_B] }),
+        f("web/src/components/Cart.ts", { shas: [first], mode: "fallback", reason: "conflict", included: [UNSEL_A] }),
+        f("web/public/logo.png", { mode: "fallback", reason: "binary" }),
+        f("db/seed.sql", { shas: [last], mode: "fallback", reason: "tooLarge" }),
+        f("README.md", { shas: [first] }),
+      ],
+      noNetChange: ["internal/refunds/debug.go"],
+      subjects: { [UNSEL_A]: "header: wider title", [UNSEL_B]: "fix: keep the retry count" },
+      error: null,
+    };
+  }
+  return {
+    repo,
+    commits: cs,
+    files: [
+      f("web/src/client.ts", { status: "renamed", from: "web/src/api.ts", beforePath: "web/src/api.ts" }),
+      f("web/src/components/Totals.ts", { status: "added", shas: [first], last: first, beforeRef: null }),
+      f("docs/old-notes.md", { status: "deleted", shas: [last] }),
+      f("package.json"),
+    ],
+    noNetChange: ["web/src/debug.ts", "web/src/nav.ts"],
+    subjects: {},
+    error: null,
+  };
+}
+async function mockCombined(queryId: number, items: { repo: string; sha: string }[]): Promise<CombinedView> {
+  const distinct = new Set(items.map((i) => `${i.repo}\u0000${i.sha}`));
+  if (distinct.size > 100) throw "Combined Changes shows up to 100 commits";
+  await new Promise((r) => setTimeout(r, 150));
+  if (queryId < glCombinedNewest) throw "stale query";
+  glCombinedNewest = queryId;
+  const order: string[] = [];
+  const by = new Map<string, string[]>();
+  for (const it of items) {
+    if (!by.has(it.repo)) (by.set(it.repo, []), order.push(it.repo));
+    by.get(it.repo)!.push(it.sha);
+  }
+  // The list is newest first; a repository's commits are reported oldest first.
+  return { queryId, repos: order.map((repo, gi) => mockCombinedRepo(repo, by.get(repo)!.slice().reverse(), gi)) };
+}
+
+// Compare Branches: a fixture with every row kind. The pair as written (release on the left, main on
+// the right) gives the rows below; swapped, each row is mirrored. A name the fixture does not know is
+// missing everywhere. Shas encode the side (`a…` left tip, `b…` right tip) so the reads can tell a
+// mirrored call apart; the base is BEFORE_REF, so `gitlogRevFile` draws the "before" text for it.
+const GL_BRANCHES: (BranchName & { in: string[] })[] = [
+  { name: "main", remote: false, count: 0, in: ["*"] },
+  { name: "origin/main", remote: true, count: 0, in: ["*"] },
+  { name: "origin/release-1.4", remote: true, count: 0, in: ["shop-api", "umbrella-web", "umbrella-payments", "umbrella-orders", "svc-lib", "umbrella", "legacy-billing", "tide-sim"] },
+  { name: "release-1.4", remote: false, count: 0, in: ["shop-api", "umbrella-web"] },
+  { name: "feat/refund-export", remote: false, count: 0, in: ["shop-api"] },
+  // A local branch that happens to be called origin/x, beside the remote-tracking origin/x.
+  { name: "origin/x", remote: false, count: 0, in: ["shop-api"] },
+  { name: "origin/x", remote: true, count: 0, in: ["shop-api", "umbrella-web"] },
+];
+const glHas = (b: { in: string[] }, name: string) => b.in.includes("*") || b.in.includes(name);
+const glNameOf = (id: string) => gitRepos.find((r) => r.id === id)?.name ?? "";
+const glSha = (c: string, i: number) => c + i.toString(16).padStart(39, "0");
+/** The rows as the fixture's own orientation sees them (release-ish left, main-ish right). */
+function glCompareRow(repo: string): RepoCompare {
+  const i = gitRepos.findIndex((r) => r.id === repo);
+  const d = (left: number, right: number, same: number): RepoCompare => ({ kind: "differs", leftSha: glSha("a", i), rightSha: glSha("b", i), base: BEFORE_REF, left, right, sameLeft: same, sameRight: same });
+  switch (glNameOf(repo)) {
+    case "shop-api":
+      return d(3, 1, 1);
+    case "umbrella-web":
+      return d(620, 0, 0);
+    case "umbrella-payments":
+      return d(0, 2, 0);
+    case "umbrella-orders":
+      return d(0, 0, 2);
+    case "legacy-billing":
+      return { kind: "error", reason: "fatal: bad object refs/remotes/origin/release-1.4" };
+    case "tide-sim":
+      return { kind: "nobase" };
+    case "field-notes":
+      return { kind: "missing" };
+    default:
+      return { kind: "identical" };
+  }
+}
+const glFlipped = (leftSha: string) => leftSha.startsWith("b");
+let glCompareNewest = 0;
+/** `?gitlog=slowcolumns` keeps a Files/Commits read in flight long enough to supersede it with ↻. */
+const glColumnsDelay = () => (new URLSearchParams(location.search).get("gitlog") === "slowcolumns" ? 2500 : 60);
+async function mockCompare(queryId: number, repos: string[], p: Pair) {
+  glCompareNewest = Math.max(glCompareNewest, queryId);
+  // `?gitlog=slowcompare` keeps "Reading N repositories…" up for a while.
+  await new Promise((r) => setTimeout(r, new URLSearchParams(location.search).get("gitlog") === "slowcompare" ? 3000 : 350));
+  if (queryId < glCompareNewest) throw "stale query";
+  const known = (name: string, remote: boolean, repo: string) => GL_BRANCHES.some((b) => b.name === name && b.remote === remote && glHas(b, glNameOf(repo)));
+  const flip = /main$/.test(p.left) && !/main$/.test(p.right);
+  const rows: CompareRow[] = repos.map((repo) => {
+    if (!known(p.left, p.leftRemote, repo) || !known(p.right, p.rightRemote, repo)) return { repo, kind: "missing" };
+    const r = glCompareRow(repo);
+    return { repo, ...(flip ? mirror(r) : r) };
+  });
+  return { queryId, rows };
+}
+function glCanonical(repo: string): Extract<RepoCompare, { kind: "differs" }> {
+  const r = glCompareRow(repo);
+  if (r.kind !== "differs") throw "Not a commit id";
+  return r;
+}
+function mockCompareFiles(queryId: number, repo: string, leftSha: string): CompareFiles {
+  if (queryId < glCompareNewest) throw "stale query";
+  const r = glCanonical(repo);
+  const left = r.left > 0 ? [ch("web/src/client.ts", "renamed", 6, 2, "web/src/api.ts"), ch("internal/refunds/refund.go", "modified", 12, 3), ch("docs/release-notes.md", "added", 24, 0), ch("web/public/logo.png", "modified", null, null)] : [];
+  const right = r.right > 0 ? [ch("internal/refunds/refund.go", "modified", 2, 1), ch("config/deploy.yml", "modified", 3, 0)] : r.sameLeft > 0 ? [ch("service/billing.py", "modified", 5, 5)] : [];
+  const leftAll = r.left === 0 && r.sameLeft > 0 ? [ch("service/billing.py", "modified", 5, 5)] : left;
+  const both = leftAll.map((f) => f.path).filter((x) => right.some((f) => f.path === x)).sort();
+  return glFlipped(leftSha) ? { left: right, right: leftAll, both } : { left: leftAll, right, both };
+}
+function mockCompareCommits(queryId: number, repo: string, side: "left" | "right", leftSha: string, max: number): SideCommit[] {
+  if (queryId < glCompareNewest) throw "stale query";
+  const r = glCanonical(repo);
+  const own = (glFlipped(leftSha) ? side === "right" : side === "left") ? "left" : "right";
+  const n = own === "left" ? r.left : r.right;
+  const same = own === "left" ? r.sameLeft : r.sameRight;
+  const now = Math.floor(Date.now() / 1000);
+  const out: SideCommit[] = [];
+  let plus = 0;
+  let dupes = 0;
+  for (let k = 0; k < n + same; k++) {
+    // The duplicates sit among the side's own commits; their subjects match across the two sides.
+    const dup = dupes < same && (plus >= n || k % 3 === 1);
+    if (dup) dupes++;
+    else plus++;
+    out.push({
+      mark: dup ? "=" : "+",
+      sha: glSha(own === "left" ? "c" : "d", k * 7 + 3),
+      parents: [glSha("e", k)],
+      time: now - (k + 1) * 5400,
+      author: GL_AUTHORS[k % 3][0],
+      subject: dup ? `Round refunds to the cent (#${1199 + dupes})` : GL_SUBJECTS[(k * 5 + (own === "left" ? 0 : 2)) % GL_SUBJECTS.length],
+    });
+  }
+  return out.slice(0, max);
+}
 
 const gitlogMock: Pick<
   Api,
@@ -711,6 +912,22 @@ const gitlogMock: Pick<
   | "gitlogFile"
   | "gitlogWorktreeFile"
   | "gitlogOpenRemote"
+  | "gitlogCombined"
+  | "gitlogCombinedLeft"
+  | "gitlogCombinedCancel"
+  | "gitlogRevFile"
+  | "gitlogBlame"
+  | "gitlogBlameCancel"
+  | "gitlogBlameSetting"
+  | "gitlogComparePair"
+  | "gitlogCompareRecent"
+  | "gitlogFavorite"
+  | "gitlogUnfavorite"
+  | "gitlogCompareMode"
+  | "gitlogCompare"
+  | "gitlogCompareFiles"
+  | "gitlogCompareCommits"
+  | "gitlogBranches"
 > = {
   gitlogRepos: async () => {
     await new Promise((r) => setTimeout(r, 300));
@@ -777,8 +994,22 @@ const gitlogMock: Pick<
     gitLog = { ...gitLog, lastFilter: filter };
     return gl();
   },
-  gitlogPage: async (queryId, repos, filter, more) => {
+  gitlogPage: async (queryId, repos, filter, more, history) => {
     await new Promise((r) => setTimeout(r, 120));
+    if (history) {
+      // Its own channel: it never supersedes the log's query.
+      if (queryId < glHistNewest) throw "stale query";
+      if (more) {
+        if (!glHistQuery || glHistQuery.id !== queryId) throw "stale query";
+      } else {
+        glHistNewest = queryId;
+        glHistQuery = glHistory(queryId, history.repo, history.path, filter.branch);
+      }
+      const h = glHistQuery!;
+      const rows = h.rows.slice(h.at, h.at + 6);
+      h.at += rows.length;
+      return { queryId, rows, failures: [], branchUse: null, done: h.at >= h.rows.length };
+    }
     if (queryId < glNewest) throw "stale query";
     if (more) {
       if (!glQuery || glQuery.id !== queryId) throw "stale query";
@@ -815,6 +1046,79 @@ const gitlogMock: Pick<
     if (repo.includes("legacy-billing")) return false;
     console.info("open", `https://github.com/acme/${repo.split("/").slice(-2, -1)[0]}/commit/${sha}`);
     return true;
+  },
+  gitlogCombined: mockCombined,
+  gitlogCombinedCancel: async (queryId) => {
+    glCombinedNewest = Math.max(glCombinedNewest, queryId);
+  },
+  gitlogCombinedLeft: async (queryId, _repo, _last, path): Promise<CombinedLeft> => {
+    // `?gitlog=slowleft` makes this read outlast a newer selection (to see a superseded read recover).
+    await new Promise((r) => setTimeout(r, new URLSearchParams(location.search).get("gitlog") === "slowleft" ? 1500 : 40));
+    if (queryId < glCombinedNewest) throw "stale query";
+    const { before } = sample(path, false);
+    return before === null ? { kind: "text", value: "" } : { kind: "text", value: before };
+  },
+  gitlogRevFile: async (_repo, rev, path): Promise<FileView> => {
+    await new Promise((r) => setTimeout(r, 40));
+    if (path.endsWith(".png")) return { kind: "binary" };
+    if (path.endsWith(".sql")) return { kind: "tooLarge", value: 3_400_000 };
+    const { before, after } = sample(path, false);
+    const text = rev === BEFORE_REF ? before : after;
+    return text === null ? { kind: "missing" } : { kind: "text", value: text };
+  },
+  gitlogBlame: async (_queryId, _repo, rev, path, line) => {
+    await new Promise((r) => setTimeout(r, 60));
+    if (line > 400) return null;
+    // Deterministic: a few authors and commits spread over the lines, a quote and a bracket in one subject.
+    const who = [
+      ["Ann Lindqvist", "ann@example.com", "Fix the retry loop"],
+      ["Dana Whitfield", "dana@example.com", "Rename the client option [breaking] (see *notes*)"],
+      ["Mira Okafor", "mira@example.com", "Extract the pricing rules into their own module so the checkout stops importing the cart"],
+    ];
+    const k = (line + path.length + rev.charCodeAt(0)) % who.length;
+    const [author, email, summary] = who[k];
+    const time = Math.floor(Date.now() / 1000) - (k + 1) * 3 * 86400 - line * 60;
+    return { sha: `${k + 1}${rev.slice(1, 39)}${k}`.padEnd(40, "0").slice(0, 40), author, email, time, summary };
+  },
+  gitlogBlameCancel: async () => {},
+  gitlogBlameSetting: (on) => {
+    gitLog = { ...gitLog, blame: on };
+    return gl();
+  },
+  gitlogComparePair: (left, leftRemote, right, rightRemote) => {
+    gitLog = { ...gitLog, comparePair: { left, leftRemote, right, rightRemote } };
+    return gl();
+  },
+  gitlogCompareRecent: (left, leftRemote, right, rightRemote) => {
+    gitLog = { ...gitLog, compareRecent: pushRecent(gitLog.compareRecent, { left, leftRemote, right, rightRemote }) };
+    return gl();
+  },
+  gitlogFavorite: (name, remote) => {
+    if (!gitLog.compareFavorites.some((f) => f.name === name && f.remote === remote)) gitLog = { ...gitLog, compareFavorites: [...gitLog.compareFavorites, { name, remote }] };
+    return gl();
+  },
+  gitlogUnfavorite: (name, remote) => {
+    gitLog = { ...gitLog, compareFavorites: gitLog.compareFavorites.filter((f) => !(f.name === name && f.remote === remote)) };
+    return gl();
+  },
+  gitlogCompareMode: (mode) => {
+    gitLog = { ...gitLog, compareMode: mode };
+    return gl();
+  },
+  gitlogCompare: mockCompare,
+  gitlogCompareFiles: async (queryId, repo, leftSha) => {
+    await new Promise((r) => setTimeout(r, glColumnsDelay()));
+    return mockCompareFiles(queryId, repo, leftSha);
+  },
+  gitlogCompareCommits: async (queryId, repo, side, leftSha, _rightSha, max) => {
+    await new Promise((r) => setTimeout(r, glColumnsDelay()));
+    return mockCompareCommits(queryId, repo, side, leftSha, max);
+  },
+  gitlogBranches: async (repos) => {
+    await new Promise((r) => setTimeout(r, 120));
+    return GL_BRANCHES.map((b) => ({ name: b.name, remote: b.remote, count: repos.filter((id) => glHas(b, glNameOf(id))).length }))
+      .filter((b) => b.count > 0)
+      .sort((a, b) => b.count - a.count || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   },
 };
 

@@ -2,8 +2,9 @@
 //! Every writer adds, removes or sets one key; none overwrites a list with the UI's copy.
 use claudegate_desktop_lib::config::{
     config_path_in, gitlog_apply_profile, gitlog_delete_profile, gitlog_exclude_repo, gitlog_include_repo, gitlog_rename_profile,
-    gitlog_save_profile, gitlog_set_last_filter, gitlog_set_pane, gitlog_set_scan_depth, gitlog_tick_all, gitlog_tick_only,
-    gitlog_tick_repos, gitlog_untick_repos, read_gitlog, GITLOG_SCAN_DEPTH,
+    gitlog_save_profile, gitlog_set_blame, gitlog_set_last_filter, gitlog_set_pane, gitlog_set_scan_depth, gitlog_tick_all, gitlog_tick_only,
+    gitlog_tick_repos, gitlog_untick_repos, read_gitlog, GITLOG_SCAN_DEPTH, FavoriteView, PairView, gitlog_favorite_branch, gitlog_push_recent_pair,
+    gitlog_set_compare_mode, gitlog_set_compare_pair, gitlog_unfavorite_branch,
 };
 use serde_json::json;
 use std::fs;
@@ -144,4 +145,117 @@ fn refuses_inside_the_claudegate_home() {
     let t = tempfile::tempdir().unwrap();
     let p = t.path().join("config.json");
     assert!(gitlog_tick_all(&p, Some(t.path())).is_err());
+}
+
+#[test]
+fn blame_setting_is_one_key() {
+    let (_t, p) = cfg();
+    assert!(read_gitlog(&p).blame, "on by default");
+    let before = json!({"theme": "dark", "gitLog": {"ticked": ["a"], "panes": {"repos": 200}, "scanDepth": 3}});
+    fs::write(&p, before.to_string()).unwrap();
+    let g = gitlog_set_blame(&p, false, None).unwrap();
+    assert!(!g.blame);
+    let mut after = raw(&p);
+    assert_eq!(after["gitLog"]["blame"], json!(false));
+    after["gitLog"].as_object_mut().unwrap().remove("blame");
+    assert_eq!(after, before, "every other key is untouched");
+    assert!(gitlog_set_blame(&p, true, None).unwrap().blame);
+    fs::write(&p, json!({"gitLog": {"blame": "yes"}}).to_string()).unwrap();
+    assert!(read_gitlog(&p).blame, "a non-bool reads as on");
+    fs::write(&p, json!({"gitLog": {"blame": 0}}).to_string()).unwrap();
+    assert!(read_gitlog(&p).blame);
+}
+
+fn pv(l: &str, lr: bool, r: &str, rr: bool) -> PairView {
+    PairView { left: l.into(), left_remote: lr, right: r.into(), right_remote: rr }
+}
+
+#[test]
+fn compare_pair_is_one_key() {
+    let (_t, p) = cfg();
+    let before = json!({"theme": "dark", "gitLog": {"ticked": ["a"], "panes": {"repos": 200}, "blame": false, "futureKey": [1, 2]}});
+    fs::write(&p, before.to_string()).unwrap();
+    let g = gitlog_set_compare_pair(&p, "release-1.4", false, "origin/main", true, None).unwrap();
+    assert_eq!(g.compare_pair, Some(pv("release-1.4", false, "origin/main", true)));
+    let mut after = raw(&p);
+    assert_eq!(after["gitLog"]["comparePair"], json!({"left": "release-1.4", "leftRemote": false, "right": "origin/main", "rightRemote": true}));
+    after["gitLog"].as_object_mut().unwrap().remove("comparePair");
+    assert_eq!(after, before, "every other key is byte-identical");
+    let g = gitlog_set_compare_pair(&p, "main", false, "feat/billing", false, None).unwrap();
+    assert_eq!(g.compare_pair, Some(pv("main", false, "feat/billing", false)));
+    let mut again = raw(&p);
+    again["gitLog"].as_object_mut().unwrap().remove("comparePair");
+    assert_eq!(again, before);
+    // A malformed stored pair (no kind, bad name) reads as absent.
+    fs::write(&p, json!({"gitLog": {"comparePair": {"left": "a", "right": "b"}}}).to_string()).unwrap();
+    assert_eq!(read_gitlog(&p).compare_pair, None);
+    fs::write(&p, json!({"gitLog": {"comparePair": {"left": "-x", "leftRemote": false, "right": "b", "rightRemote": false}}}).to_string()).unwrap();
+    assert_eq!(read_gitlog(&p).compare_pair, None);
+}
+
+#[test]
+fn recent_pairs_front_dedupe_cap5() {
+    let (_t, p) = cfg();
+    let (p1, p2) = (pv("a", false, "b", false), pv("c", false, "d", true));
+    assert_eq!(gitlog_push_recent_pair(&p, "a", false, "b", false, None).unwrap().compare_recent, vec![p1.clone()]);
+    assert_eq!(gitlog_push_recent_pair(&p, "c", false, "d", true, None).unwrap().compare_recent, vec![p2.clone(), p1.clone()]);
+    // Picking p1 again moves it to the front; the same names with another kind are another pair.
+    assert_eq!(gitlog_push_recent_pair(&p, "a", false, "b", false, None).unwrap().compare_recent, vec![p1.clone(), p2.clone()]);
+    let g = gitlog_push_recent_pair(&p, "a", false, "b", true, None).unwrap();
+    assert_eq!(g.compare_recent, vec![pv("a", false, "b", true), p1.clone(), p2.clone()]);
+    // Pushing the front pair again writes nothing.
+    let bytes = fs::read(&p).unwrap();
+    gitlog_push_recent_pair(&p, "a", false, "b", true, None).unwrap();
+    assert_eq!(fs::read(&p).unwrap(), bytes);
+    for i in 0..9 {
+        gitlog_push_recent_pair(&p, &format!("l{i}"), false, "main", false, None).unwrap();
+    }
+    let g = read_gitlog(&p);
+    assert_eq!(g.compare_recent.len(), 5);
+    assert_eq!(g.compare_recent[0], pv("l8", false, "main", false));
+    assert_eq!(g.compare_recent[4], pv("l4", false, "main", false));
+}
+
+#[test]
+fn favorites_add_and_remove_only() {
+    let (_t, p) = cfg();
+    gitlog_favorite_branch(&p, "main", false, None).unwrap();
+    let g = gitlog_favorite_branch(&p, "main", false, None).unwrap();
+    assert_eq!(g.compare_favorites, vec![FavoriteView { name: "main".into(), remote: false }], "twice keeps one");
+    let g = gitlog_favorite_branch(&p, "main", true, None).unwrap();
+    assert_eq!(g.compare_favorites.len(), 2, "the remote main is another branch");
+    // A second window added one meanwhile: removing touches only the named one.
+    let mut v = raw(&p);
+    v["gitLog"]["compareFavorites"].as_array_mut().unwrap().push(json!({"name": "dev", "remote": false}));
+    fs::write(&p, v.to_string()).unwrap();
+    let g = gitlog_unfavorite_branch(&p, "main", true, None).unwrap();
+    assert_eq!(g.compare_favorites, vec![FavoriteView { name: "main".into(), remote: false }, FavoriteView { name: "dev".into(), remote: false }]);
+    let bytes = fs::read(&p).unwrap();
+    gitlog_unfavorite_branch(&p, "gone", false, None).unwrap();
+    assert_eq!(fs::read(&p).unwrap(), bytes, "removing a missing name writes nothing");
+}
+
+#[test]
+fn compare_mode_validates() {
+    let (_t, p) = cfg();
+    assert_eq!(read_gitlog(&p).compare_mode, "files");
+    assert_eq!(gitlog_set_compare_mode(&p, "commits", None).unwrap().compare_mode, "commits");
+    assert_eq!(gitlog_set_compare_mode(&p, "files", None).unwrap().compare_mode, "files");
+    assert_eq!(gitlog_set_compare_mode(&p, "other", None), Err("Unknown mode.".to_string()));
+    fs::write(&p, json!({"gitLog": {"compareMode": 3}}).to_string()).unwrap();
+    assert_eq!(read_gitlog(&p).compare_mode, "files");
+}
+
+#[test]
+fn invalid_branch_names_refused() {
+    let (_t, p) = cfg();
+    let no = Err("Not a branch name.".to_string());
+    for bad in ["-x", "a..b", "x y"] {
+        assert_eq!(gitlog_set_compare_pair(&p, bad, false, "main", false, None), no, "{bad:?}");
+        assert_eq!(gitlog_set_compare_pair(&p, "main", false, bad, true, None), no, "{bad:?}");
+        assert_eq!(gitlog_push_recent_pair(&p, bad, false, "main", false, None), no, "{bad:?}");
+        assert_eq!(gitlog_favorite_branch(&p, bad, false, None), no, "{bad:?}");
+        assert_eq!(gitlog_unfavorite_branch(&p, bad, false, None), no, "{bad:?}");
+    }
+    assert!(!p.exists(), "nothing was written");
 }

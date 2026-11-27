@@ -33,7 +33,9 @@ pub fn sanitize_git_env(cmd: &mut Command) {
             cmd.env_remove(&k);
         }
     }
-    cmd.env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0");
+    // No lazy fetch: in a partial clone, reading a missing blob would otherwise fetch it from
+    // the promisor remote and write it into `.git/objects`.
+    cmd.env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0").env("GIT_NO_LAZY_FETCH", "1");
 }
 
 /// The real `git` binary: no pager, no colour, unquoted paths, never prompts.
@@ -57,6 +59,12 @@ pub const PARALLEL: usize = 16;
 
 /// `f` over `items` on at most `PARALLEL` threads; the results come back in input order.
 pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    par_map_limit(items, PARALLEL, f)
+}
+
+/// `f` over `items` on at most `limit` threads (at least one); the results come back in input
+/// order.
+pub fn par_map_limit<T: Sync, R: Send>(items: &[T], limit: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     let n = items.len();
@@ -66,7 +74,7 @@ pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec
     let next = AtomicUsize::new(0);
     let slots: Vec<Mutex<Option<R>>> = (0..n).map(|_| Mutex::new(None)).collect();
     std::thread::scope(|s| {
-        for _ in 0..PARALLEL.min(n) {
+        for _ in 0..limit.max(1).min(n) {
             s.spawn(|| loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 if i >= n {
