@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { diffKeyFor, isUndoKey, refKeyFor, actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL, DIFF_HIDDEN_REFUSAL, READ_ONLY_REFUSAL } from "./keys";
+import { diffKeyFor, isUndoKey, isViewKey, refKeyFor, actionFor, decisionFor, isTypingTarget, nextIndex, WAITING_REFUSAL, DIFF_HIDDEN_REFUSAL, READ_ONLY_REFUSAL } from "./keys";
 
 describe("nextIndex", () => {
   it("clamps without wrapping", () => {
@@ -244,5 +244,39 @@ describe("isTypingTarget and the Not captured panel", () => {
     const outside = { tagName: "LI", closest: () => null };
     expect(isTypingTarget(inPanel as never)).toBe(true);
     expect(isTypingTarget(outside as never)).toBe(false);
+  });
+});
+
+describe("the Review / Git log switch", () => {
+  const k = (o: Partial<{ key: string; code: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }>) => ({
+    key: "G",
+    code: "KeyG",
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    shiftKey: false,
+    ...o,
+  });
+  it("is Ctrl+Shift+G, or Shift+Cmd+G on macOS", () => {
+    expect(isViewKey(k({ ctrlKey: true, shiftKey: true }), false)).toBe(true);
+    expect(isViewKey(k({ metaKey: true, shiftKey: true }), true)).toBe(true);
+    expect(isViewKey(k({ metaKey: true, shiftKey: true }), false)).toBe(false);
+    expect(isViewKey(k({ ctrlKey: true, shiftKey: true }), true)).toBe(false);
+    expect(isViewKey(k({ ctrlKey: true }), false)).toBe(false);
+    expect(isViewKey(k({ ctrlKey: true, shiftKey: true, altKey: true }), false)).toBe(false);
+    expect(isViewKey(k({ ctrlKey: true, shiftKey: true, code: "KeyH", key: "H" }), false)).toBe(false);
+  });
+  it("is none of the review's keys", () => {
+    for (const isMac of [false, true]) {
+      const e = k({ ctrlKey: !isMac, metaKey: isMac, shiftKey: true });
+      expect(actionFor(e)).toBeNull();
+      expect(refKeyFor(e, isMac)).toBeNull();
+      expect(diffKeyFor(e)).toBeNull();
+      expect(isUndoKey(e, isMac)).toBe(false);
+      expect(decisionFor(e, { tab: "pending", typing: false, menuOpen: false, readOnly: false, busy: false, selectedKey: "x" })).toBeNull();
+    }
+    // A plain g or G is not it, so typing in a field is never caught.
+    expect(isViewKey(k({ key: "g", shiftKey: false }), false)).toBe(false);
+    expect(isViewKey(k({ shiftKey: true }), false)).toBe(false);
   });
 });

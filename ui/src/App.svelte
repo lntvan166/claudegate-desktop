@@ -15,6 +15,7 @@
   import ReviewTabs from "./components/ReviewTabs.svelte";
   import Shortcuts from "./components/Shortcuts.svelte";
   import Splitter from "./components/Splitter.svelte";
+  import GitLogView from "./gitlog/GitLogView.svelte";
   import {
     decide,
     addProject,
@@ -68,8 +69,9 @@
   } from "./lib/decide";
   import { editorLabel, openedText, ZED } from "./lib/editors";
   import type { IconTheme } from "./lib/icons";
-  import { actionFor, decisionFor, diffKeyFor, DIFF_HIDDEN_REFUSAL, isUndoKey, isTypingTarget, nextIndex, READ_ONLY_REFUSAL, refKeyFor, WAITING_REFUSAL } from "./lib/keys";
+  import { actionFor, decisionFor, diffKeyFor, DIFF_HIDDEN_REFUSAL, isUndoKey, isTypingTarget, isViewKey, nextIndex, READ_ONLY_REFUSAL, refKeyFor, viewKeyLabel, WAITING_REFUSAL } from "./lib/keys";
   import { writeClipboard } from "./lib/clipboard";
+  import { firstShown, needsFocusMove, overlayShown, OVERLAY_SELECTOR } from "./lib/viewSwitch";
   import { clipboardText, formatRef, pasteHint, refRange, type LineRange } from "./lib/ref";
   import type { RowRef } from "./lib/rows";
   import { basename, groupsFor, restoreSelection, rowsOf, sameRow, scopeKind, scopeLabel, selectionAfterList, sortProjects, type Row } from "./lib/rows";
@@ -118,6 +120,46 @@
   } from "./lib/settings";
 
   const STORE_KEY = "claudegate.selectedProject";
+
+  /** The header switch: the review, or the Git log. */
+  type AppView = "review" | "gitlog";
+  let appView = $state<AppView>("review");
+  /** The Git log view is mounted the first time it is opened, never at startup, then kept. */
+  let gitlogMounted = $state(false);
+  let gitlogView: GitLogView | undefined = $state();
+  /** What had the keyboard in the review when it was hidden, to give it back on return. */
+  let reviewFocus: HTMLElement | null = null;
+  function setView(v: AppView) {
+    if (v === appView) return;
+    if (v === "gitlog") {
+      gitlogMounted = true;
+      // Settings live in the review's sheet; Esc must not close them unseen.
+      settingsOpen = false;
+      rowMenu = null;
+      // Nor answer a question nobody can see: a bulk or "looks like a secret" confirmation.
+      actionBar?.cancel();
+      protectAsk = null;
+      const a = document.activeElement;
+      reviewFocus = a instanceof HTMLElement && a !== document.body ? a : null;
+    }
+    appView = v;
+    void tick().then(() => moveFocusFor(v));
+  }
+  /** Focus off whatever the switch just hid: into the Repositories pane, or back where the review left it. */
+  function moveFocusFor(v: AppView) {
+    if (v !== appView) return;
+    const a = document.activeElement as HTMLElement | null;
+    if (!needsFocusMove(a, !a || a === document.body)) return;
+    if (v === "gitlog") {
+      gitlogView?.focusStart();
+      return;
+    }
+    const back = firstShown([reviewFocus]);
+    if (back) back.focus();
+    else if (fileTree) void fileTree.focusCurrent();
+  }
+  /** A menu or confirmation on screen (the hidden view's never count). */
+  const overlayUp = () => overlayShown(document.querySelectorAll<HTMLElement>(OVERLAY_SELECTOR));
 
   let projects = $state<ProjectSummary[]>([]);
   let loadingList = $state(true);
@@ -500,6 +542,8 @@
         if (usingMock) void previewRow();
         // Dev preview only: `#settings` opens the Settings screen, for screenshots and the inspector.
         if (usingMock && new URLSearchParams(location.hash.slice(1)).has("settings")) openSettings();
+        // Dev preview only: `#gitlog` opens the Git log view.
+        if (usingMock && new URLSearchParams(location.hash.slice(1)).has("gitlog")) setView("gitlog");
         break;
       case "clear":
         selected = null;
@@ -841,9 +885,10 @@
   let launchAsk = $state<(LaunchTarget & { known?: { root: string; name: string } }) | null>(null);
 
   /** Selects the project owning `t.path` (and the pending row, for a file); otherwise asks. */
-  async function openLaunchTarget(t: LaunchTarget) {
+  async function openLaunchTarget(t: LaunchTarget, refresh = false) {
     launchAsk = null;
     settingsOpen = false;
+    setView(t.kind === "log" ? "gitlog" : "review");
     // A worktree scope can live anywhere, even inside another project's root; only a project's
     // view lists them, so roots and scopes are matched together, longest prefix wins.
     const views = await Promise.all(projects.map((p) => getProject(p.root).catch(() => null)));
@@ -856,6 +901,12 @@
     if (own.kind !== "workspace") {
       const p = own.kind === "known" ? projects.find((x) => x.root === own.root) : undefined;
       launchAsk = p ? { ...t, known: { root: p.root, name: p.name } } : t;
+      return;
+    }
+    if (t.kind === "log") {
+      // The view mounts lazily; wait for it, then tick the path's repos for this launch only.
+      await tick();
+      if (!(await gitlogView?.applyLaunch(t, refresh))) show({ text: `No git repositories under ${t.path} in your workspace.`, tone: "error" });
       return;
     }
     const owner = own.root;
@@ -876,11 +927,12 @@
     if (t.known) {
       const err = await addToWorkspaceAt(t.known.root);
       if (err) show({ text: `Couldn't add ${t.known.name} to your workspace: ${err}`, tone: "error" });
-      else await openLaunchTarget(t);
+      else await openLaunchTarget(t, true);
       return;
     }
     const err = await addProjectAt(addFolderFor(t));
     if (err) show({ text: `Couldn't add the project: ${err}`, tone: "error" });
+    else if (t.kind === "log") await openLaunchTarget(t, true);
   }
 
   async function changeReadOnly(on: boolean) {
@@ -1048,6 +1100,7 @@
   }
 
   function openSettings() {
+    setView("review");
     settingsOpen = true;
     void loadSettings(selected);
   }
@@ -1065,10 +1118,25 @@
       launchAsk = null;
       return;
     }
+    // Ctrl+Shift+G: Review ⇄ Git log, from anywhere but a menu or a confirmation.
+    if (isViewKey(e, isMac)) {
+      e.preventDefault();
+      if (e.repeat || overlayUp()) return;
+      setView(appView === "review" ? "gitlog" : "review");
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key === ",") {
       e.preventDefault();
       if (settingsOpen) void closeSettings();
       else openSettings();
+      return;
+    }
+    // The Git log view has its own keys; the review's are off while it is up. `?` still shows them.
+    if (appView === "gitlog") {
+      if (e.key === "?" && !e.ctrlKey && !e.metaKey && !e.altKey && !isTypingTarget(e.target as HTMLElement | null)) {
+        e.preventDefault();
+        helpOpen = !helpOpen;
+      }
       return;
     }
     // The settings screen answers Esc itself; review keys are off while it is open.
@@ -1335,11 +1403,15 @@
   </div>
 {/if}
 
-<div class="app" class:animate={animatePanes} class:narrow-diff={narrowFull} style:--sidebar-w="{panes.projects}px" style:--tree-w="{panes.tree}px">
+<div class="app" class:animate={animatePanes} class:narrow-diff={narrowFull} class:gitlog={appView === "gitlog"} style:--sidebar-w="{panes.projects}px" style:--tree-w="{panes.tree}px">
   <header class="toolbar">
     <div class="brand">
       <img class="mark" src="/claudegate.png" width="20" height="20" alt="" draggable="false" />
       <span class="wordmark">ClaudeGate</span>
+    </div>
+    <div class="switch" role="group" aria-label="View" title="Switch view ({viewKeyLabel(isMac)})">
+      <button aria-pressed={appView === "review"} class:on={appView === "review"} onclick={() => setView("review")}>Review</button>
+      <button aria-pressed={appView === "gitlog"} class:on={appView === "gitlog"} onclick={() => setView("gitlog")}>Git log</button>
     </div>
     <div class="status">
       {#if usingMock}<span class="hint">Fixture data</span>{/if}
@@ -1617,6 +1689,10 @@
     </DiffView>
     {/if}
   </div>
+
+  {#if gitlogMounted}
+    <GitLogView bind:this={gitlogView} active={appView === "gitlog"} onnotice={announce} {config} {theme} onconfig={(c) => (config = c)} />
+  {/if}
 </div>
 
 <style>
@@ -1657,6 +1733,47 @@
   .split-projects {
     top: calc(var(--toolbar-h) + var(--radius-sheet));
     bottom: calc(var(--sheet-inset) + var(--radius-sheet));
+  }
+
+  /* The Git log view takes the whole row under the toolbar; the review stays mounted, hidden. */
+  .app.gitlog > :global(.projects),
+  .app.gitlog > .split-projects,
+  .app.gitlog > .sheet {
+    display: none;
+  }
+
+  /* The header switch: two segments, the current one raised. */
+  .switch {
+    display: inline-flex;
+    flex: none;
+    padding: 2px;
+    border-radius: calc(var(--radius-control) + 2px);
+    background: var(--hover);
+  }
+  .switch button {
+    height: 24px;
+    padding: 0 12px;
+    border-radius: var(--radius-control);
+    font-size: var(--fs-small);
+    font-weight: 500;
+    color: var(--muted);
+    white-space: nowrap;
+    transition:
+      color 120ms var(--ease),
+      background 120ms var(--ease);
+  }
+  .switch button:hover {
+    color: var(--text);
+  }
+  .switch button.on {
+    color: var(--text);
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--border);
+    font-weight: 600;
+  }
+  .switch button:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -1px;
   }
 
   /* Toolbar and project list share the frame tint with no rule between them (the L). */
@@ -1792,6 +1909,13 @@
     border-color: var(--primary);
   }
 
+  /* The one header item that may cut, after the status chips: the gear must always fit. */
+  .status > .total {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .total {
     font-weight: 500;
     white-space: nowrap;
@@ -2033,9 +2157,9 @@
     }
   }
 
-  /* A phone-narrow window: the header keeps every control, in fewer words. The full total and
-     the read-only label stay for screen readers. */
-  @media (max-width: 520px) {
+  /* A narrow window: the header keeps every control, in fewer words. The full total and the
+     read-only label stay for screen readers. 760px leaves room for the view switch. */
+  @media (max-width: 760px) {
     .wordmark,
     .chip-label,
     .total-long {
@@ -2082,6 +2206,12 @@
     .sheet > :global(.settings),
     .split {
       display: none;
+    }
+    .app.gitlog {
+      grid-template-rows: var(--toolbar-h) minmax(0, 1fr);
+    }
+    .switch button {
+      padding: 0 8px;
     }
     /* A file opened in a narrow window: its diff, full height, in place of the list. */
     .app.narrow-diff {

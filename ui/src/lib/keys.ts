@@ -155,3 +155,19 @@ export function isUndoKey(e: UndoKeyLike, isMac: boolean): boolean {
   if (e.key.toLowerCase() !== "z" || e.altKey || e.shiftKey) return false;
   return isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
 }
+
+type ViewKeyLike = { key: string; code?: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean };
+
+/** The header switch's shortcut, as the overlay and tooltips spell it. */
+export const viewKeyLabel = (isMac: boolean) => (isMac ? "⇧⌘G" : "Ctrl+Shift+G");
+
+/**
+ * Ctrl+Shift+G (Shift+Cmd+G on macOS): switches between Review and Git log, VS Code's key for its
+ * Source Control view. No review key uses Ctrl or Cmd with Shift, so it cannot clash with one.
+ * `code` when present, so a layout without a G key on that position still has it.
+ */
+export function isViewKey(e: ViewKeyLike, isMac: boolean): boolean {
+  if (!e.shiftKey || e.altKey) return false;
+  if (isMac ? !e.metaKey || e.ctrlKey : !e.ctrlKey || e.metaKey) return false;
+  return e.code ? e.code === "KeyG" : e.key.toLowerCase() === "g";
+}

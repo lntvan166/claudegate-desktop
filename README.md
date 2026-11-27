@@ -58,6 +58,8 @@ To run it from Zed, add a task to `~/.config/zed/tasks.json`:
 
 Bind it to a key in `keymap.json` with `task::Spawn`, for example `{ "context": "Workspace", "bindings": { "ctrl-alt-g": ["task::Spawn", { "task_name": "ClaudeGate: review" }] } }`.
 
+**Git log from the terminal.** `claudegate log [PATH]` opens the Git log view instead of the review; with no PATH it uses the current directory. The repositories under PATH are ticked for that launch only: every discovered repository with a checkout (main or worktree) at or under PATH, plus the repository PATH sits inside. Nothing is written to `config.json` at launch. The first time you change ticks in the Repositories pane, the launch ticks are saved as the explicit `ticked` list and your change applies to them; "Show only", "Show all" or applying a profile replaces them; changing the scan depth or the exclude patterns leaves them as they are, in memory. Discovery stays workspace-only: when none of PATH's repositories is in your workspace the same "isn't in your workspace" notice as a review launch appears, with Add to workspace, after which the repositories are discovered again and ticked. A running app switches to the Git log view and takes focus. A folder literally named `log` is `claudegate ./log`; `--` ends option parsing (`claudegate log -- log`). `scripts/claudegate-wrapper-test.sh` checks the wrapper's argv.
+
 On macOS there is no CLI install yet; `open -a ClaudeGate --args <path>` works.
 
 ## Projects

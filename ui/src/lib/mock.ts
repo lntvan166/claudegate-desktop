@@ -19,6 +19,9 @@ import type {
   SettingKey,
   SettingsView,
 } from "./api";
+import type { FilterView, PageView, RowView } from "../gitlog/log";
+import type { ChangedFile, FileView } from "../gitlog/changes";
+import { DEFAULT_GITLOG_CONFIG, SCAN_DEPTH_MAX, type GitLogConfig, type RepoView } from "../gitlog/repos";
 import { DEFAULT_PROTECTED, globMatcher, type ExcludeOwner, type Resolved } from "./settings";
 
 const SHOP = "/home/dev/src/shop-api";
@@ -548,6 +551,272 @@ function mockAudit(root: string): AuditView {
   const uncertain = [it("notes/todo.md", 12, "go test ./..."), it("tmp/out.json", 95, "make lint")].filter((i) => !auditDismissed.has(i.path));
   return { missed, uncertain, stats: { ...stats, missed: 4, uncertain: 2, phantom: 3, implicit: 5 } };
 }
+// ---- Git log -------------------------------------------------------------------------------
+// The workspace's repositories as gitlog.rs `gitlog_repos` reports them: one per git common dir,
+// a worktree folded into its repository, ahead/behind from the last fetch (null: no upstream).
+const head = (n: number) => n.toString(16).padStart(40, "0");
+function mockRepo(path: string, color: number, ahead: number | null, behind: number | null, worktrees: { path: string; branch: string | null }[] = []): RepoView {
+  return {
+    id: `${path}/.git`,
+    name: path.split("/").pop()!,
+    color,
+    checkouts: [
+      { path, head: head(color + 1), branch: "main", isMain: true },
+      ...worktrees.map((w, i) => ({ path: w.path, head: head(100 + i), branch: w.branch, isMain: false })),
+    ],
+    ahead,
+    behind,
+  };
+}
+const gitRepos: RepoView[] = [
+  mockRepo(SHOP, 0, 1, 2, [{ path: WT, branch: "checkout-v2" }]),
+  mockRepo(UMBRELLA, 1, 0, 0),
+  mockRepo(UMB_NESTED, 2, 0, 5),
+  mockRepo(`${UMBRELLA}/umbrella-payments`, 3, 3, 0),
+  mockRepo(`${UMBRELLA}/umbrella-web`, 4, null, null, [
+    { path: `${UMBRELLA}/umbrella-web/.worktrees/dark-mode`, branch: "dark-mode" },
+    { path: `${UMBRELLA}/umbrella-web/.worktrees/hotfix`, branch: null },
+  ]),
+  mockRepo(`${UMBRELLA}/svc-lib`, 5, 0, 0),
+  mockRepo(NOTES, 6, 0, 0),
+  mockRepo(BILLING, 7, null, null),
+  mockRepo(TIDE, 8, 2, 1),
+];
+/** `gitLog` in config.json. `?gitlog=profiles` starts with a couple of profiles, one naming a gone repo. */
+let gitLog: GitLogConfig = structuredClone(DEFAULT_GITLOG_CONFIG);
+if (new URLSearchParams(location.search).get("gitlog") === "profiles") {
+  gitLog.profiles = {
+    Checkout: [`${SHOP}/.git`, `${UMB_NESTED}/.git`, `${UMBRELLA}/umbrella-payments/.git`],
+    "Front end": [`${UMBRELLA}/umbrella-web/.git`, "/home/dev/src/retired-site/.git"],
+  };
+  gitLog.ticked = gitLog.profiles.Checkout.slice();
+}
+const gl = () => delay(gitLog);
+function glTicked(): string[] {
+  return gitLog.ticked ?? gitRepos.map((r) => r.id);
+}
+function glName(n: string): string {
+  const t = n.trim();
+  if (!t) throw "A profile needs a name.";
+  return t;
+}
+
+// The merged log of the mock: a few hundred deterministic commits per repository.
+const GL_PAGE = 100;
+const GL_AUTHORS = [
+  ["Rin", "rin@acme.test"],
+  ["Sam", "sam@acme.test"],
+  ["Ada", "ada@acme.test"],
+] as const;
+const GL_SUBJECTS = [
+  "fix: keep the retry count across reconnects",
+  "feat: add the audit export",
+  "refactor: split the order totals out of the handler",
+  "chore: bump dependencies",
+  "test: cover the empty cart",
+  "docs: explain the release steps",
+  "fix: stop logging the session token",
+  "perf: cache the price lookup",
+];
+const glSubject = (sha: string) => GL_SUBJECTS[parseInt(sha.slice(-4), 16) % GL_SUBJECTS.length];
+let glNewest = 0;
+let glQuery: { id: number; rows: RowView[]; at: number; failures: { repo: string; reason: string }[]; branchUse: PageView["branchUse"] } | null = null;
+const glAll: RowView[] = (() => {
+  const now = Date.now() / 1000;
+  const out: RowView[] = [];
+  gitRepos.forEach((r, ri) => {
+    const wt = r.checkouts.filter((c) => !c.isMain);
+    for (let k = 0; k < 400; k++) {
+      const sha = ((((ri + 1) * 2_654_435_761 + k * 40_503) >>> 0).toString(16).padStart(8, "0")).repeat(5);
+      const [author, email] = GL_AUTHORS[(k + ri) % 3];
+      // Every 9th commit of a repository with worktrees lives only on one of them.
+      const only = wt.length && k % 9 === 0 ? wt[k % wt.length] : null;
+      out.push({
+        repo: r.id,
+        sha,
+        time: Math.floor(now - ri * 600 - k * (1500 + ri * 700)),
+        author,
+        email,
+        subject: GL_SUBJECTS[(k * 3 + ri) % GL_SUBJECTS.length] + (k % 5 === 0 ? ` (#${1000 + k})` : ""),
+        parents: [],
+        source: only ? (only.branch ? `refs/heads/${only.branch}` : only.head) : "HEAD",
+      });
+    }
+  });
+  return out.sort((a, b) => b.time - a.time);
+})();
+function glStart(id: number, repos: string[], f: FilterView) {
+  const now = Date.now() / 1000;
+  const since = f.since ?? (f.within ? now - f.within : null);
+  const search = f.search?.toLowerCase();
+  const authors = (f.authors ?? []).map((a) => a.toLowerCase());
+  const branch = f.branch?.trim();
+  const has = (id2: string) => !!branch && !!gitRepos.find((r) => r.id === id2)?.checkouts.some((c) => c.branch === branch);
+  const rows = glAll
+    .filter((r) => repos.includes(r.repo))
+    .filter((r) => (since === null ? true : r.time >= since) && (f.until === undefined || r.time <= f.until))
+    .filter((r) => !search || r.subject.toLowerCase().includes(search) || r.sha.startsWith(search))
+    .filter((r) => !f.mine || r.author === "Rin")
+    .filter((r) => !authors.length || authors.some((a) => r.author.toLowerCase().includes(a) || r.email.includes(a)))
+    .map((r) => (branch ? { ...r, source: has(r.repo) ? branch : "HEAD" } : r));
+  const failing = new URLSearchParams(location.search).get("gitlog") === "fail" ? gitRepos.find((r) => r.name === "legacy-billing") : undefined;
+  return {
+    id,
+    rows: failing ? rows.filter((r) => r.repo !== failing.id) : rows,
+    at: 0,
+    failures: failing && repos.includes(failing.id) ? [{ repo: failing.id, reason: "fatal: detected dubious ownership in repository" }] : [],
+    branchUse: branch ? { branch, found: repos.filter(has).length, fallback: repos.filter((x) => !has(x)).length } : null,
+  };
+}
+
+// What a commit changed: a deterministic set per commit id, from a one-file edit to a rename with a
+// binary, a deleted file and a file too large to show (the five states the pane has to draw).
+const ch = (path: string, status: ChangedFile["status"], added: number | null, removed: number | null, from: string | null = null): ChangedFile => ({ path, status, from, added, removed });
+const GL_CHANGES: ChangedFile[][] = [
+  [ch("internal/refunds/refund.go", "modified", 12, 3), ch("internal/refunds/refund_test.go", "added", 41, 0), ch("README.md", "modified", 2, 1)],
+  [
+    ch("web/src/client.ts", "renamed", 6, 2, "web/src/api.ts"),
+    ch("web/src/components/Cart.ts", "modified", 18, 7),
+    ch("web/src/components/Totals.ts", "added", 54, 0),
+    ch("web/public/logo.png", "modified", null, null),
+    ch("docs/old-notes.md", "deleted", 0, 31),
+    ch("package.json", "modified", 1, 1),
+  ],
+  [ch("service/billing.py", "modified", 5, 5)],
+  [ch("db/seed.sql", "modified", 9000, 8800), ch("config/deploy.yml", "modified", 3, 0), ch("scripts/export.rs", "deleted", 0, 12)],
+  [],
+];
+const glFiles = (sha: string) => GL_CHANGES[parseInt(sha.slice(-4), 16) % GL_CHANGES.length];
+
+const gitlogMock: Pick<
+  Api,
+  | "gitlogRepos"
+  | "gitlogConfig"
+  | "gitlogTick"
+  | "gitlogUntick"
+  | "gitlogShowAll"
+  | "gitlogShowOnly"
+  | "gitlogProfileApply"
+  | "gitlogProfileSave"
+  | "gitlogProfileRename"
+  | "gitlogProfileDelete"
+  | "gitlogScanDepth"
+  | "gitlogExclude"
+  | "gitlogInclude"
+  | "gitlogPane"
+  | "gitlogLastFilter"
+  | "gitlogPage"
+  | "gitlogMessage"
+  | "gitlogChanges"
+  | "gitlogFile"
+  | "gitlogWorktreeFile"
+  | "gitlogOpenRemote"
+> = {
+  gitlogRepos: async () => {
+    await new Promise((r) => setTimeout(r, 300));
+    return structuredClone(gitRepos.filter((r) => !gitLog.excludeRepos.includes(r.name)));
+  },
+  gitlogConfig: gl,
+  gitlogTick: (ids) => {
+    if (gitLog.ticked) gitLog = { ...gitLog, ticked: [...gitLog.ticked, ...ids.filter((i) => !gitLog.ticked!.includes(i))] };
+    return gl();
+  },
+  gitlogUntick: (ids) => {
+    gitLog = { ...gitLog, ticked: glTicked().filter((i) => !ids.includes(i)) };
+    return gl();
+  },
+  gitlogShowAll: () => {
+    gitLog = { ...gitLog, ticked: null };
+    return gl();
+  },
+  gitlogShowOnly: (ids) => {
+    gitLog = { ...gitLog, ticked: [...ids] };
+    return gl();
+  },
+  gitlogProfileApply: async (name) => {
+    const p = gitLog.profiles[name];
+    if (!p) throw `There is no profile named ${name}.`;
+    gitLog = { ...gitLog, ticked: [...p] };
+    return gl();
+  },
+  gitlogProfileSave: async (name) => {
+    gitLog = { ...gitLog, profiles: { ...gitLog.profiles, [glName(name)]: glTicked() } };
+    return gl();
+  },
+  gitlogProfileRename: async (from, to) => {
+    const t = glName(to);
+    if (t !== from && gitLog.profiles[t]) throw `A profile named ${t} already exists.`;
+    const { [from]: ids, ...rest } = gitLog.profiles;
+    if (!ids) throw `There is no profile named ${from}.`;
+    gitLog = { ...gitLog, profiles: { ...rest, [t]: ids } };
+    return gl();
+  },
+  gitlogProfileDelete: (name) => {
+    const { [name]: _gone, ...rest } = gitLog.profiles;
+    gitLog = { ...gitLog, profiles: rest };
+    return gl();
+  },
+  gitlogScanDepth: async (depth) => {
+    if (depth < 0 || depth > SCAN_DEPTH_MAX) throw `The scan depth must be 0 to ${SCAN_DEPTH_MAX}.`;
+    gitLog = { ...gitLog, scanDepth: depth };
+    return gl();
+  },
+  gitlogExclude: (glob) => {
+    if (!gitLog.excludeRepos.includes(glob)) gitLog = { ...gitLog, excludeRepos: [...gitLog.excludeRepos, glob] };
+    return gl();
+  },
+  gitlogInclude: (glob) => {
+    gitLog = { ...gitLog, excludeRepos: gitLog.excludeRepos.filter((g) => g !== glob) };
+    return gl();
+  },
+  gitlogPane: (pane, width) => {
+    gitLog = { ...gitLog, panes: { ...gitLog.panes, [pane]: Math.round(width) } };
+    return gl();
+  },
+  gitlogLastFilter: (filter) => {
+    gitLog = { ...gitLog, lastFilter: filter };
+    return gl();
+  },
+  gitlogPage: async (queryId, repos, filter, more) => {
+    await new Promise((r) => setTimeout(r, 120));
+    if (queryId < glNewest) throw "stale query";
+    if (more) {
+      if (!glQuery || glQuery.id !== queryId) throw "stale query";
+    } else {
+      glNewest = queryId;
+      glQuery = glStart(queryId, repos, filter);
+    }
+    const q = glQuery!;
+    const rows = q.rows.slice(q.at, q.at + GL_PAGE);
+    q.at += rows.length;
+    return { queryId, rows, failures: q.failures, branchUse: q.branchUse, done: q.at >= q.rows.length };
+  },
+  gitlogMessage: async (_repo, sha) => `${glSubject(sha)}\n\nThe longer explanation of this change goes here, wrapped the way git stores it.\n\nCo-authored-by: Sam <sam@acme.test>`,
+  gitlogChanges: async (_repo, sha) => {
+    await new Promise((r) => setTimeout(r, 40));
+    return structuredClone(glFiles(sha));
+  },
+  gitlogFile: async (_repo, sha, path, side): Promise<FileView> => {
+    await new Promise((r) => setTimeout(r, 40));
+    const f = glFiles(sha).find((x) => x.path === path);
+    if (!f) throw "Not a path in the repository";
+    if (f.added === null) return { kind: "binary" };
+    if (path.endsWith(".sql")) return { kind: "tooLarge", value: 3_400_000 };
+    if ((side === "before" && f.status === "added") || (side === "after" && f.status === "deleted")) return { kind: "missing" };
+    const { before, after } = sample(f.from ?? path, f.status === "added");
+    const text = side === "before" ? before : after;
+    return text === null ? { kind: "missing" } : { kind: "text", value: text };
+  },
+  gitlogWorktreeFile: async (repo, path) => {
+    if (path.startsWith("docs/old") || path.startsWith("scripts/")) throw `${path} is no longer in the working tree`;
+    return `${repo.replace(/\/\.git\/?$/, "")}/${path}`;
+  },
+  gitlogOpenRemote: async (repo, sha) => {
+    if (repo.includes("legacy-billing")) return false;
+    console.info("open", `https://github.com/acme/${repo.split("/").slice(-2, -1)[0]}/commit/${sha}`);
+    return true;
+  },
+};
 
 export const mockApi: Api = {
   getAudit: (root) => delay(mockAudit(root)),
@@ -557,6 +826,7 @@ export const mockApi: Api = {
     for (const p of paths) auditDismissed.add(p);
   },
   onAuditChanged: async () => () => {},
+  ...gitlogMock,
   listProjects: () =>
     delay<ProjectSummary[]>(
       rootsList.map((root) => {

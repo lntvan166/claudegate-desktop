@@ -2,6 +2,7 @@ pub mod capture;
 pub mod commands;
 pub mod config;
 pub mod editor;
+pub mod gitlog;
 pub mod launch;
 pub mod tray;
 pub mod update;
@@ -23,6 +24,7 @@ pub fn run() {
         .manage(watch::KnownMap::default())
         .manage(commands::WriteLock::default())
         .manage(upkeep::UpkeepState::default())
+        .manage(gitlog::GitLogState::default())
         .setup(|app| {
             launch::remember(app.handle(), &std::env::args().collect::<Vec<_>>());
             let known = app.state::<watch::KnownMap>().inner().clone();
@@ -42,6 +44,12 @@ pub fn run() {
                 capture::repair_audit_at_startup();
             });
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // A closed window's git log query and its children go with it.
+            if let tauri::WindowEvent::Destroyed = event {
+                window.state::<gitlog::GitLogState>().0.forget_window(window.label());
+            }
         })
         .invoke_handler(tauri::generate_handler![
             launch::launch_path,
@@ -70,6 +78,27 @@ pub fn run() {
             config::set_read_only,
             config::add_to_workspace_cmd,
             editor::open_in_editor,
+            gitlog::gitlog_repos,
+            config::gitlog_config,
+            config::gitlog_tick,
+            config::gitlog_untick,
+            config::gitlog_show_all,
+            config::gitlog_show_only,
+            config::gitlog_profile_apply,
+            config::gitlog_profile_save,
+            config::gitlog_profile_rename,
+            config::gitlog_profile_delete,
+            config::gitlog_scan_depth,
+            config::gitlog_exclude,
+            config::gitlog_include,
+            config::gitlog_last_filter,
+            config::gitlog_pane,
+            gitlog::gitlog_page,
+            gitlog::gitlog_changes,
+            gitlog::gitlog_file,
+            gitlog::gitlog_worktree_file,
+            gitlog::gitlog_message,
+            gitlog::gitlog_open_remote,
             tray::set_pending_count,
             update::check_update,
             update::install_update

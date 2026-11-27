@@ -17,6 +17,7 @@
         [["1", "2", "3"], "Pending, accepted, rejected"],
         [["/"], "Filter the pending list; Esc clears it"],
         [["["], "Collapse or expand projects"],
+        [[isMac ? "⇧⌘G" : "Ctrl+Shift+G"], "Switch between Review and Git log"],
         [["←", "→"], "Fold or unfold a folder in the list"],
         [[isMac ? "⌥F5" : "Alt+F5", isMac ? "⇧⌥F5" : "Shift+Alt+F5"], "Next and previous change in the diff"],
         [[isMac ? "⌥Z" : "Alt+Z"], "Wrap long lines in the diff, or stop"],

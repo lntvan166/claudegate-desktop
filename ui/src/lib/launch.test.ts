@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addFolderFor, addLabel, knownNotice, launchNotice, findPendingRow, ownerOf } from "./launch";
+import { addFolderFor, addLabel, knownNotice, launchNotice, findPendingRow, ownerOf, reposForLaunch } from "./launch";
 
 const owners = [
   { root: "/w/app", scopes: ["/w/app", "/w/app-wt/feat"] },
@@ -55,7 +55,7 @@ describe("ownerOf, nested and symlinked", () => {
 });
 
 describe("launch notice", () => {
-  const file = { path: "/w/n/a.ts", exists: true, isDir: false, canonical: null };
+  const file = { kind: "review" as const, path: "/w/n/a.ts", exists: true, isDir: false, canonical: null };
   it("says what is wrong and what Add would add", () => {
     expect(launchNotice(file)).toBe("/w/n/a.ts isn't a ClaudeGate project.");
     expect(launchNotice({ ...file, exists: false })).toBe("/w/n/a.ts doesn't exist.");
@@ -82,7 +82,40 @@ describe("findPendingRow", () => {
 
 describe("addFolderFor", () => {
   it("is the folder itself, or the file's folder", () => {
-    expect(addFolderFor({ path: "/w/new/", exists: true, isDir: true, canonical: null })).toBe("/w/new");
-    expect(addFolderFor({ path: "/w/new/src/a.ts", exists: true, isDir: false, canonical: null })).toBe("/w/new/src");
+    expect(addFolderFor({ kind: "review" as const, path: "/w/new/", exists: true, isDir: true, canonical: null })).toBe("/w/new");
+    expect(addFolderFor({ kind: "review" as const, path: "/w/new/src/a.ts", exists: true, isDir: false, canonical: null })).toBe("/w/new/src");
+  });
+});
+
+describe("reposForLaunch (claudegate log PATH)", () => {
+  const co = (...p: string[]) => p.map((path, i) => ({ path, head: "", branch: null, isMain: i === 0 }));
+  const repos = [
+    { id: "/work/acme/acme-api/.git", checkouts: co("/work/acme/acme-api", "/work/acme-wt/api-feat") },
+    { id: "/work/acme/acme-web/.git", checkouts: co("/work/acme/acme-web") },
+    { id: "/work/acme/umbrella/.git", checkouts: co("/work/acme/umbrella") },
+    { id: "/work/acme/umbrella/lib/.git", checkouts: co("/work/acme/umbrella/lib") },
+    { id: "/work/other/.git", checkouts: co("/work/other") },
+  ];
+  it("ticks every repo whose checkout is at or under the path", () => {
+    expect(reposForLaunch(repos, "/work/acme")).toEqual([
+      "/work/acme/acme-api/.git",
+      "/work/acme/acme-web/.git",
+      "/work/acme/umbrella/.git",
+      "/work/acme/umbrella/lib/.git",
+    ]);
+    expect(reposForLaunch(repos, "/work/acme/acme-web/")).toEqual(["/work/acme/acme-web/.git"]);
+  });
+  it("a worktree checkout under the path ticks its repo", () => {
+    expect(reposForLaunch(repos, "/work/acme-wt")).toEqual(["/work/acme/acme-api/.git"]);
+  });
+  it("a path inside a repo ticks that repo, the deepest one", () => {
+    expect(reposForLaunch(repos, "/work/acme/acme-api/src/deep")).toEqual(["/work/acme/acme-api/.git"]);
+    expect(reposForLaunch(repos, "/work/acme/umbrella/lib/src")).toEqual(["/work/acme/umbrella/lib/.git"]);
+    expect(reposForLaunch(repos, "/work/acme/umbrella/docs")).toEqual(["/work/acme/umbrella/.git"]);
+  });
+  it("matches the symlink-free form, and does not match a sibling prefix", () => {
+    expect(reposForLaunch(repos, "/link/web", "/work/acme/acme-web")).toEqual(["/work/acme/acme-web/.git"]);
+    expect(reposForLaunch(repos, "/work/acme/acme")).toEqual([]);
+    expect(reposForLaunch(repos, "/elsewhere")).toEqual([]);
   });
 });

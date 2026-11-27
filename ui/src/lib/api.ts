@@ -14,8 +14,12 @@ import type { SettingKey, SettingsView } from "./settings";
 import type { UpdateView } from "./update";
 import type { AuditView } from "./audit";
 import { AUDIT_EVENT } from "./audit";
+import type { GitLogConfig, RepoView } from "../gitlog/repos";
+import type { FilterView, PageView } from "../gitlog/log";
+import type { ChangedFile, FileSide, FileView } from "../gitlog/changes";
 
 export type { AuditView, CaptureView, HookReplacedView, HookView, InstallView, UpdateView };
+export type { GitLogConfig, RepoView };
 export type { DecideAction, DecideReport, DecideTarget, EditorConfig, SettingKey, SettingsView };
 
 export type ProjectSummary = {
@@ -186,6 +190,48 @@ export interface Api {
   checkUpdate(): Promise<UpdateView | null>;
   /** Download, verify, install and restart (macOS, AppImage only). */
   installUpdate(): Promise<void>;
+
+  // The Git log view (src-tauri/src/gitlog.rs, config.rs). Every config writer below adds ids,
+  // removes ids or sets one key under the config lock, and answers with `gitLog` as it now stands.
+  /** The workspace's repositories, discovery cached until the workspace changes or `refresh`. Read only. */
+  gitlogRepos(refresh: boolean): Promise<RepoView[]>;
+  /** `gitLog` in config.json. Read only. */
+  gitlogConfig(): Promise<GitLogConfig>;
+  /** Ticks `ids`, add-only. */
+  gitlogTick(ids: string[]): Promise<GitLogConfig>;
+  /** Unticks `ids`, remove-only (with every repo ticked, the backend's own list is made explicit). */
+  gitlogUntick(ids: string[]): Promise<GitLogConfig>;
+  /** Ticks every repository. */
+  gitlogShowAll(): Promise<GitLogConfig>;
+  /** Ticks exactly `ids`, the rows the user picked. */
+  gitlogShowOnly(ids: string[]): Promise<GitLogConfig>;
+  /** Ticks exactly the stored profile's repositories. */
+  gitlogProfileApply(name: string): Promise<GitLogConfig>;
+  /** Saves the stored ticks as profile `name`, replacing one of that name. */
+  gitlogProfileSave(name: string): Promise<GitLogConfig>;
+  gitlogProfileRename(from: string, to: string): Promise<GitLogConfig>;
+  gitlogProfileDelete(name: string): Promise<GitLogConfig>;
+  gitlogScanDepth(depth: number): Promise<GitLogConfig>;
+  /** Adds one pattern to `excludeRepos`. */
+  gitlogExclude(glob: string): Promise<GitLogConfig>;
+  /** Removes one pattern from `excludeRepos`. */
+  gitlogInclude(glob: string): Promise<GitLogConfig>;
+  /** Sets one pane's width. */
+  gitlogPane(pane: string, width: number): Promise<GitLogConfig>;
+  /** The filter bar as last left; null drops it. */
+  gitlogLastFilter(filter: Record<string, unknown> | null): Promise<GitLogConfig>;
+  /** One page of the merged log. `more: false` starts query `queryId`; `more: true` continues it. */
+  gitlogPage(queryId: number, repos: string[], filter: FilterView, more: boolean): Promise<PageView>;
+  /** A commit's full message. */
+  gitlogMessage(repo: string, sha: string): Promise<string>;
+  /** The files `sha` changed against its first parent, with +/- counts. */
+  gitlogChanges(repo: string, sha: string): Promise<ChangedFile[]>;
+  /** One side of a changed file: before is the first parent's version (a rename's old path), after the commit's. */
+  gitlogFile(repo: string, sha: string, path: string, side: FileSide, from?: string): Promise<FileView>;
+  /** The working-tree path of a changed file in the checkout the commit lives in (`source`: the row's), or rejects when it is gone. Read-only. */
+  gitlogWorktreeFile(repo: string, path: string, source?: string): Promise<string>;
+  /** Opens the commit's page on its remote in the system browser; false when the remote has no link. */
+  gitlogOpenRemote(repo: string, sha: string): Promise<boolean>;
 }
 
 const tauriApi: Api = {
@@ -221,6 +267,27 @@ const tauriApi: Api = {
   onAuditChanged: (handler) => listen<ChangedPayload>(AUDIT_EVENT, (e) => handler(e.payload)),
   checkUpdate: () => invoke<UpdateView | null>("check_update"),
   installUpdate: () => invoke<void>("install_update"),
+  gitlogRepos: (refresh) => invoke<RepoView[]>("gitlog_repos", { refresh }),
+  gitlogConfig: () => invoke<GitLogConfig>("gitlog_config"),
+  gitlogTick: (ids) => invoke<GitLogConfig>("gitlog_tick", { ids }),
+  gitlogUntick: (ids) => invoke<GitLogConfig>("gitlog_untick", { ids }),
+  gitlogShowAll: () => invoke<GitLogConfig>("gitlog_show_all"),
+  gitlogShowOnly: (ids) => invoke<GitLogConfig>("gitlog_show_only", { ids }),
+  gitlogProfileApply: (name) => invoke<GitLogConfig>("gitlog_profile_apply", { name }),
+  gitlogProfileSave: (name) => invoke<GitLogConfig>("gitlog_profile_save", { name }),
+  gitlogProfileRename: (from, to) => invoke<GitLogConfig>("gitlog_profile_rename", { from, to }),
+  gitlogProfileDelete: (name) => invoke<GitLogConfig>("gitlog_profile_delete", { name }),
+  gitlogScanDepth: (depth) => invoke<GitLogConfig>("gitlog_scan_depth", { depth }),
+  gitlogExclude: (glob) => invoke<GitLogConfig>("gitlog_exclude", { glob }),
+  gitlogInclude: (glob) => invoke<GitLogConfig>("gitlog_include", { glob }),
+  gitlogPane: (pane, width) => invoke<GitLogConfig>("gitlog_pane", { pane, width }),
+  gitlogLastFilter: (filter) => invoke<GitLogConfig>("gitlog_last_filter", { filter }),
+  gitlogPage: (queryId, repos, filter, more) => invoke<PageView>("gitlog_page", { queryId, repos, filter, more }),
+  gitlogMessage: (repo, sha) => invoke<string>("gitlog_message", { repo, sha }),
+  gitlogChanges: (repo, sha) => invoke<ChangedFile[]>("gitlog_changes", { repo, sha }),
+  gitlogFile: (repo, sha, path, side, from) => invoke<FileView>("gitlog_file", { repo, sha, path, side, from: from ?? null }),
+  gitlogWorktreeFile: (repo, path, source) => invoke<string>("gitlog_worktree_file", { repo, path, source }),
+  gitlogOpenRemote: (repo, sha) => invoke<boolean>("gitlog_open_remote", { repo, sha }),
 };
 
 let chosen: Promise<Api> | undefined;
@@ -279,3 +346,28 @@ export const installUpdate = async () => (await api()).installUpdate();
 export const getAudit = async (root: string) => (await api()).getAudit(root);
 export const dismissAudit = async (paths: string[]) => (await api()).dismissAudit(paths);
 export const onAuditChanged = async (handler: (p: ChangedPayload) => void) => (await api()).onAuditChanged(handler);
+
+export const gitlogRepos = async (refresh = false) => (await api()).gitlogRepos(refresh);
+export const gitlogConfig = async () => (await api()).gitlogConfig();
+export const gitlogTick = async (ids: string[]) => (await api()).gitlogTick(ids);
+export const gitlogUntick = async (ids: string[]) => (await api()).gitlogUntick(ids);
+export const gitlogShowAll = async () => (await api()).gitlogShowAll();
+export const gitlogShowOnly = async (ids: string[]) => (await api()).gitlogShowOnly(ids);
+export const gitlogProfileApply = async (name: string) => (await api()).gitlogProfileApply(name);
+export const gitlogProfileSave = async (name: string) => (await api()).gitlogProfileSave(name);
+export const gitlogProfileRename = async (from: string, to: string) => (await api()).gitlogProfileRename(from, to);
+export const gitlogProfileDelete = async (name: string) => (await api()).gitlogProfileDelete(name);
+export const gitlogScanDepth = async (depth: number) => (await api()).gitlogScanDepth(depth);
+export const gitlogExclude = async (glob: string) => (await api()).gitlogExclude(glob);
+export const gitlogInclude = async (glob: string) => (await api()).gitlogInclude(glob);
+export const gitlogPane = async (pane: string, width: number) => (await api()).gitlogPane(pane, width);
+export const gitlogLastFilter = async (filter: Record<string, unknown> | null) => (await api()).gitlogLastFilter(filter);
+export const gitlogPage = async (queryId: number, repos: string[], filter: FilterView, more: boolean) =>
+  (await api()).gitlogPage(queryId, repos, filter, more);
+export const gitlogMessage = async (repo: string, sha: string) => (await api()).gitlogMessage(repo, sha);
+export const gitlogChanges = async (repo: string, sha: string) => (await api()).gitlogChanges(repo, sha);
+export const gitlogFile = async (repo: string, sha: string, path: string, side: FileSide, from?: string) =>
+  (await api()).gitlogFile(repo, sha, path, side, from);
+export const gitlogWorktreeFile = async (repo: string, path: string, source?: string) =>
+  (await api()).gitlogWorktreeFile(repo, path, source);
+export const gitlogOpenRemote = async (repo: string, sha: string) => (await api()).gitlogOpenRemote(repo, sha);

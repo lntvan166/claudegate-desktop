@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isShown } from "../lib/viewSwitch";
   import { tick } from "svelte";
   import type { DiffKind } from "../lib/api";
   import { bulkLabel } from "../lib/counts";
@@ -85,7 +86,8 @@
     else onaction("acceptAll", [...keys]);
   }
 
-  function cancel() {
+  /** Drops the open question, if any (also when the review is switched away from). */
+  export function cancel() {
     confirming = null;
   }
 
@@ -109,6 +111,8 @@
   /** Esc answers no from anywhere, unless the Open-with menu is up (Esc is the menu's first). */
   function escAnywhere(e: KeyboardEvent) {
     if (!confirming || e.key !== "Escape" || e.defaultPrevented) return;
+    // The review is hidden (the Git log is up): its question is not on screen to answer.
+    if (region && !isShown(region)) return;
     if (document.querySelector('[role="menu"]')) return;
     e.preventDefault();
     cancel();

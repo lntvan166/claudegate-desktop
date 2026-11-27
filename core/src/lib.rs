@@ -17,3 +17,4 @@ pub mod upkeep;
 pub mod capture;
 pub mod ojson;
 pub mod audit;
+pub mod gitlog;

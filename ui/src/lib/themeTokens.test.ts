@@ -64,3 +64,14 @@ describe("text tokens are readable (WCAG AA, 4.5:1) on the surface", () => {
     expect(contrast("#6272a4", "#282a36")).toBeLessThan(4.5);
   });
 });
+
+describe("the Git log's twelve repo chip colours", () => {
+  for (const [mode, t] of [["dark", dark], ["light", light]] as const) {
+    it(`${mode}: all twelve are defined, distinct, and readable on the surface`, () => {
+      const c = Array.from({ length: 12 }, (_, i) => t[`repo-${i}`]);
+      expect(c.every(Boolean)).toBe(true);
+      expect(new Set(c).size).toBe(12);
+      for (const x of c) expect(contrast(x, t.surface)).toBeGreaterThanOrEqual(4.5);
+    });
+  }
+});

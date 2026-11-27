@@ -669,6 +669,390 @@ pub fn read_app_settings(path: &Path) -> (claudegate_core::settings::AppSettings
     (app, extra)
 }
 
+// ---------------------------------------------------------------------------------------------
+// The Git log view's settings: `gitLog` in config.json.
+//
+// Every writer below changes one thing under `CONFIG_LOCK`: it adds ids, removes ids, or sets one
+// key. None takes a whole list from the UI and stores it over what is there, so a second window
+// (or a stale copy in this one) can never drop another's change. Repository ids are git common
+// dirs (`RepoView.id`).
+// ---------------------------------------------------------------------------------------------
+
+/// The discovery depth when `gitLog.scanDepth` is absent; `gitlog::workspace_scan` reads the same.
+pub const GITLOG_SCAN_DEPTH: u64 = 2;
+/// The deepest discovery walk `gitLog.scanDepth` may ask for.
+pub const GITLOG_SCAN_DEPTH_MAX: u64 = 8;
+
+/// `gitLog` as the UI reads it. Lenient: a key of the wrong shape reads as absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GitLogConfig {
+    /// The ticked repositories; `None` means every repository.
+    pub ticked: Option<Vec<String>>,
+    /// Named sets of repository ids.
+    pub profiles: std::collections::BTreeMap<String, Vec<String>>,
+    /// The filter bar as last left (Task 6 owns its shape).
+    pub last_filter: Option<serde_json::Value>,
+    /// The discovery depth in effect (the default when unset).
+    pub scan_depth: u64,
+    pub exclude_repos: Vec<String>,
+    /// Pane widths by name, in px.
+    pub panes: std::collections::BTreeMap<String, f64>,
+}
+
+fn strings_of(v: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    Some(clean_roots(v?.as_array()?.iter().filter_map(|x| x.as_str())))
+}
+
+fn gitlog_of(v: &serde_json::Value) -> GitLogConfig {
+    let g = v.get("gitLog").filter(|g| g.is_object());
+    let get = |k: &str| g.and_then(|g| g.get(k));
+    GitLogConfig {
+        ticked: strings_of(get("ticked")),
+        profiles: get("profiles")
+            .and_then(|p| p.as_object())
+            .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), strings_of(Some(v))?))).collect())
+            .unwrap_or_default(),
+        last_filter: get("lastFilter").filter(|f| f.is_object()).cloned(),
+        scan_depth: get("scanDepth").and_then(|d| d.as_u64()).map_or(GITLOG_SCAN_DEPTH, |d| d.min(GITLOG_SCAN_DEPTH_MAX)),
+        exclude_repos: strings_of(get("excludeRepos")).unwrap_or_default(),
+        panes: get("panes")
+            .and_then(|p| p.as_object())
+            .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_f64().filter(|w| w.is_finite() && *w > 0.0)?))).collect())
+            .unwrap_or_default(),
+    }
+}
+
+/// Reads `gitLog` without creating or migrating anything; unreadable reads as the defaults.
+pub fn read_gitlog(path: &Path) -> GitLogConfig {
+    let v = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).unwrap_or_default();
+    gitlog_of(&v)
+}
+
+fn gitlog_entry(obj: &mut serde_json::Map<String, serde_json::Value>) -> Result<&mut serde_json::Map<String, serde_json::Value>, String> {
+    obj.entry("gitLog").or_insert_with(|| serde_json::json!({})).as_object_mut().ok_or_else(|| "The gitLog entry in config.json is not an object. Remove the gitLog key from config.json (the app writes it again).".to_string())
+}
+
+/// `update_config_if` over the `gitLog` object, answering with the whole block as it now stands.
+fn update_gitlog(
+    path: &Path,
+    guard: Option<&Path>,
+    f: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<bool, String>,
+) -> Result<GitLogConfig, String> {
+    update_config_if(path, guard, |obj, _| f(gitlog_entry(obj)?))?;
+    Ok(read_gitlog(path))
+}
+
+fn clean_ids(ids: &[String]) -> Vec<String> {
+    clean_roots(ids.iter().map(String::as_str))
+}
+
+/// The stored tick list, or `None` when every repository is ticked (absent, `null`, or malformed).
+fn ticked_in(g: &serde_json::Map<String, serde_json::Value>) -> Option<Vec<String>> {
+    strings_of(g.get("ticked"))
+}
+
+/// Ticks `ids`, add-only. With every repository already ticked there is nothing to add.
+pub fn gitlog_tick_repos(path: &Path, ids: &[String], guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    let ids = clean_ids(ids);
+    update_gitlog(path, guard, |g| {
+        let Some(mut t) = ticked_in(g) else { return Ok(false) };
+        let before = t.len();
+        for id in ids {
+            if !t.contains(&id) {
+                t.push(id);
+            }
+        }
+        if t.len() == before {
+            return Ok(false);
+        }
+        g.insert("ticked".into(), serde_json::json!(t));
+        Ok(true)
+    })
+}
+
+/// Unticks `ids`, remove-only. When every repository is ticked the list is made explicit first
+/// from `known` (the backend's own discovered ids, never the UI's copy), read under the lock.
+pub fn gitlog_untick_repos(
+    path: &Path,
+    ids: &[String],
+    known: impl FnOnce() -> Result<Vec<String>, String>,
+    guard: Option<&Path>,
+) -> Result<GitLogConfig, String> {
+    let ids = clean_ids(ids);
+    update_gitlog(path, guard, |g| {
+        let (mut t, explicit) = match ticked_in(g) {
+            Some(t) => (t, true),
+            None => (known()?, false),
+        };
+        let before = t.len();
+        t.retain(|r| !ids.contains(r));
+        if explicit && t.len() == before {
+            return Ok(false);
+        }
+        g.insert("ticked".into(), serde_json::json!(t));
+        Ok(true)
+    })
+}
+
+/// Ticks every repository (`ticked` dropped): "Show all".
+pub fn gitlog_tick_all(path: &Path, guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    update_gitlog(path, guard, |g| Ok(g.remove("ticked").is_some()))
+}
+
+/// Ticks exactly `ids`: "Show only this". The ids are the rows the user picked, not a copy of the
+/// stored list.
+pub fn gitlog_tick_only(path: &Path, ids: &[String], guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    let ids = clean_ids(ids);
+    if ids.is_empty() {
+        return Err("No repository to show.".into());
+    }
+    update_gitlog(path, guard, |g| {
+        g.insert("ticked".into(), serde_json::json!(ids));
+        Ok(true)
+    })
+}
+
+fn profile_name(name: &str) -> Result<String, String> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Err("A profile needs a name.".into());
+    }
+    if n.chars().any(char::is_control) || n.chars().count() > 80 {
+        return Err("That profile name can't be used.".into());
+    }
+    Ok(n.to_string())
+}
+
+/// Ticks exactly the repositories of the stored profile `name`, copied from config.json under
+/// the lock. Ids no longer discovered stay in the list; the UI skips and counts them.
+pub fn gitlog_apply_profile(path: &Path, name: &str, guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    let name = profile_name(name)?;
+    update_gitlog(path, guard, |g| {
+        let ids = g
+            .get("profiles")
+            .and_then(|p| p.as_object())
+            .and_then(|p| strings_of(p.get(&name)))
+            .ok_or_else(|| format!("There is no profile named {name}."))?;
+        g.insert("ticked".into(), serde_json::json!(ids));
+        Ok(true)
+    })
+}
+
+/// Saves the stored ticks as the profile `name` (replacing one of that name). With every
+/// repository ticked, the profile lists `known` (the backend's discovered ids).
+pub fn gitlog_save_profile(
+    path: &Path,
+    name: &str,
+    known: impl FnOnce() -> Result<Vec<String>, String>,
+    guard: Option<&Path>,
+) -> Result<GitLogConfig, String> {
+    let name = profile_name(name)?;
+    update_gitlog(path, guard, |g| {
+        let ids = match ticked_in(g) {
+            Some(t) => t,
+            None => known()?,
+        };
+        let profiles = g.entry("profiles").or_insert_with(|| serde_json::json!({}));
+        let profiles = profiles.as_object_mut().ok_or("The gitLog profiles entry in config.json is not an object.")?;
+        profiles.insert(name, serde_json::json!(ids));
+        Ok(true)
+    })
+}
+
+/// Renames one profile; refused when `to` is taken or `from` is gone.
+pub fn gitlog_rename_profile(path: &Path, from: &str, to: &str, guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    let from = profile_name(from)?;
+    let to = profile_name(to)?;
+    update_gitlog(path, guard, |g| {
+        if from == to {
+            return Ok(false);
+        }
+        let profiles = g.get_mut("profiles").and_then(|p| p.as_object_mut()).ok_or_else(|| format!("There is no profile named {from}."))?;
+        if profiles.contains_key(&to) {
+            return Err(format!("A profile named {to} already exists."));
+        }
+        let v = profiles.remove(&from).ok_or_else(|| format!("There is no profile named {from}."))?;
+        profiles.insert(to, v);
+        Ok(true)
+    })
+}
+
+/// Deletes one profile. Deleting one that is already gone changes nothing.
+pub fn gitlog_delete_profile(path: &Path, name: &str, guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    let name = name.trim().to_string();
+    update_gitlog(path, guard, |g| Ok(g.get_mut("profiles").and_then(|p| p.as_object_mut()).is_some_and(|p| p.remove(&name).is_some())))
+}
+
+/// Sets `gitLog.scanDepth`, 0 (the workspace roots only) to `GITLOG_SCAN_DEPTH_MAX`.
+pub fn gitlog_set_scan_depth(path: &Path, depth: u64, guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    if depth > GITLOG_SCAN_DEPTH_MAX {
+        return Err(format!("The scan depth must be 0 to {GITLOG_SCAN_DEPTH_MAX}."));
+    }
+    update_gitlog(path, guard, |g| {
+        g.insert("scanDepth".into(), serde_json::json!(depth));
+        Ok(true)
+    })
+}
+
+fn exclude_pattern(glob: &str) -> Result<String, String> {
+    let g = glob.trim();
+    if g.is_empty() || g.chars().any(char::is_control) {
+        return Err("That pattern can't be used.".into());
+    }
+    Ok(g.to_string())
+}
+
+/// Adds one pattern to `gitLog.excludeRepos`, add-only.
+pub fn gitlog_exclude_repo(path: &Path, glob: &str, guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    let glob = exclude_pattern(glob)?;
+    update_gitlog(path, guard, |g| {
+        let mut list = strings_of(g.get("excludeRepos")).unwrap_or_default();
+        if list.contains(&glob) {
+            return Ok(false);
+        }
+        list.push(glob);
+        g.insert("excludeRepos".into(), serde_json::json!(list));
+        Ok(true)
+    })
+}
+
+/// Removes one pattern from `gitLog.excludeRepos`, remove-only.
+pub fn gitlog_include_repo(path: &Path, glob: &str, guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    let glob = glob.trim().to_string();
+    update_gitlog(path, guard, |g| {
+        let Some(mut list) = strings_of(g.get("excludeRepos")) else { return Ok(false) };
+        let before = list.len();
+        list.retain(|x| *x != glob);
+        if list.len() == before {
+            return Ok(false);
+        }
+        g.insert("excludeRepos".into(), serde_json::json!(list));
+        Ok(true)
+    })
+}
+
+/// Sets `gitLog.lastFilter` (an object; Task 6 owns its fields), or drops it with `null`.
+pub fn gitlog_set_last_filter(path: &Path, filter: serde_json::Value, guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    if !(filter.is_object() || filter.is_null()) {
+        return Err("The filter must be an object.".into());
+    }
+    update_gitlog(path, guard, |g| {
+        if filter.is_null() {
+            return Ok(g.remove("lastFilter").is_some());
+        }
+        g.insert("lastFilter".into(), filter);
+        Ok(true)
+    })
+}
+
+/// Sets one pane's width in `gitLog.panes`, keeping the others.
+pub fn gitlog_set_pane(path: &Path, pane: &str, width: f64, guard: Option<&Path>) -> Result<GitLogConfig, String> {
+    let pane = pane.trim().to_string();
+    if pane.is_empty() || !pane.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err("Unknown pane.".into());
+    }
+    if !width.is_finite() || width <= 0.0 || width > 100_000.0 {
+        return Err("The width must be a positive number.".into());
+    }
+    let width = width.round();
+    update_gitlog(path, guard, |g| {
+        let panes = g.entry("panes").or_insert_with(|| serde_json::json!({}));
+        let panes = panes.as_object_mut().ok_or("The gitLog panes entry in config.json is not an object.")?;
+        if panes.get(&pane).and_then(|w| w.as_f64()) == Some(width) {
+            return Ok(false);
+        }
+        panes.insert(pane, serde_json::json!(width));
+        Ok(true)
+    })
+}
+
+/// The Tauri side of the writers above: the real config path, guarded by the ClaudeGate home.
+fn gitlog_write<T: Send + 'static>(f: impl FnOnce(&Path, Option<&Path>) -> T + Send + 'static) -> impl std::future::Future<Output = Result<T, String>> {
+    crate::commands::blocking(move || {
+        let home = claudegate_core::paths::claudegate_home();
+        f(&config_path(), Some(&home))
+    })
+}
+
+/// The discovered repository ids, for the writers that make "every repository" explicit.
+fn known_ids(state: &crate::gitlog::GitLogState) -> impl FnOnce() -> Result<Vec<String>, String> {
+    let gl = state.0.clone();
+    move || gl.known_ids().ok_or_else(|| "The repository list isn't loaded yet; try again in a moment.".to_string())
+}
+
+#[tauri::command]
+pub async fn gitlog_config() -> Result<GitLogConfig, String> {
+    crate::commands::blocking(|| read_gitlog(&config_path())).await
+}
+
+#[tauri::command]
+pub async fn gitlog_tick(ids: Vec<String>) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_tick_repos(p, &ids, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_untick(ids: Vec<String>, state: tauri::State<'_, crate::gitlog::GitLogState>) -> Result<GitLogConfig, String> {
+    let known = known_ids(state.inner());
+    gitlog_write(move |p, g| gitlog_untick_repos(p, &ids, known, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_show_all() -> Result<GitLogConfig, String> {
+    gitlog_write(gitlog_tick_all).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_show_only(ids: Vec<String>) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_tick_only(p, &ids, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_profile_apply(name: String) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_apply_profile(p, &name, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_profile_save(name: String, state: tauri::State<'_, crate::gitlog::GitLogState>) -> Result<GitLogConfig, String> {
+    let known = known_ids(state.inner());
+    gitlog_write(move |p, g| gitlog_save_profile(p, &name, known, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_profile_rename(from: String, to: String) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_rename_profile(p, &from, &to, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_profile_delete(name: String) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_delete_profile(p, &name, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_scan_depth(depth: u64) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_set_scan_depth(p, depth, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_exclude(glob: String) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_exclude_repo(p, &glob, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_include(glob: String) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_include_repo(p, &glob, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_last_filter(filter: serde_json::Value) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_set_last_filter(p, filter, g)).await?
+}
+
+#[tauri::command]
+pub async fn gitlog_pane(pane: String, width: f64) -> Result<GitLogConfig, String> {
+    gitlog_write(move |p, g| gitlog_set_pane(p, &pane, width, g)).await?
+}
+
 #[tauri::command]
 pub async fn get_config() -> Result<Config, String> {
     // Derives the workspace on the first load; a failed write only delays that.
