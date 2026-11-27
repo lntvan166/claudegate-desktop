@@ -17,6 +17,8 @@ import {
   footerText,
   historyBanner,
   historyRequest,
+  sameHistory,
+  HISTORY_PREFIX,
   keepSelection,
   navigate,
   nearEnd,
@@ -375,6 +377,13 @@ describe("File History", () => {
     const r = row(1, { file: { path: "old.ts", from: null, status: "modified" } });
     expect(pickFile(files, r.file?.path ?? null)?.path).toBe("old.ts");
     expect(pickFile(files, null)?.path).toBe("new.ts");
+  });
+  it("knows when history is already open for a file", () => {
+    expect(sameHistory({ repo: R, path: "a.ts" }, R, "a.ts")).toBe(true);
+    expect(sameHistory({ repo: R, path: "a.ts" }, R, "b.ts")).toBe(false);
+    expect(sameHistory({ repo: R, path: "a.ts" }, "/w/other/.git", "a.ts")).toBe(false);
+    expect(sameHistory(null, R, "a.ts")).toBe(false);
+    expect(historyBanner("a.ts")).toBe(HISTORY_PREFIX + "a.ts");
   });
   it("sends the history request through to the fetcher", async () => {
     const seen: unknown[] = [];

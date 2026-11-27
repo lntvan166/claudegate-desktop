@@ -57,6 +57,7 @@
     selection = $bindable(EMPTY_SELECTION),
     multi = true,
     history = null,
+    onhistoryclose,
     onopen,
     onselect,
     onfocussearch,
@@ -75,6 +76,8 @@
     multi?: boolean;
     /** File History: the list is that one file's commits; the filter is set aside but for its branch. */
     history?: HistoryReq | null;
+    /** Esc with nothing selected while File History is open: close it. */
+    onhistoryclose?: () => void;
     /** Enter or a double-click: open the commit's first changed file (Task 7 wires this). */
     onopen: (row: RowView) => void;
     onselect: (focus: RowView | null, picked: RowView[]) => void;
@@ -99,6 +102,7 @@
   let ran: string | null = null;
   /** The file whose history `ran` was for: opening or closing File History starts at once, not after the debounce. */
   let ranHistory: string | null = null;
+  let prevHistory: string | null = null;
   const historyKey = $derived(history ? `${history.repo}\u0000${history.path}` : null);
   /** Pages fetched by the scroll trigger since the user last scrolled. */
   let idle = 0;
@@ -116,6 +120,10 @@
       query.clear();
       return;
     }
+    // Opening or closing File History: the old rows go at once, so none of them can be picked
+    // (they carry no `file`) while the first page of the new list loads.
+    if (untrack(() => historyKey) !== prevHistory) query.clear();
+    prevHistory = untrack(() => historyKey);
     void query.start({ ...req, repos: req.repos.slice() });
   }
 
@@ -253,6 +261,9 @@
       if (selIndex >= 0) {
         e.preventDefault();
         select(null);
+      } else if (history && onhistoryclose) {
+        e.preventDefault();
+        onhistoryclose();
       }
     } else if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
       e.preventDefault();
@@ -265,7 +276,8 @@
 
   // `/` from anywhere in the Git log that is not a field or a menu.
   function onwindowkey(e: KeyboardEvent) {
-    if (!active || e.defaultPrevented || e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+    // The filters are set aside in File History: `/` has nowhere to go, so it is left alone.
+    if (history || !active || e.defaultPrevented || e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
     if (!slashTarget(e.target as HTMLElement | null)) return;
     if (overlayShown(document.querySelectorAll<HTMLElement>(OVERLAY_SELECTOR))) return;
     e.preventDefault();

@@ -28,6 +28,11 @@
     searchEl?.select();
   }
 
+  // A half-typed author must not commit on the blur that setting the field aside causes.
+  $effect(() => {
+    if (disabled) authorDraft = "";
+  });
+
   function searchKey(e: KeyboardEvent) {
     // Esc clears the search first; Esc on an empty box returns to the list.
     if (e.key === "Escape" && filter.search) {

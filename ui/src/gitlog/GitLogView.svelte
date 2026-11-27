@@ -60,7 +60,7 @@
   import { EMPTY_SELECTION, type Selection } from "./selection";
   import RepoPane from "./RepoPane.svelte";
   import { reposForLaunch } from "../lib/launch";
-  import { DEFAULT_FILTER, debounce, historyBanner, isStale, parseFilter, rowKey, type FilterState, type HistoryReq, type RowView } from "./log";
+  import { DEFAULT_FILTER, debounce, HISTORY_PREFIX, isStale, sameHistory, parseFilter, rowKey, type FilterState, type HistoryReq, type RowView } from "./log";
   import {
     DEFAULT_GITLOG_CONFIG,
     PANE_DEFAULTS,
@@ -171,6 +171,8 @@
    */
   let history = $state<HistoryReq | null>(null);
   function openHistory(repo: string, path: string) {
+    // Already showing it: nothing reloads, so nothing may be reset either.
+    if (sameHistory(history, repo, path)) return;
     // No commit of the old list is carried over, and several commits cannot be picked here.
     selection = EMPTY_SELECTION;
     selected = null;
@@ -792,9 +794,9 @@
     <div class="log">
       <Filters bind:this={filters} bind:filter loading={logBusy} disabled={!!history} onrefresh={() => logList?.refresh()} onexit={() => logList?.focusList()} />
       {#if history}
-        <div class="history" role="status">
-          <span class="htext">{historyBanner(history.path).slice(0, -history.path.length)}<code title={history.path}>{history.path}</code></span>
-          <button type="button" class="hclose" aria-label="Close File History" title="Close File History" onclick={closeHistory}>
+        <div class="history" role="group" aria-label="File History">
+          <span class="htext" role="status">{HISTORY_PREFIX}<code title={history.path}>{history.path}</code></span>
+          <button type="button" class="hclose" aria-label="Close File History" title="Close File History (Esc)" onclick={closeHistory}>
             <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
           </button>
         </div>
@@ -811,6 +813,7 @@
           {filter}
           {active}
           {history}
+          onhistoryclose={closeHistory}
           multi={!history}
           onopen={openCommit}
           bind:selection

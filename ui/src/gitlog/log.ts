@@ -136,8 +136,12 @@ export function historyRequest(f: FilterState, h: HistoryReq): Request {
   return { repos: [h.repo], filter, history: { repo: h.repo, path: h.path } };
 }
 
-/** The banner above the list while File History is open. */
-export const historyBanner = (path: string) => `History of ${path}`;
+/** The banner above the list while File History is open: this prefix, then the path. */
+export const HISTORY_PREFIX = "History of ";
+export const historyBanner = (path: string) => `${HISTORY_PREFIX}${path}`;
+
+/** Whether `h` is already the history of `repo`'s `path` (asking for it again changes nothing). */
+export const sameHistory = (h: HistoryReq | null, repo: string, path: string) => !!h && h.repo === repo && h.path === path;
 
 // ---- debounce ----------------------------------------------------------------------------------
 
