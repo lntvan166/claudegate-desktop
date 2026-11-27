@@ -35,26 +35,26 @@ fn first_page_and_changes_within_targets() {
     let ids: Vec<String> = repos.iter().map(|r| r.id.clone()).collect();
 
     // Warm the page cache once, as the target is "on a warm cache".
-    g.page("main", 1, &ids, &FilterView::default(), false).unwrap();
+    g.page("main", 1, &ids, &FilterView::default(), false, None).unwrap();
 
     let mut firsts = Vec::new();
     let mut last = None;
     for q in 2..7 {
         let t = Instant::now();
-        let p = g.page("main", q, &ids, &FilterView::default(), false).unwrap();
+        let p = g.page("main", q, &ids, &FilterView::default(), false, None).unwrap();
         firsts.push(t.elapsed());
         assert_eq!(p.rows.len(), 200);
         assert!(p.failures.is_empty());
         last = Some(p);
     }
     let t = Instant::now();
-    let more = g.page("main", 6, &ids, &FilterView::default(), true).unwrap();
+    let more = g.page("main", 6, &ids, &FilterView::default(), true, None).unwrap();
     let more_t = t.elapsed();
     assert_eq!(more.rows.len(), 200);
 
     let within = FilterView { within: Some(7 * 86_400), search: Some("change 1".into()), ..Default::default() };
     let t = Instant::now();
-    g.page("main", 50, &ids, &within, false).unwrap();
+    g.page("main", 50, &ids, &within, false, None).unwrap();
     let filtered_t = t.elapsed();
 
     let row = &last.unwrap().rows[17];

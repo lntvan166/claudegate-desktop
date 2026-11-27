@@ -1,7 +1,7 @@
 //! The gitlog commands against real fixture repositories.
 mod gitfix;
 
-use claudegate_desktop_lib::gitlog::{FileView, FilterView, GitLog, PageView, Runner, Side, Tag, STALE};
+use claudegate_desktop_lib::gitlog::{FileView, FilterView, GitLog, HistoryReq, PageView, Runner, Side, Tag, STALE};
 use gitfix::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ fn gl() -> GitLog {
 }
 
 fn first_page(g: &GitLog, q: u64, ids: &[String], f: &FilterView) -> PageView {
-    g.page("main", q, ids, f, false).unwrap()
+    g.page("main", q, ids, f, false, None).unwrap()
 }
 
 fn ids_of(g: &GitLog, roots: &[PathBuf]) -> Vec<String> {
@@ -53,7 +53,7 @@ fn supersede() -> (Result<PageView, String>, PageView, Vec<u32>, String) {
 
     let g1 = g.clone();
     let both = vec![s.id.clone(), gd.id.clone()];
-    let q1 = std::thread::spawn(move || g1.page("main", 1, &both, &FilterView::default(), false));
+    let q1 = std::thread::spawn(move || g1.page("main", 1, &both, &FilterView::default(), false, None));
     let tag1 = Tag { window: "main".into(), query: 1 };
     let deadline = Instant::now() + Duration::from_secs(10);
     while g.runner.pids(&tag1).is_empty() {
@@ -66,7 +66,7 @@ fn supersede() -> (Result<PageView, String>, PageView, Vec<u32>, String) {
     assert!(!pids.is_empty() && pids.iter().all(|p| alive(*p)));
 
     let started = Instant::now();
-    let p2 = g.page("main", 2, &[gd.id.clone()], &FilterView::default(), false).unwrap();
+    let p2 = g.page("main", 2, &[gd.id.clone()], &FilterView::default(), false, None).unwrap();
     let r1 = q1.join().unwrap();
     assert!(started.elapsed() < Duration::from_secs(10), "the supersede must not wait for the slow child");
     (r1, p2, pids, good_id)
@@ -102,8 +102,8 @@ fn stale_more_is_refused() {
     let ids = ids_of(&g, &[root]);
     first_page(&g, 1, &ids, &FilterView::default());
     first_page(&g, 2, &ids, &FilterView::default());
-    assert_eq!(g.page("main", 1, &ids, &FilterView::default(), true), Err(STALE.to_string()));
-    assert!(g.page("main", 2, &ids, &FilterView::default(), true).is_ok());
+    assert_eq!(g.page("main", 1, &ids, &FilterView::default(), true, None), Err(STALE.to_string()));
+    assert!(g.page("main", 2, &ids, &FilterView::default(), true, None).is_ok());
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn pages_cover_every_commit_once_in_order() {
         if p.done {
             break;
         }
-        p = g.page("main", 7, &ids, &FilterView::default(), true).unwrap();
+        p = g.page("main", 7, &ids, &FilterView::default(), true, None).unwrap();
         pages += 1;
         assert!(pages < 50);
     }
@@ -193,7 +193,7 @@ fn rs_bytes_in_subjects_and_authors_keep_paging_exact() {
         if p.done {
             break;
         }
-        p = g.page("main", 9, &ids, &FilterView::default(), true).unwrap();
+        p = g.page("main", 9, &ids, &FilterView::default(), true, None).unwrap();
         assert!(all.len() < 50);
     }
     want.reverse();
@@ -260,7 +260,7 @@ fn utf16_log_encoding_config_does_not_hide_commits() {
         if p.done {
             break;
         }
-        p = g.page("main", 11, &ids, &FilterView::default(), true).unwrap();
+        p = g.page("main", 11, &ids, &FilterView::default(), true, None).unwrap();
         assert!(all.len() < 50);
     }
     want.reverse();
@@ -368,12 +368,12 @@ fn late_older_query_is_stale_and_harmless() {
     let g = gl().with_page_size(2);
     let ids = ids_of(&g, &[root]);
     first_page(&g, 2, &ids, &FilterView::default());
-    assert_eq!(g.page("main", 1, &ids, &FilterView::default(), false), Err(STALE.to_string()), "an older id arriving late");
-    let more = g.page("main", 2, &ids, &FilterView::default(), true).unwrap();
+    assert_eq!(g.page("main", 1, &ids, &FilterView::default(), false, None), Err(STALE.to_string()), "an older id arriving late");
+    let more = g.page("main", 2, &ids, &FilterView::default(), true, None).unwrap();
     assert_eq!(more.rows.len(), 2, "query 2's state survived");
     g.forget_window("main");
-    assert_eq!(g.page("main", 2, &ids, &FilterView::default(), true), Err(STALE.to_string()), "a closed window's query is gone");
-    assert!(g.page("main", 1, &ids, &FilterView::default(), false).is_ok(), "a reopened window starts afresh");
+    assert_eq!(g.page("main", 2, &ids, &FilterView::default(), true, None), Err(STALE.to_string()), "a closed window's query is gone");
+    assert!(g.page("main", 1, &ids, &FilterView::default(), false, None).is_ok(), "a reopened window starts afresh");
 }
 
 #[test]
@@ -399,4 +399,209 @@ fn rows_carry_their_source() {
     let f = FilterView { branch: Some("w1".into()), ..Default::default() };
     let p = first_page(&g, 2, &ids, &f);
     assert!(p.rows.iter().all(|r| r.source == "w1"), "one head: every row is that branch");
+}
+
+// ---------------------------------------------------------------------------------------------
+// File History
+// ---------------------------------------------------------------------------------------------
+
+/// Enough lines that git sees the rename as one.
+fn body(extra: &str) -> Vec<u8> {
+    format!("line one\nline two\nline three\nline four\nline five\n{extra}").into_bytes()
+}
+
+/// old.ts added (t1), modified (t2), renamed to new.ts (t3), new.ts modified (t4), then an
+/// unrelated other.ts (t5).
+fn renamed_file(d: &Path) {
+    init(d);
+    commit(d, &[("old.ts", Some(&body("")))], "add old", BASE + 1);
+    commit(d, &[("old.ts", Some(&body("two\n")))], "edit old", BASE + 2);
+    commit(d, &[("old.ts", None), ("new.ts", Some(&body("two\n")))], "rename", BASE + 3);
+    commit(d, &[("new.ts", Some(&body("two\nfour\n")))], "edit new", BASE + 4);
+    commit(d, &[("other.ts", Some(b"o\n"))], "other", BASE + 5);
+}
+
+fn hist(repo: &str, path: &str) -> HistoryReq {
+    HistoryReq { repo: repo.to_string(), path: path.to_string() }
+}
+
+/// (subject, path, from, status) of each row.
+fn files(p: &PageView) -> Vec<(String, String, Option<String>, Option<&'static str>)> {
+    p.rows
+        .iter()
+        .map(|r| {
+            let f = r.file.as_ref().expect("a history row carries its file");
+            (r.subject.clone(), f.path.clone(), f.from.clone(), f.status)
+        })
+        .collect()
+}
+
+fn four() -> Vec<(String, String, Option<String>, Option<&'static str>)> {
+    vec![
+        ("edit new".into(), "new.ts".into(), None, Some("modified")),
+        ("rename".into(), "new.ts".into(), Some("old.ts".into()), Some("renamed")),
+        ("edit old".into(), "old.ts".into(), None, Some("modified")),
+        ("add old".into(), "old.ts".into(), None, Some("added")),
+    ]
+}
+
+#[test]
+fn history_follows_rename() {
+    let (_t, root) = tmp();
+    renamed_file(&root.join("acme-api"));
+    let g = gl();
+    let ids = ids_of(&g, &[root]);
+    let h = hist(&ids[0], "new.ts");
+    let p = g.page("main", 1, &ids, &FilterView::default(), false, Some(&h)).unwrap();
+    assert_eq!(files(&p), four());
+    assert!(p.done);
+    assert!(p.failures.is_empty());
+    assert!(p.rows.windows(2).all(|w| w[0].time > w[1].time), "newest first");
+    let json = serde_json::to_value(&p.rows[1]).unwrap();
+    assert_eq!(json["file"], serde_json::json!({ "path": "new.ts", "from": "old.ts", "status": "renamed" }));
+    let log = first_page(&g, 2, &ids, &FilterView::default());
+    assert!(serde_json::to_value(&log.rows[0]).unwrap().get("file").is_none(), "a log row has no file");
+}
+
+#[test]
+fn history_sets_filters_aside() {
+    let (_t, root) = tmp();
+    renamed_file(&root.join("acme-api"));
+    let g = gl();
+    let ids = ids_of(&g, &[root]);
+    let f = FilterView { search: Some("zzz".into()), authors: vec!["nobody".into()], within: Some(1), path: Some("other.ts".into()), mine: true, ..Default::default() };
+    let p = g.page("main", 1, &ids, &f, false, Some(&hist(&ids[0], "new.ts"))).unwrap();
+    assert_eq!(files(&p), four());
+}
+
+#[test]
+fn history_pages_with_skip() {
+    let (_t, root) = tmp();
+    renamed_file(&root.join("acme-api"));
+    let g = gl().with_page_size(2);
+    let ids = ids_of(&g, &[root]);
+    let h = hist(&ids[0], "new.ts");
+    let p1 = g.page("main", 1, &ids, &FilterView::default(), false, Some(&h)).unwrap();
+    assert_eq!(p1.rows.len(), 2);
+    assert!(!p1.done);
+    let p2 = g.page("main", 1, &ids, &FilterView::default(), true, Some(&h)).unwrap();
+    assert_eq!(p2.rows.len(), 2);
+    let p2 = if p2.done { p2 } else {
+        let p3 = g.page("main", 1, &ids, &FilterView::default(), true, Some(&h)).unwrap();
+        assert!(p3.rows.is_empty() && p3.done);
+        p2
+    };
+    let mut all = files(&p1);
+    all.extend(files(&p2));
+    assert_eq!(all, four(), "no row repeats, and each keeps its file across pages");
+    let shas: HashSet<String> = p1.rows.iter().chain(&p2.rows).map(|r| r.sha.clone()).collect();
+    assert_eq!(shas.len(), 4);
+}
+
+#[test]
+fn history_only_its_repo() {
+    let (_t, root) = tmp();
+    renamed_file(&root.join("acme-api"));
+    renamed_file(&root.join("acme-web"));
+    let g = gl();
+    let ids = ids_of(&g, &[root]);
+    assert_eq!(ids.len(), 2);
+    let p = g.page("main", 1, &ids, &FilterView::default(), false, Some(&hist(&ids[1], "new.ts"))).unwrap();
+    assert_eq!(p.rows.len(), 4);
+    assert!(p.rows.iter().all(|r| r.repo == ids[1]));
+    assert!(g.page("main", 2, &ids, &FilterView::default(), false, Some(&hist("/not/a/known/repo", "new.ts"))).is_err(), "only the backend's own repositories");
+}
+
+#[test]
+fn history_keeps_branch() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    renamed_file(&d);
+    git(&d, &["checkout", "-q", "-b", "feat"]);
+    commit(&d, &[("new.ts", Some(&body("two\nfour\nfeat\n")))], "on feat", BASE + 6);
+    git(&d, &["checkout", "-q", "main"]);
+    let g = gl();
+    let ids = ids_of(&g, &[root]);
+    let h = hist(&ids[0], "new.ts");
+    let f = FilterView { branch: Some("feat".into()), ..Default::default() };
+    let p = g.page("main", 1, &ids, &f, false, Some(&h)).unwrap();
+    let subjects: Vec<&str> = p.rows.iter().map(|r| r.subject.as_str()).collect();
+    assert_eq!(subjects, vec!["on feat", "edit new", "rename", "edit old", "add old"]);
+    assert!(p.rows.iter().all(|r| r.source == "feat"));
+    let p = g.page("main", 2, &ids, &FilterView::default(), false, Some(&h)).unwrap();
+    assert_eq!(p.rows.len(), 4, "without the branch: the current HEAD");
+}
+
+#[test]
+fn history_rejects_bad_path() {
+    let (_t, root) = tmp();
+    renamed_file(&root.join("acme-api"));
+    let g = gl();
+    let ids = ids_of(&g, &[root]);
+    for bad in ["../x", "/etc/passwd", "", "a/../b", "./a"] {
+        assert_eq!(g.page("main", 1, &ids, &FilterView::default(), false, Some(&hist(&ids[0], bad))), Err("Not a path in the repository".to_string()), "{bad:?}");
+    }
+}
+
+#[test]
+fn history_never_supersedes_the_log() {
+    let (_t, root) = tmp();
+    renamed_file(&root.join("acme-api"));
+    let g = gl().with_page_size(2);
+    let ids = ids_of(&g, &[root]);
+    let log = first_page(&g, 5, &ids, &FilterView::default());
+    assert_eq!(log.rows.len(), 2);
+    g.page("main", 6, &ids, &FilterView::default(), false, Some(&hist(&ids[0], "new.ts"))).unwrap();
+    let more = g.page("main", 5, &ids, &FilterView::default(), true, None).unwrap();
+    assert_eq!(more.rows.len(), 2, "the log keeps paging after a File History query");
+    assert!(g.page("main", 6, &ids, &FilterView::default(), true, Some(&hist(&ids[0], "new.ts"))).is_ok(), "and History keeps its own state");
+    g.forget_window("main");
+    assert_eq!(g.page("main", 6, &ids, &FilterView::default(), true, Some(&hist(&ids[0], "new.ts"))), Err(STALE.to_string()), "a closed window drops its history too");
+}
+
+#[test]
+fn history_of_a_file_with_hostile_names() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    init(&d);
+    let from = "a\nR100\nb.ts";
+    let to = "x\x1ey.ts";
+    commit(&d, &[(from, Some(&body("")))], "add", BASE + 1);
+    commit(&d, &[(from, None), (to, Some(&body("")))], "a\x1eb\x1fc", BASE + 2);
+    commit(&d, &[(to, Some(&body("more\n")))], "edit", BASE + 3);
+    let g = gl();
+    let ids = ids_of(&g, &[root]);
+    let p = g.page("main", 1, &ids, &FilterView::default(), false, Some(&hist(&ids[0], to))).unwrap();
+    assert_eq!(
+        files(&p),
+        vec![
+            ("edit".into(), to.into(), None, Some("modified")),
+            ("a\x1eb\x1fc".into(), to.into(), Some(from.into()), Some("renamed")),
+            ("add".into(), from.into(), None, Some("added")),
+        ]
+    );
+}
+
+/// A user's `log.follow=true` would turn the paged walk into `--follow`, which cannot page.
+#[test]
+fn history_pages_under_log_follow_config() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    renamed_file(&d);
+    git(&d, &["config", "log.follow", "true"]);
+    git(&d, &["config", "log.showRoot", "false"]);
+    let g = gl().with_page_size(3);
+    let ids = ids_of(&g, &[root]);
+    let h = hist(&ids[0], "new.ts");
+    let mut all = Vec::new();
+    let mut p = g.page("main", 1, &ids, &FilterView::default(), false, Some(&h)).unwrap();
+    loop {
+        all.extend(files(&p));
+        if p.done {
+            break;
+        }
+        p = g.page("main", 1, &ids, &FilterView::default(), true, Some(&h)).unwrap();
+        assert!(all.len() < 20);
+    }
+    assert_eq!(all, four());
 }

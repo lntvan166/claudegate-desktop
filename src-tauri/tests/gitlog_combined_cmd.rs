@@ -435,7 +435,7 @@ fn combined_channel_leaves_the_log_alone() {
     let (_t, g, slow, good) = slow_and_good();
     let g1 = g.clone();
     let slow_id = slow.0.clone();
-    let page = std::thread::spawn(move || g1.page("main", 1, &[slow_id], &FilterView::default(), false));
+    let page = std::thread::spawn(move || g1.page("main", 1, &[slow_id], &FilterView::default(), false, None));
     let log_tag = Tag { window: "main".into(), query: 1 };
     let pids = wait_for_pids(&g, &log_tag);
 

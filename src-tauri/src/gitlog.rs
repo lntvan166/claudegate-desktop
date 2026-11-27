@@ -21,8 +21,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use claudegate_core::gitlog::{
-    ahead_behind, count_records, discover, heads_for, is_sha, is_valid_ref, log_args, par_map, parse_changes, parse_log, repo_searched, take_ready, web_url,
-    BranchUse, ChangedFile, Commit, FileStatus, Filter, GitRun, Repo, RepoProgress, DEFAULT_SCAN_DEPTH, PARALLEL,
+    ahead_behind, count_records, discover, heads_for, history_args, history_paths_args, is_sha, is_valid_ref, log_args, par_map, parse_changes, parse_history, parse_history_paths, parse_log,
+    repo_searched, take_ready, web_url, BranchUse, ChangedFile, Commit, FileStatus, Filter, GitRun, HistoryFile, Repo, RepoProgress, DEFAULT_SCAN_DEPTH, PARALLEL,
 };
 use serde::{Deserialize, Serialize};
 
@@ -367,11 +367,52 @@ pub struct RowView {
     /// that worktree's branch), a sha (only on that detached worktree), or, with the branch
     /// filter on, the branch as typed.
     pub source: String,
+    /// File History only: the file as this commit saw it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<HistoryFileView>,
 }
 
 impl RowView {
-    fn of(c: Commit, source: String) -> Self {
-        RowView { repo: c.repo, sha: c.sha, time: c.time, author: c.author, email: c.email, subject: c.subject, parents: c.parents, source }
+    fn of(c: Commit, source: String, file: Option<HistoryFileView>) -> Self {
+        RowView { repo: c.repo, sha: c.sha, time: c.time, author: c.author, email: c.email, subject: c.subject, parents: c.parents, source, file }
+    }
+}
+
+/// One file's history in one repository, as the UI asks for it. The repository must be one of the
+/// backend's own, and the path a plain path in it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryReq {
+    pub repo: String,
+    pub path: String,
+}
+
+/// The file a File History row is about: its name after the commit, the name it was renamed or
+/// copied from, and the status words of `ChangedFileView` (`None` when git listed no change, as for
+/// a merge).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryFileView {
+    pub path: String,
+    pub from: Option<String>,
+    pub status: Option<&'static str>,
+}
+
+impl From<HistoryFile> for HistoryFileView {
+    fn from(h: HistoryFile) -> Self {
+        HistoryFileView { path: h.path, from: h.from, status: h.status.as_ref().map(status_word) }
+    }
+}
+
+/// The UI's word for a status.
+fn status_word(s: &FileStatus) -> &'static str {
+    match s {
+        FileStatus::Added => "added",
+        FileStatus::Modified => "modified",
+        FileStatus::Deleted => "deleted",
+        FileStatus::Renamed { .. } => "renamed",
+        FileStatus::Copied { .. } => "copied",
+        FileStatus::TypeChanged => "typeChanged",
     }
 }
 
@@ -427,13 +468,10 @@ pub struct ChangedFileView {
 
 impl From<ChangedFile> for ChangedFileView {
     fn from(c: ChangedFile) -> Self {
-        let (status, from) = match c.status {
-            FileStatus::Added => ("added", None),
-            FileStatus::Modified => ("modified", None),
-            FileStatus::Deleted => ("deleted", None),
-            FileStatus::Renamed { from } => ("renamed", Some(from)),
-            FileStatus::Copied { from } => ("copied", Some(from)),
-            FileStatus::TypeChanged => ("typeChanged", None),
+        let status = status_word(&c.status);
+        let from = match c.status {
+            FileStatus::Renamed { from } | FileStatus::Copied { from } => Some(from),
+            _ => None,
         };
         ChangedFileView { path: c.path, status, from, added: c.added, removed: c.removed }
     }
@@ -508,7 +546,21 @@ struct QueryState {
     progress: BTreeMap<String, RepoProgress>,
     failures: Vec<Failure>,
     branch_use: Option<BranchUse>,
+    /// File History only.
+    history: Option<HistoryState>,
 }
+
+/// A File History query: every name the file has had (read once, on the first page), the name
+/// it had at the oldest commit read so far (where a status-less record on the next page starts),
+/// and each pending commit's file.
+struct HistoryState {
+    paths: Vec<String>,
+    last: String,
+    files: HashMap<String, HistoryFile>,
+}
+
+/// The cancellation channel of File History, so it never supersedes the log's paging.
+pub const HISTORY_CHANNEL: &str = "history";
 
 /// What discovery ran over; a change means the cached list is stale.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -641,10 +693,11 @@ impl GitLog {
         lock(&self.repos).is_some()
     }
 
-    /// A window closed: drop its query and kill its children.
+    /// A window closed: drop its queries (the log's and File History's) and kill their children.
     pub fn forget_window(&self, window: &str) {
         self.runner.forget_window(window);
-        lock(&self.queries).remove(window);
+        let prefix = format!("{window}#");
+        lock(&self.queries).retain(|k, _| k != window && !k.starts_with(&prefix));
     }
 
     pub(crate) fn cached(&self) -> Arc<Vec<Repo>> {
@@ -657,19 +710,37 @@ impl GitLog {
 
     /// One page of the merged log. `more: false` starts query `query_id` (superseding the
     /// window's previous one, whose children are killed); `more: true` continues it.
-    pub fn page(&self, window: &str, query_id: u64, repos: &[String], filter: &FilterView, more: bool) -> Result<PageView, String> {
-        let tag = Tag { window: window.to_string(), query: query_id };
+    ///
+    /// With `history`: one file's history in one repository, followed across renames, on its own
+    /// channel (`<window>#history`) so it never supersedes the log. Only `history.repo` is
+    /// searched, whatever `repos` says, and of the filter only the branch applies.
+    pub fn page(&self, window: &str, query_id: u64, repos: &[String], filter: &FilterView, more: bool, history: Option<&HistoryReq>) -> Result<PageView, String> {
+        if let Some(h) = history {
+            if !tree_path_ok(&h.path) {
+                return Err("Not a path in the repository".into());
+            }
+            // Only a repository from the backend's own list.
+            self.cwd_of(&h.repo)?;
+        }
+        let key = match history {
+            Some(_) => channel(window, HISTORY_CHANNEL),
+            None => window.to_string(),
+        };
+        let tag = Tag { window: key.clone(), query: query_id };
         let state = if more {
-            let existing = lock(&self.queries).get(window).cloned();
+            let existing = lock(&self.queries).get(&key).cloned();
             match existing {
                 Some(s) if lock(&s).query == query_id && self.runner.is_current(&tag) => s,
                 _ => return Err(STALE.into()),
             }
         } else {
-            if !self.runner.set_current(window, query_id) {
+            if !self.runner.set_current(&key, query_id) {
                 return Err(STALE.into());
             }
-            let st = self.start(&tag, repos, filter)?;
+            let st = match history {
+                None => self.start(&tag, repos, filter)?,
+                Some(h) => self.start_history(&tag, h, filter)?,
+            };
             Arc::new(Mutex::new(st))
         };
         let view = {
@@ -682,9 +753,33 @@ impl GitLog {
             return Err(STALE.into());
         }
         if !more {
-            q.insert(window.to_string(), state);
+            q.insert(key, state);
         }
         Ok(view)
+    }
+
+    /// A new File History query: the repository's heads under the branch filter (nothing else of
+    /// the filter), then one unfiltered `--follow` walk for every name the file has had. That
+    /// walk failing makes the repository a failure row, like a log that fails.
+    fn start_history(&self, tag: &Tag, h: &HistoryReq, fv: &FilterView) -> Result<QueryState, String> {
+        let only_branch = FilterView { branch: fv.branch.clone(), ..Default::default() };
+        let mut st = self.start(tag, std::slice::from_ref(&h.repo), &only_branch)?;
+        let mut paths = vec![h.path.clone()];
+        if let Some(q) = st.repos.first() {
+            let args = history_paths_args(&h.path, &q.heads);
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            match self.runner.text(Some(tag), &q.cwd, &args) {
+                Ok(out) => paths = parse_history_paths(&out, &h.path),
+                Err(RunError::Cancelled) => return Err(STALE.into()),
+                Err(e) => {
+                    let id = q.id.clone();
+                    st.progress.remove(&id);
+                    st.failures.push(Failure { repo: id, reason: e.reason() });
+                }
+            }
+        }
+        st.history = Some(HistoryState { paths, last: h.path.clone(), files: HashMap::new() });
+        Ok(st)
     }
 
     /// A new query: each selected repository's `user.email` (for Me), whether it has the
@@ -747,7 +842,7 @@ impl GitLog {
         }
         let branch_use = branch.as_deref().map(|b| BranchUse::tally(b, has));
         let progress = rq.iter().map(|q| (q.id.clone(), RepoProgress::default())).collect();
-        Ok(QueryState { query: tag.query, filter, repos: rq, progress, failures: Vec::new(), branch_use })
+        Ok(QueryState { query: tag.query, filter, repos: rq, progress, failures: Vec::new(), branch_use, history: None })
     }
 
     /// Refill and take ready rows until a page is full, everything is drained, or
@@ -765,9 +860,13 @@ impl GitLog {
             if !need.is_empty() {
                 let filter = &st.filter;
                 let progress = &st.progress;
+                let history = st.history.as_ref();
                 let got = par_map(&need, |q| {
                     let skip = progress.get(&q.id).map_or(0, |p| p.fetched);
-                    let args = log_args(filter, &q.heads, q.me.as_deref(), page, skip);
+                    let args = match history {
+                        Some(h) => history_args(&q.heads, page, skip, &h.paths),
+                        None => log_args(filter, &q.heads, q.me.as_deref(), page, skip),
+                    };
                     let args: Vec<&str> = args.iter().map(String::as_str).collect();
                     self.runner.run(Some(tag), &q.cwd, &args)
                 });
@@ -780,11 +879,26 @@ impl GitLog {
                             st.failures.push(Failure { repo: id, reason: e.reason() });
                         }
                         Ok(out) => {
-                            let n = count_records(&out);
+                            let text = String::from_utf8_lossy(&out);
+                            let (n, commits) = match st.history.as_mut() {
+                                Some(h) => {
+                                    let (rows, n) = parse_history(&text, &h.last);
+                                    if let Some((_, f)) = rows.last() {
+                                        h.last = f.from.clone().unwrap_or_else(|| f.path.clone());
+                                    }
+                                    let mut commits = Vec::with_capacity(rows.len());
+                                    for (c, f) in rows {
+                                        h.files.insert(c.sha.clone(), f);
+                                        commits.push(c);
+                                    }
+                                    (n, commits)
+                                }
+                                None => (count_records(&out), parse_log(&text)),
+                            };
                             let Some(p) = st.progress.get_mut(&id) else { continue };
                             p.fetched += n;
                             p.exhausted = n < page;
-                            p.pending.extend(parse_log(&String::from_utf8_lossy(&out)).into_iter().map(|mut c| {
+                            p.pending.extend(commits.into_iter().map(|mut c| {
                                 c.repo = id.clone();
                                 c
                             }));
@@ -812,7 +926,8 @@ impl GitLog {
                 .into_iter()
                 .map(|c| {
                     let src = st.repos.iter().find(|q| q.id == c.repo).map(|q| q.source_of(&c.sha)).unwrap_or_default();
-                    RowView::of(c, src)
+                    let file = st.history.as_mut().and_then(|h| h.files.remove(&c.sha)).map(HistoryFileView::from);
+                    RowView::of(c, src, file)
                 })
                 .collect(),
             failures: st.failures.clone(),
@@ -1001,6 +1116,7 @@ pub async fn gitlog_page(
     repos: Vec<String>,
     filter: FilterView,
     more: bool,
+    history: Option<HistoryReq>,
     window: tauri::Window,
     state: tauri::State<'_, GitLogState>,
 ) -> Result<PageView, String> {
@@ -1012,7 +1128,7 @@ pub async fn gitlog_page(
             let (roots, depth, exclude) = workspace_scan(&crate::config::config_path(), &claudegate_core::paths::claudegate_home());
             gl.repos_for(&roots, depth, &exclude, false);
         }
-        gl.page(&label, query_id, &repos, &filter, more)
+        gl.page(&label, query_id, &repos, &filter, more, history.as_ref())
     })
     .await?
 }
