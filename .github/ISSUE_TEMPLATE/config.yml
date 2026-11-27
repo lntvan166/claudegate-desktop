@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: ClaudeGate VS Code extension
+    url: https://github.com/lntvan166/claudegate/issues
+    about: Problems with the extension or with which edits the hook captures belong there.
