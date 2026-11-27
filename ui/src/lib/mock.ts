@@ -914,6 +914,7 @@ const gitlogMock: Pick<
   | "gitlogOpenRemote"
   | "gitlogCombined"
   | "gitlogCombinedLeft"
+  | "gitlogCombinedCancel"
   | "gitlogRevFile"
   | "gitlogBlame"
   | "gitlogBlameCancel"
@@ -1047,6 +1048,9 @@ const gitlogMock: Pick<
     return true;
   },
   gitlogCombined: mockCombined,
+  gitlogCombinedCancel: async (queryId) => {
+    glCombinedNewest = Math.max(glCombinedNewest, queryId);
+  },
   gitlogCombinedLeft: async (queryId, _repo, _last, path): Promise<CombinedLeft> => {
     // `?gitlog=slowleft` makes this read outlast a newer selection (to see a superseded read recover).
     await new Promise((r) => setTimeout(r, new URLSearchParams(location.search).get("gitlog") === "slowleft" ? 1500 : 40));

@@ -61,11 +61,19 @@ export function noMatchText(q: string): string {
   return `No branch named "${q}" in any repository.`;
 }
 
-/** The view's description: the pair, without "origin/" on a remote side (a local `origin/x` keeps it). */
-export function tabTitle(p: Pair | null): string {
-  if (!p || !p.left || !p.right) return "";
-  const short = (n: string, remote: boolean) => (remote ? n.replace(/^origin\//, "") : n);
-  return `${short(p.left, p.leftRemote)} ↔ ${short(p.right, p.rightRemote)}`;
+/**
+ * The picker's active row: the row keyed `activeKey` (`<group>\u0000<item>`), else the same item
+ * in another group (its Favorites copy went), else the position last chosen.
+ */
+export function activeIndex(keys: string[], activeKey: string | null, lastIndex: number): number {
+  if (activeKey !== null) {
+    const at = keys.indexOf(activeKey);
+    if (at >= 0) return at;
+    const item = activeKey.slice(activeKey.indexOf("\u0000"));
+    const same = keys.findIndex((k) => k.endsWith(item));
+    if (same >= 0) return same;
+  }
+  return Math.max(0, Math.min(lastIndex, keys.length - 1));
 }
 
 // ---- Compare mode (gitlog_compare.rs) ----------------------------------------------------------
@@ -181,11 +189,12 @@ export function pairDuplicates(left: readonly SideCommit[], right: readonly Side
   return out;
 }
 
-/** The note on a compare diff: the merge base against that side's tip, without "origin/" on a remote side. */
+/**
+ * The note on a compare diff: the merge base against that side's tip, by the branch's full name.
+ * A remote side keeps its `origin/`: local `main` and `origin/main` are different tips.
+ */
 export function compareBanner(side: CompareSide, p: Pair): { tone: "info"; text: string } {
-  const name = side === "left" ? p.left : p.right;
-  const remote = side === "left" ? p.leftRemote : p.rightRemote;
-  return { tone: "info", text: `merge base ↔ ${remote ? name.replace(/^origin\//, "") : name}` };
+  return { tone: "info", text: `merge base ↔ ${side === "left" ? p.left : p.right}` };
 }
 
 /** `pair` is the pair `view` answers (it trails the toolbar while a newer read is in flight). */

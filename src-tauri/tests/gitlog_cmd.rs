@@ -699,7 +699,10 @@ fn signed_commits_survive_show_signature() {
     let key = root.join("signing-key");
     let made = std::process::Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", ""]).arg("-f").arg(&key).status().is_ok_and(|s| s.success());
     if !made {
-        eprintln!("ssh-keygen unavailable: the argv is still checked in core's gitlog_filter tests");
+        // `eprintln!` is captured by the test harness and only shown when a test fails; a write
+        // to the stderr handle is not, so the skip is visible in every run.
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "SKIPPED signed_commits_survive_show_signature: ssh-keygen unavailable (the argv is still checked in core's gitlog_filter tests)");
         return;
     }
     std::fs::write(d.join("a.txt"), "b").unwrap();
@@ -714,6 +717,11 @@ fn signed_commits_survive_show_signature() {
     assert_eq!(subjects, vec!["signed", "plain"]);
     let h = g.page("main", 2, &ids, &FilterView::default(), false, Some(&hist(&ids[0], "a.txt"))).unwrap();
     assert_eq!(h.rows.len(), 2);
+    // The single-commit reads: the message pane and the changed-file list carry no signature text.
+    let signed = &p.rows[0].sha;
+    assert_eq!(g.message(&ids[0], signed).unwrap(), "signed");
+    let files: Vec<String> = g.changes(&ids[0], signed).unwrap().into_iter().map(|f| f.path).collect();
+    assert_eq!(files, vec!["a.txt".to_string()]);
 }
 
 fn blamed(g: &GitLog, q: u64, id: &str, rev: &str, path: &str, line: u32) -> Option<(String, String)> {
@@ -815,4 +823,18 @@ fn blame_cancel_kills_and_supersedes() {
     g.blame_cancel("main", 10);
     assert_eq!(g.blame("main", 9, &id, &sha, "a.txt", 1), Err(STALE.into()), "a blame older than the cancel");
     assert!(g.blame("main", 11, &id, &sha, "a.txt", 1).unwrap().is_some());
+}
+
+/// `blame.ignoreRevsFile` naming a missing file makes git fail every blame; it is asked again
+/// without the ignore list instead of looking dead.
+#[test]
+fn blame_survives_a_missing_ignore_revs_file() {
+    let (_t, root) = tmp();
+    let d = root.join("acme-api");
+    init(&d);
+    let sha = commit_as(&d, "ann", &[("a.txt", Some(b"one\n"))], "first", BASE);
+    git(&d, &["config", "blame.ignoreRevsFile", ".git-blame-ignore-revs"]);
+    let g = gl();
+    let id = ids_of(&g, &[root])[0].clone();
+    assert_eq!(blamed(&g, 1, &id, &sha, "a.txt", 1), Some(("ann".into(), "first".into())));
 }

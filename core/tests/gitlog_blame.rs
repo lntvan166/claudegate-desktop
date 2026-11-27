@@ -1,10 +1,13 @@
-use claudegate_core::gitlog::{blame_args, parse_blame_porcelain, BlameLine};
+use claudegate_core::gitlog::{blame_args, blame_args_no_ignore_revs, is_missing_ignore_revs, parse_blame_porcelain, BlameLine};
 
 const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 #[test]
 fn blame_args_shape() {
     assert_eq!(blame_args(A, "-x.ts", 7), ["blame", "--porcelain", "--no-textconv", "-L7,7", A, "--", "-x.ts"]);
+    assert_eq!(blame_args_no_ignore_revs(A, "-x.ts", 7), ["blame", "--no-ignore-revs-file", "--porcelain", "--no-textconv", "-L7,7", A, "--", "-x.ts"]);
+    assert!(is_missing_ignore_revs("fatal: could not open object name list: .git-blame-ignore-revs"));
+    assert!(!is_missing_ignore_revs("fatal: no such path 'x' in HEAD"));
 }
 
 #[test]

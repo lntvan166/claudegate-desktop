@@ -220,6 +220,8 @@ export class CombinedLoad {
     private readonly fetch: CombinedFetcher,
     private readonly emit: (s: CombinedState) => void,
     private readonly gate: QueryGate = queryGate,
+    /** Tells the backend to drop the read in flight (kills its git), with a fresh query id. */
+    private readonly cancel: (id: number) => void = () => {},
   ) {}
 
   /** The id of the query the shown tree answers (what a left-side read is tied to). */
@@ -247,8 +249,9 @@ export class CombinedLoad {
     }
   }
 
-  /** Back to one commit: whatever is in flight is ignored. */
+  /** Back to one commit: whatever is in flight is ignored, and the backend is told to kill it. */
   clear() {
+    if (this.state.loading) this.cancel(this.gate.begin());
     this.current = 0;
     this.set(EMPTY_COMBINED);
   }

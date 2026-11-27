@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { highlight, inReposText, noMatchText, pickerGroups, pushRecent, tabTitle, type BranchName, type Pair } from "./compare";
+import { activeIndex, highlight, inReposText, noMatchText, pickerGroups, pushRecent, type BranchName, type Pair } from "./compare";
 
 const pair = (left: string, right: string, leftRemote = false, rightRemote = false): Pair => ({ left, leftRemote, right, rightRemote });
 const p1 = pair("origin/release-1.4", "origin/main", true, true);
@@ -52,11 +52,14 @@ describe("compare helpers", () => {
     expect(noMatchText("zzz")).toBe('No branch named "zzz" in any repository.');
   });
 
-  it("titles the pair without origin/", () => {
-    expect(tabTitle(p1)).toBe("release-1.4 ↔ main");
-    expect(tabTitle(null)).toBe("");
-    expect(tabTitle(pair("origin/x", "main"))).toBe("origin/x ↔ main");
-    expect(tabTitle(pair("main", ""))).toBe("");
+  it("keeps the active row when its Favorites copy goes (D2)", () => {
+    const before = ["Favorites\u0000false:main", "Branches\u0000false:dev", "Branches\u0000false:main"];
+    const after = ["Branches\u0000false:dev", "Branches\u0000false:main"];
+    // Nothing moved yet: the highlight is only a position, and index 0 is now another branch.
+    expect(after[activeIndex(after, null, 0)]).toBe("Branches\u0000false:dev");
+    // Ctrl+D pins the row by its key first (setActive(active)): it follows main to its own group.
+    const pinned = before[activeIndex(before, null, 0)];
+    expect(after[activeIndex(after, pinned, 0)]).toBe("Branches\u0000false:main");
   });
 
   it("keeps recent pairs newest first, once each, at most five", () => {
@@ -163,8 +166,10 @@ describe("compare mode", () => {
   });
 
   it("labels a compare diff", () => {
-    expect(compareBanner("left", p1)).toEqual({ tone: "info", text: "merge base ↔ release-1.4" });
-    expect(compareBanner("right", p1)).toEqual({ tone: "info", text: "merge base ↔ main" });
+    // A remote side keeps origin/: local main and origin/main must not read the same.
+    expect(compareBanner("left", p1)).toEqual({ tone: "info", text: "merge base ↔ origin/release-1.4" });
+    expect(compareBanner("right", p1)).toEqual({ tone: "info", text: "merge base ↔ origin/main" });
+    expect(compareBanner("right", pair("origin/main", "main", true, false))).toEqual({ tone: "info", text: "merge base ↔ main" });
     // A local branch keeps its whole name.
     expect(compareBanner("left", pair("origin/x", "main"))).toEqual({ tone: "info", text: "merge base ↔ origin/x" });
   });

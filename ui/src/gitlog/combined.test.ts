@@ -189,6 +189,28 @@ describe("CombinedLoad", () => {
     await p;
     expect(states.at(-1)).toEqual({ loading: false, view: null, error: null });
   });
+
+  it("clear cancels the read in flight with a newer id, and only when one is in flight (M1)", async () => {
+    const d = deferred<CombinedView>();
+    const cancels: number[] = [];
+    let asked = 0;
+    const load = new CombinedLoad(
+      (id) => ((asked = id), d.promise),
+      () => {},
+      new QueryGate(1000),
+      (id) => cancels.push(id),
+    );
+    load.clear();
+    expect(cancels).toEqual([]);
+    const p = load.start(items("a"));
+    load.clear();
+    expect(cancels).toHaveLength(1);
+    expect(cancels[0]).toBeGreaterThan(asked);
+    d.resolve(view(asked, "A"));
+    await p;
+    load.clear();
+    expect(cancels).toHaveLength(1);
+  });
 });
 
 describe("races of the open file", () => {

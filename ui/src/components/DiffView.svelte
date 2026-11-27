@@ -171,9 +171,10 @@
     });
   });
 
-  // Hover is a Git log feature here: off in the review's diffs, as before blame existed.
+  // Hover shows blame only: on while Blame is on in a Git log diff, off otherwise (and always off
+  // in the review's diffs, as before blame existed).
   $effect(() => {
-    const on = !!external?.blame;
+    const on = !!external?.blame?.on;
     const ed = editor;
     if (!ed) return;
     ed.getOriginalEditor().updateOptions({ hover: { enabled: on ? "on" : "off" } });
@@ -503,7 +504,7 @@
       diffWordWrap: wrap ? "on" : "off",
       fixedOverflowWidgets: true,
       ariaLabel: "Diff",
-      hover: { enabled: external?.blame ? "on" : "off" },
+      hover: { enabled: external?.blame?.on ? "on" : "off" },
     });
     wireNavigation(m, "original", ed.getOriginalEditor());
     wireNavigation(m, "modified", ed.getModifiedEditor());

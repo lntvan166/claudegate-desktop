@@ -59,3 +59,12 @@ export function combinedBlameSides(repo: string, f: CombinedFile, leftMerged: bo
 export function compareBlameSides(repo: string, base: string, tip: string, path: string, from: string | null): BlameSides {
   return { original: { repo, rev: base, path: from ?? path }, modified: { repo, rev: tip, path } };
 }
+
+/**
+ * The config after the Blame setting was saved: only `blame` is taken from what the backend
+ * returns. The rest stays as shown, since it can hold in-memory state the backend never stored
+ * (the ticks of a `claudegate log PATH` launch).
+ */
+export function withBlame<C extends { blame: boolean }>(cfg: C, saved: { blame: boolean }): C {
+  return { ...cfg, blame: saved.blame };
+}

@@ -4,7 +4,7 @@
 
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { highlight, inReposText, noMatchText, pickerGroups, type BranchName, type Pair, type PickerItem } from "./compare";
+  import { activeIndex, highlight, inReposText, noMatchText, pickerGroups, type BranchName, type Pair, type PickerItem } from "./compare";
   import type { BranchKey } from "./repos";
 
   // The Branch picker: a search box over Recent pairs, Favorites, Local and Remote. It filters the
@@ -51,17 +51,7 @@
   let activeKey = $state<string | null>(null);
   /** The position last chosen: where the active row falls back to when its branch is gone. */
   let lastIndex = 0;
-  const active = $derived.by(() => {
-    if (activeKey !== null) {
-      const at = keys.indexOf(activeKey);
-      if (at >= 0) return at;
-      // Its Favorites copy went (un-favourited there): the same branch in its own group.
-      const item = activeKey.slice(activeKey.indexOf("\u0000"));
-      const same = keys.findIndex((k) => k.endsWith(item));
-      if (same >= 0) return same;
-    }
-    return Math.max(0, Math.min(lastIndex, keys.length - 1));
-  });
+  const active = $derived(activeIndex(keys, activeKey, lastIndex));
   // The pointer takes the active row only when it moves (mousemove, not mouseenter): rows that
   // shift under a resting pointer, as a Ctrl+D toggle makes them, must not steal it from the keys.
   function setActive(i: number) {
@@ -128,7 +118,11 @@
       // The keyboard way to ★: the star itself is not a tab stop.
       e.preventDefault();
       const it = items[active];
-      if (it?.kind === "name") onfavorite({ name: it.name, remote: it.remote }, !it.favorite);
+      if (it?.kind !== "name") return;
+      // Pin the active row by its key first: with no key yet (nothing moved), un-favouriting the
+      // Favorites copy at the top would leave the highlight on whatever row takes its place.
+      setActive(active);
+      onfavorite({ name: it.name, remote: it.remote }, !it.favorite);
     } else if (e.key === "Tab") {
       // Leaving the search box leaves the picker: focus goes back to the anchor, and the browser moves on from there.
       close();

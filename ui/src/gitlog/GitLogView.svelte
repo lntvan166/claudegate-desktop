@@ -8,6 +8,7 @@
     gitlogBlameSetting,
     gitlogChanges,
     gitlogCombined,
+    gitlogCombinedCancel,
     gitlogCombinedLeft,
     gitlogConfig,
     gitlogFile,
@@ -58,7 +59,7 @@
     type ChangedFile,
     type DiffPane,
   } from "./changes";
-  import { combinedBlameSides, commitBlameSides, compareBlameSides, type BlameLine, type BlameRef, type BlameSides } from "./blame";
+  import { combinedBlameSides, commitBlameSides, compareBlameSides, withBlame, type BlameLine, type BlameRef, type BlameSides } from "./blame";
   import ComparePane from "./ComparePane.svelte";
   import { compareBanner, compareOpenKey, type CompareOpen } from "./compare";
   import Filters from "./Filters.svelte";
@@ -277,6 +278,8 @@
   const combinedLoad = new CombinedLoad(
     (id, items) => gitlogCombined(id, items),
     (s) => onCombined(s),
+    queryGate,
+    (id) => void gitlogCombinedCancel(id).catch(() => {}),
   );
   const fetchCombined = leadingDebounce(() => {
     if (isCombined(picked)) void combinedLoad.start(itemsOf(picked));
@@ -372,7 +375,7 @@
     const left = async (): Promise<FileView> => {
       if (plan.left === "missing") return { kind: "missing" };
       if (plan.left === "rev") return readRev();
-      const ans = await gitlogCombinedLeft(qid, repo, f.last, f.path, [...f.shas].reverse());
+      const ans = await gitlogCombinedLeft(qid, repo, f.last, f.path, [...f.shas].reverse(), queryGate.begin());
       answer = ans;
       if (ans.kind === "text") return { kind: "text", value: ans.value };
       // The backend could not take the selection apart after all: one diff across it.
@@ -784,7 +787,8 @@
 
   async function setBlame(on: boolean) {
     try {
-      cfg = await gitlogBlameSetting(on);
+      const c = await gitlogBlameSetting(on);
+      cfg = withBlame(cfg, c);
     } catch (e) {
       onnotice(`Couldn't save the Blame setting: ${e}`);
     }

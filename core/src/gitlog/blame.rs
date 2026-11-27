@@ -14,6 +14,20 @@ pub fn blame_args(rev: &str, path: &str, line: u32) -> Vec<String> {
     ["blame", "--porcelain", "--no-textconv", &format!("-L{line},{line}"), rev, "--", path].map(String::from).to_vec()
 }
 
+/// [`blame_args`] with the ignore-revs files dropped (`--no-ignore-revs-file`), for a repository
+/// whose `blame.ignoreRevsFile` names a file that isn't there: git then fails every blame. An
+/// empty `-c blame.ignoreRevsFile=` does not help, as git reads the configured file before it.
+pub fn blame_args_no_ignore_revs(rev: &str, path: &str, line: u32) -> Vec<String> {
+    let mut a = blame_args(rev, path, line);
+    a.insert(1, "--no-ignore-revs-file".into());
+    a
+}
+
+/// Whether git's first stderr line says an ignore-revs file could not be read.
+pub fn is_missing_ignore_revs(err: &str) -> bool {
+    err.contains("could not open object name list")
+}
+
 /// The commit that last changed a line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlameLine {

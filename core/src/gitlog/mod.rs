@@ -12,7 +12,7 @@ pub mod merge;
 pub mod parse;
 pub mod remote;
 
-pub use blame::{blame_args, parse_blame_porcelain, BlameLine};
+pub use blame::{blame_args, blame_args_no_ignore_revs, is_missing_ignore_revs, parse_blame_porcelain, BlameLine};
 pub use combined::{
     combine_repo, exclude_for, left_and_right, left_side, merge_base_args, parse_range_log, range_log_args, read_combined, show_raw_args, Blob, CombinedFile, CombinedRead, Fallback, GitRead, LeftSide, Mode, NetStatus, RangeCommit, RawChange, ReadError, RepoRead, COMBINED_LIMIT, GITLINK_MODE, MERGE_LIMIT_BYTES,
     MERGE_LIMIT_LINES, RANGE_FORMAT, SLOW_FILES_AT_ONCE,

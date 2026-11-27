@@ -105,3 +105,14 @@ describe("compare blame", () => {
     expect(compareBlameSides("/r/.git", base, tip, "a.ts", null).original).toEqual({ repo: "/r/.git", rev: base, path: "a.ts" });
   });
 });
+
+describe("blame setting", () => {
+  it("toggling blame keeps the launch-only ticks shown in memory", async () => {
+    const { withBlame } = await import("./blame");
+    const shown = { blame: false, ticked: ["/a/.git"], panes: { log: 1 } };
+    // The backend returns the stored ticks (all repositories), not the launch's.
+    const saved = { blame: true, ticked: null, panes: { log: 9 } };
+    expect(withBlame(shown, saved)).toEqual({ blame: true, ticked: ["/a/.git"], panes: { log: 1 } });
+    expect(withBlame({ ...shown, blame: true }, { ...saved, blame: false }).blame).toBe(false);
+  });
+});

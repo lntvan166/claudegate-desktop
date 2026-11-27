@@ -21,7 +21,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use claudegate_core::gitlog::{
-    ahead_behind, blame_args, count_records, discover, heads_for, history_args, history_paths_args, is_sha, is_valid_ref, log_args, par_map, parse_blame_porcelain, parse_changes, parse_history, parse_history_paths, parse_log,
+    ahead_behind, blame_args, blame_args_no_ignore_revs, count_records, discover, heads_for, history_args, history_paths_args, is_missing_ignore_revs, is_sha, is_valid_ref, log_args, par_map, parse_blame_porcelain, parse_changes, parse_history, parse_history_paths, parse_log,
     repo_searched, take_ready, web_url, BranchUse, ChangedFile, Commit, FileStatus, Filter, GitRun, HistoryFile, Repo, RepoProgress, DEFAULT_SCAN_DEPTH, PARALLEL,
 };
 use serde::{Deserialize, Serialize};
@@ -997,8 +997,10 @@ impl GitLog {
         })
     }
 
-    fn show_args<'a>(kind: &'a str, sha: &'a str) -> [&'a str; 6] {
-        ["show", "-M", "--diff-merges=first-parent", "--format=", kind, sha]
+    /// `--no-show-signature` overrides a user's `log.showSignature=true`, which writes the
+    /// signature check ("No signature", "Good … signature") ahead of the file list.
+    fn show_args<'a>(kind: &'a str, sha: &'a str) -> [&'a str; 7] {
+        ["show", "-M", "--diff-merges=first-parent", "--no-show-signature", "--format=", kind, sha]
     }
 
     /// The files `sha` changed against its first parent. Two calls: git drops `--numstat`
@@ -1090,9 +1092,17 @@ impl GitLog {
         if !self.runner.set_current(&tag.window, query_id) {
             return Err(STALE.into());
         }
-        let args = blame_args(rev, path, line);
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        match self.runner.run_in(Some(&tag), Share::Reserved, &cwd, &args) {
+        let run = |args: Vec<String>| {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            self.runner.run_in(Some(&tag), Share::Reserved, &cwd, &args)
+        };
+        let out = match run(blame_args(rev, path, line)) {
+            // `blame.ignoreRevsFile` names a file that isn't there (a repository that doesn't
+            // ship one): every blame would fail, so ask once more without the ignore list.
+            Err(RunError::Failed(why)) if is_missing_ignore_revs(&why) => run(blame_args_no_ignore_revs(rev, path, line)),
+            r => r,
+        };
+        match out {
             Ok(out) => Ok(parse_blame_porcelain(&String::from_utf8_lossy(&out)).map(|b| BlameLineView {
                 sha: b.sha,
                 author: b.author,
@@ -1149,7 +1159,7 @@ impl GitLog {
             return Err("Not a commit id".into());
         }
         let cwd = self.cwd_of(repo)?;
-        let m = self.runner.text(None, &cwd, &["show", "-s", "--format=%B", sha]).map_err(|e| e.reason())?;
+        let m = self.runner.text(None, &cwd, &["show", "-s", "--no-show-signature", "--format=%B", sha]).map_err(|e| e.reason())?;
         Ok(m.trim_end().to_string())
     }
 }

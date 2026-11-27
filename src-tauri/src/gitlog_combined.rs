@@ -18,6 +18,10 @@ use crate::gitlog::{channel, tree_path_ok, GitLog, GitLogState, RunError, Runner
 
 /// The channel Combined Changes' queries run on.
 pub const CHANNEL: &str = "combined";
+/// The left-side reads of the open file (`<window>#combined-left`): each read is a query of its
+/// own there, so opening another file supersedes (and kills) the previous file's chain without
+/// touching the selection's tree.
+pub const LEFT_CHANNEL: &str = "combined-left";
 
 /// One selected commit, as the webview names it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
@@ -218,6 +222,8 @@ impl GitLog {
         if !self.runner.set_current(&tag.window, query_id) {
             return Err(STALE.into());
         }
+        // The previous selection's left-side reads answer a tree that is gone: kill them too.
+        self.runner.set_current(&channel(window, LEFT_CHANNEL), query_id);
         let reads = par_map(&groups, |(_, cwd, shas)| read_combined(&TaggedGit { runner: &self.runner, tag: &tag, share: Share::Paging, cwd }, shas));
         let mut repos = Vec::new();
         for ((repo, _, _), r) in groups.into_iter().zip(reads) {
@@ -234,10 +240,11 @@ impl GitLog {
     }
 
     /// The left side of one file of the current selection: `path` at `last` with the commits
-    /// `without` (newest first) taken back out. It runs under the selection's query and never
-    /// starts one, so opening a file never supersedes the tree; a superseded selection returns
-    /// `Err(STALE)`.
-    pub fn combined_left(&self, window: &str, query_id: u64, repo: &str, last: &str, path: &str, without: &[String]) -> Result<CombinedLeftView, String> {
+    /// `without` (newest first) taken back out. `query_id` is the selection's: the read is refused,
+    /// and answers `Err(STALE)`, when that is no longer the window's `combined` query. The read
+    /// itself is query `left_id` on the window's `combined-left` channel, so a newer left read
+    /// supersedes (and kills) this one, while opening a file never supersedes the tree.
+    pub fn combined_left(&self, window: &str, query_id: u64, left_id: u64, repo: &str, last: &str, path: &str, without: &[String]) -> Result<CombinedLeftView, String> {
         // Each commit taken out is a few git reads in sequence: bounded like a selection, and
         // each at most once.
         if without.len() > COMBINED_LIMIT {
@@ -254,8 +261,14 @@ impl GitLog {
             return Err(bad_path());
         }
         let cwd = self.cwd_of(repo)?;
-        let tag = Tag { window: channel(window, CHANNEL), query: query_id };
-        if !self.runner.is_current(&tag) {
+        let selection = Tag { window: channel(window, CHANNEL), query: query_id };
+        if !self.runner.is_current(&selection) {
+            return Err(STALE.into());
+        }
+        let tag = Tag { window: channel(window, LEFT_CHANNEL), query: left_id };
+        // Checked again after: a new selection that landed in between has already killed the
+        // left channel's children, but not this one's, which registers only now.
+        if !self.runner.set_current(&tag.window, left_id) || !self.runner.is_current(&selection) {
             return Err(STALE.into());
         }
         let git = TaggedGit { runner: &self.runner, tag: &tag, share: Share::Reserved, cwd: &cwd };
@@ -264,13 +277,22 @@ impl GitLog {
             Err(ReadError::Cancelled) => return Err(STALE.into()),
             Err(ReadError::Failed(why)) => return Err(why),
         };
-        if !self.runner.is_current(&tag) {
+        if !self.runner.is_current(&selection) || !self.runner.is_current(&tag) {
             return Err(STALE.into());
         }
         Ok(match left {
             LeftSide::Text(t) => CombinedLeftView::Text(t),
             LeftSide::Fallback(f) => CombinedLeftView::Fallback(reason_name(f)),
         })
+    }
+
+    /// Drops the window's combined read in flight (the selection went back to one commit): the
+    /// tree's git and the open file's left-side git are killed, and an answer older than
+    /// `query_id` arriving late is stale. An id older than the current one kills nothing.
+    pub fn combined_cancel(&self, window: &str, query_id: u64) {
+        if self.runner.set_current(&channel(window, CHANNEL), query_id) {
+            self.runner.set_current(&channel(window, LEFT_CHANNEL), query_id);
+        }
     }
 }
 
@@ -292,12 +314,21 @@ pub async fn gitlog_combined_left(
     last: String,
     path: String,
     without: Vec<String>,
+    left_id: u64,
     window: tauri::Window,
     state: tauri::State<'_, GitLogState>,
 ) -> Result<CombinedLeftView, String> {
     let gl = state.inner().0.clone();
     let label = window.label().to_string();
-    crate::commands::blocking(move || gl.combined_left(&label, query_id, &repo, &last, &path, &without)).await?
+    crate::commands::blocking(move || gl.combined_left(&label, query_id, left_id, &repo, &last, &path, &without)).await?
+}
+
+/// Cancels the window's combined read in flight (the selection went back to one commit).
+#[tauri::command]
+pub async fn gitlog_combined_cancel(query_id: u64, window: tauri::Window, state: tauri::State<'_, GitLogState>) -> Result<(), String> {
+    let gl = state.inner().0.clone();
+    let label = window.label().to_string();
+    crate::commands::blocking(move || gl.combined_cancel(&label, query_id)).await
 }
 
 #[cfg(test)]
@@ -318,7 +349,7 @@ mod tests {
     }
 
     /// Opening a file is a click: with the tree's whole share of the pool held, its left side
-    /// still answers, and its children still belong to the selection.
+    /// still answers.
     #[test]
     fn left_side_uses_the_reserved_share() {
         let t = tempfile::tempdir().unwrap();
@@ -347,7 +378,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let g2 = g.clone();
         let worker = std::thread::spawn(move || {
-            let _ = tx.send(g2.combined_left("main", 1, &id, &s1, "a.txt", std::slice::from_ref(&s1)));
+            let _ = tx.send(g2.combined_left("main", 1, 1, &id, &s1, "a.txt", std::slice::from_ref(&s1)));
         });
         let got = rx.recv_timeout(std::time::Duration::from_secs(10));
         drop(held);

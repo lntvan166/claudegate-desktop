@@ -269,7 +269,9 @@ impl GitLog {
     pub fn branches(&self, repos: &[String]) -> Result<Vec<BranchNameView>, String> {
         let cwds: Vec<PathBuf> = repos.iter().map(|r| self.cwd_of(r)).collect::<Result<_, _>>()?;
         let args = branch_refs_args();
-        let lists = par_map(&cwds, |cwd| self.runner.run(None, cwd, &arg_refs(&args)).map(|b| parse_branch_refs(&String::from_utf8_lossy(&b))).unwrap_or_default());
+        // The paging share: a picker listing many repositories never holds the slots kept for
+        // clicks (a file, a message, a blame).
+        let lists = par_map(&cwds, |cwd| self.runner.run_in(None, Share::Paging, cwd, &arg_refs(&args)).map(|b| parse_branch_refs(&String::from_utf8_lossy(&b))).unwrap_or_default());
         // Local and remote-tracking names are kept apart: a local `origin/x` is not the remote one.
         let mut counts: HashMap<BranchRef, usize> = HashMap::new();
         for b in lists.into_iter().flatten() {
@@ -345,6 +347,40 @@ pub async fn gitlog_branches(repos: Vec<String>, state: tauri::State<'_, GitLogS
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Listing branches is background work: with the paging share of the pool held it waits,
+    /// and the reserved slots stay free for a click.
+    #[test]
+    fn branches_use_the_paging_share() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path().join("acme-web");
+        std::fs::create_dir_all(&d).unwrap();
+        let ok = std::process::Command::new("git").args(["init", "-q", "-b", "main"]).current_dir(&d).status().unwrap();
+        assert!(ok.success());
+        let path = d.to_string_lossy().into_owned();
+        let repo = claudegate_core::gitlog::Repo {
+            id: format!("{path}/.git"),
+            name: "acme-web".into(),
+            color: 0,
+            checkouts: vec![claudegate_core::gitlog::Checkout { path, head: String::new(), branch: Some("main".into()), is_main: true }],
+        };
+        let id = repo.id.clone();
+        let g = std::sync::Arc::new(GitLog::new(crate::gitlog::Runner::new(PathBuf::from("git"))));
+        g.set_repos(vec![repo]);
+        let held: Vec<_> = (0..claudegate_core::gitlog::PARALLEL - crate::gitlog::RESERVED).map(|_| g.runner.acquire(None, Share::Paging).ok().expect("a paging slot")).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let g2 = g.clone();
+        let worker = std::thread::spawn(move || {
+            let _ = tx.send(g2.branches(&[id]));
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "branches took a reserved slot");
+        let click = g.runner.acquire(None, Share::Reserved).ok();
+        assert!(click.is_some(), "a click must still find a reserved slot");
+        drop(click);
+        drop(held);
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(10)).expect("branches never ran").is_ok());
+        worker.join().unwrap();
+    }
 
     #[test]
     fn views_serialize_camel_case() {

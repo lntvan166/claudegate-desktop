@@ -30,7 +30,7 @@ fn file<'a>(r: &'a CombinedRepoView, path: &str) -> &'a CombinedFileView {
 /// The left side the UI asks for: the file at `last` without its selected commits, newest first.
 fn left_of(g: &GitLog, q: u64, repo: &str, f: &CombinedFileView) -> CombinedLeftView {
     let without: Vec<String> = f.shas.iter().rev().cloned().collect();
-    g.combined_left("main", q, repo, &f.last, &f.path, &without).unwrap()
+    g.combined_left("main", q, q, repo, &f.last, &f.path, &without).unwrap()
 }
 
 struct Web {
@@ -141,14 +141,14 @@ fn combined_left_takes_selection_out() {
     let fx = fixture();
     select(&fx, 1);
     let without = [fx.c.clone(), fx.a.clone()];
-    let left = fx.g.combined_left("main", 1, &fx.web, &fx.c, "src/header.ts", &without).unwrap();
+    let left = fx.g.combined_left("main", 1, 1, &fx.web, &fx.c, "src/header.ts", &without).unwrap();
     let CombinedLeftView::Text(t) = left else { panic!("{left:?}") };
     let lines: Vec<&str> = t.lines().collect();
     assert_eq!(lines[0], "export const one = 'rin';", "rin's line stays");
     assert_eq!(lines[2], TS_P[2], "a's line is taken out");
     assert_eq!(lines[4], TS_P[4], "c's line is taken out");
     assert_eq!(lines.len(), 5);
-    assert_eq!(fx.g.combined_left("main", 1, &fx.web, &fx.c, "src/header.css", &without).unwrap(), CombinedLeftView::Fallback("conflict"));
+    assert_eq!(fx.g.combined_left("main", 1, 1, &fx.web, &fx.c, "src/header.css", &without).unwrap(), CombinedLeftView::Fallback("conflict"));
 
     let right = fx.g.rev_file(&fx.web, &fx.c, "src/header.ts").unwrap();
     let want = String::from_utf8(git_bytes(&fx.web_dir, &["show", &format!("{}:src/header.ts", fx.c)])).unwrap();
@@ -159,9 +159,9 @@ fn combined_left_takes_selection_out() {
 
     // A newer selection makes the old query's left sides stale; opening a file never supersedes.
     select(&fx, 2);
-    assert_eq!(fx.g.combined_left("main", 1, &fx.web, &fx.c, "src/header.ts", &without), Err(STALE.to_string()));
-    assert!(fx.g.combined_left("main", 2, &fx.web, &fx.c, "src/header.ts", &without).is_ok());
-    assert!(fx.g.combined_left("main", 2, &fx.web, &fx.c, "src/header.ts", &without).is_ok(), "still current after a left side");
+    assert_eq!(fx.g.combined_left("main", 1, 10, &fx.web, &fx.c, "src/header.ts", &without), Err(STALE.to_string()));
+    assert!(fx.g.combined_left("main", 2, 2, &fx.web, &fx.c, "src/header.ts", &without).is_ok());
+    assert!(fx.g.combined_left("main", 2, 2, &fx.web, &fx.c, "src/header.ts", &without).is_ok(), "still current after a left side");
 }
 
 fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
@@ -469,14 +469,84 @@ fn combined_rejects_bad_input() {
 
     select(&fx, 4);
     let ok = [fx.c.clone(), fx.a.clone()];
-    assert_eq!(fx.g.combined_left("main", 4, &fx.web, &fx.c, "src/header.ts", &[fx.c.clone(), "HEAD~1".into()]), Err("Not a commit id".to_string()));
-    assert_eq!(fx.g.combined_left("main", 4, &fx.web, "HEAD", "src/header.ts", &ok), Err("Not a commit id".to_string()));
-    assert_eq!(fx.g.combined_left("main", 4, &fx.web, &fx.c, "../x", &ok), Err("Not a path in the repository".to_string()));
+    assert_eq!(fx.g.combined_left("main", 4, 4, &fx.web, &fx.c, "src/header.ts", &[fx.c.clone(), "HEAD~1".into()]), Err("Not a commit id".to_string()));
+    assert_eq!(fx.g.combined_left("main", 4, 4, &fx.web, "HEAD", "src/header.ts", &ok), Err("Not a commit id".to_string()));
+    assert_eq!(fx.g.combined_left("main", 4, 4, &fx.web, &fx.c, "../x", &ok), Err("Not a path in the repository".to_string()));
     // `without` is bounded like a selection, and names each commit once.
     let too_many: Vec<String> = (0..101u32).map(|i| format!("{i:040x}")).collect();
-    assert_eq!(fx.g.combined_left("main", 4, &fx.web, &fx.c, "src/header.ts", &too_many), Err("Combined Changes shows up to 100 commits".to_string()));
-    assert_eq!(fx.g.combined_left("main", 4, &fx.web, &fx.c, "src/header.ts", &[fx.c.clone(), fx.a.clone(), fx.c.clone()]), Err("A commit is listed twice".to_string()));
-    assert_eq!(fx.g.combined_left("main", 4, "/nowhere/.git", &fx.c, "src/header.ts", &ok), Err("Unknown repository; refresh the list".to_string()));
+    assert_eq!(fx.g.combined_left("main", 4, 4, &fx.web, &fx.c, "src/header.ts", &too_many), Err("Combined Changes shows up to 100 commits".to_string()));
+    assert_eq!(fx.g.combined_left("main", 4, 4, &fx.web, &fx.c, "src/header.ts", &[fx.c.clone(), fx.a.clone(), fx.c.clone()]), Err("A commit is listed twice".to_string()));
+    assert_eq!(fx.g.combined_left("main", 4, 4, "/nowhere/.git", &fx.c, "src/header.ts", &ok), Err("Unknown repository; refresh the list".to_string()));
     // Refused requests superseded nothing.
-    assert!(fx.g.combined_left("main", 4, &fx.web, &fx.c, "src/header.ts", &ok).is_ok());
+    assert!(fx.g.combined_left("main", 4, 4, &fx.web, &fx.c, "src/header.ts", &ok).is_ok());
+}
+
+/// Clearing the selection cancels its read: the tree's git is killed and the read is stale.
+#[test]
+fn combined_cancel_kills_the_read_in_flight() {
+    let (_t, g, slow, _good) = slow_and_good();
+    let g1 = g.clone();
+    let slow_item = item(&slow.0, &slow.1);
+    let q = std::thread::spawn(move || g1.combined("main", 5, &[slow_item]));
+    let tag = Tag { window: channel("main", "combined"), query: 5 };
+    let pids = wait_for_pids(&g, &tag);
+
+    // An older id arriving late kills nothing.
+    g.combined_cancel("main", 3);
+    assert!(g.runner.is_current(&tag), "an older cancel must not supersede a newer read");
+    assert!(pids.iter().all(|p| alive(*p)), "an older cancel must not kill a newer read");
+
+    g.combined_cancel("main", 6);
+    assert_eq!(q.join().unwrap(), Err(STALE.to_string()));
+    all_dead_within(&pids, Duration::from_secs(2));
+    assert!(g.runner.pids(&tag).is_empty());
+}
+
+/// A slow left side of the current selection, running on the left channel as query `left`.
+fn slow_left(g: &Arc<GitLog>, slow: &(String, String), sel: u64, left: u64) -> (std::thread::JoinHandle<Result<CombinedLeftView, String>>, Vec<u32>) {
+    let g1 = g.clone();
+    let (repo, sha) = slow.clone();
+    let h = std::thread::spawn(move || g1.combined_left("main", sel, left, &repo, &sha, "a.txt", std::slice::from_ref(&sha)));
+    let pids = wait_for_pids(g, &Tag { window: channel("main", "combined-left"), query: left });
+    (h, pids)
+}
+
+#[test]
+fn combined_left_runs_on_its_own_channel() {
+    let (_t, g, slow, good) = slow_and_good();
+    // The selection's query is current; its tree is not what this test reads.
+    assert!(g.runner.set_current(&channel("main", "combined"), 1));
+    let (h, pids) = slow_left(&g, &slow, 1, 2);
+    assert!(g.runner.pids(&Tag { window: channel("main", "combined"), query: 1 }).is_empty(), "left reads are not the tree's children");
+
+    // Opening another file supersedes the previous chain, and the selection stays current.
+    let other = g.combined_left("main", 1, 3, &good.0, &good.1, "a.txt", std::slice::from_ref(&good.1)).unwrap();
+    assert_eq!(other, CombinedLeftView::Text(String::new()));
+    assert_eq!(h.join().unwrap(), Err(STALE.to_string()));
+    all_dead_within(&pids, Duration::from_secs(2));
+    assert!(g.runner.is_current(&Tag { window: channel("main", "combined"), query: 1 }));
+
+    // An older left id arriving late is refused and kills nothing.
+    let (h, pids) = slow_left(&g, &slow, 1, 7);
+    assert_eq!(g.combined_left("main", 1, 4, &good.0, &good.1, "a.txt", std::slice::from_ref(&good.1)), Err(STALE.to_string()));
+    assert!(pids.iter().all(|p| alive(*p)), "an older left read must not kill a newer one");
+
+    // A new selection kills the left chain of the old one.
+    let v = g.combined("main", 8, &[item(&good.0, &good.1)]).unwrap();
+    assert_eq!(v.repos[0].error, None);
+    assert_eq!(h.join().unwrap(), Err(STALE.to_string()));
+    all_dead_within(&pids, Duration::from_secs(2));
+    // ...and the old selection's left reads are refused, even with a fresh left id.
+    assert_eq!(g.combined_left("main", 1, 20, &good.0, &good.1, "a.txt", std::slice::from_ref(&good.1)), Err(STALE.to_string()));
+    assert!(g.combined_left("main", 8, 21, &good.0, &good.1, "a.txt", std::slice::from_ref(&good.1)).is_ok());
+}
+
+#[test]
+fn combined_cancel_kills_the_left_read() {
+    let (_t, g, slow, _good) = slow_and_good();
+    assert!(g.runner.set_current(&channel("main", "combined"), 1));
+    let (h, pids) = slow_left(&g, &slow, 1, 2);
+    g.combined_cancel("main", 3);
+    assert_eq!(h.join().unwrap(), Err(STALE.to_string()));
+    all_dead_within(&pids, Duration::from_secs(2));
 }

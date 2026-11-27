@@ -237,8 +237,10 @@ export interface Api {
   gitlogOpenRemote(repo: string, sha: string): Promise<boolean>;
   /** Combined Changes (gitlog_combined.rs): the selected commits, each file once. A refused request supersedes nothing. */
   gitlogCombined(queryId: number, items: { repo: string; sha: string }[]): Promise<CombinedView>;
-  /** A file's left side without the selected commits (`without`, newest first), for the query `queryId`. */
-  gitlogCombinedLeft(queryId: number, repo: string, last: string, path: string, without: string[]): Promise<CombinedLeft>;
+  /** A file's left side without the selected commits (`without`, newest first), for the selection's query `queryId`; the read is query `leftId` on its own channel (a newer left read supersedes it). */
+  gitlogCombinedLeft(queryId: number, repo: string, last: string, path: string, without: string[], leftId: number): Promise<CombinedLeft>;
+  /** Cancels the window's combined read in flight (the selection went back to one commit). */
+  gitlogCombinedCancel(queryId: number): Promise<void>;
   /** The file `path` at commit `rev`. */
   gitlogRevFile(repo: string, rev: string, path: string): Promise<FileView>;
   /** Who last changed the 1-based `line` of `path` as of commit `rev`; null when git has no answer. A newer call supersedes this one. */
@@ -325,7 +327,8 @@ const tauriApi: Api = {
   gitlogWorktreeFile: (repo, path, source) => invoke<string>("gitlog_worktree_file", { repo, path, source }),
   gitlogOpenRemote: (repo, sha) => invoke<boolean>("gitlog_open_remote", { repo, sha }),
   gitlogCombined: (queryId, items) => invoke<CombinedView>("gitlog_combined", { queryId, items }),
-  gitlogCombinedLeft: (queryId, repo, last, path, without) => invoke<CombinedLeft>("gitlog_combined_left", { queryId, repo, last, path, without }),
+  gitlogCombinedLeft: (queryId, repo, last, path, without, leftId) => invoke<CombinedLeft>("gitlog_combined_left", { queryId, repo, last, path, without, leftId }),
+  gitlogCombinedCancel: (queryId) => invoke<void>("gitlog_combined_cancel", { queryId }),
   gitlogRevFile: (repo, rev, path) => invoke<FileView>("gitlog_rev_file", { repo, rev, path }),
   gitlogBlame: (queryId, repo, rev, path, line) => invoke<BlameLine | null>("gitlog_blame", { queryId, repo, rev, path, line }),
   gitlogBlameCancel: (queryId) => invoke<void>("gitlog_blame_cancel", { queryId }),
@@ -424,8 +427,9 @@ export const gitlogWorktreeFile = async (repo: string, path: string, source?: st
   (await api()).gitlogWorktreeFile(repo, path, source);
 export const gitlogOpenRemote = async (repo: string, sha: string) => (await api()).gitlogOpenRemote(repo, sha);
 export const gitlogCombined = async (queryId: number, items: { repo: string; sha: string }[]) => (await api()).gitlogCombined(queryId, items);
-export const gitlogCombinedLeft = async (queryId: number, repo: string, last: string, path: string, without: string[]) =>
-  (await api()).gitlogCombinedLeft(queryId, repo, last, path, without);
+export const gitlogCombinedLeft = async (queryId: number, repo: string, last: string, path: string, without: string[], leftId: number) =>
+  (await api()).gitlogCombinedLeft(queryId, repo, last, path, without, leftId);
+export const gitlogCombinedCancel = async (queryId: number) => (await api()).gitlogCombinedCancel(queryId);
 export const gitlogRevFile = async (repo: string, rev: string, path: string) => (await api()).gitlogRevFile(repo, rev, path);
 export const gitlogBlame = async (queryId: number, repo: string, rev: string, path: string, line: number) =>
   (await api()).gitlogBlame(queryId, repo, rev, path, line);

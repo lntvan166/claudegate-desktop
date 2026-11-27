@@ -111,6 +111,7 @@ pub fn run() {
             gitlog::gitlog_rev_file,
             gitlog_combined::gitlog_combined,
             gitlog_combined::gitlog_combined_left,
+            gitlog_combined::gitlog_combined_cancel,
             gitlog_compare::gitlog_compare,
             gitlog_compare::gitlog_compare_files,
             gitlog_compare::gitlog_compare_commits,
